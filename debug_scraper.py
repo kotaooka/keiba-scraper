@@ -127,10 +127,18 @@ def main():
         print(report_o)
         (OUTPUT_DIR / "report_odds.txt").write_text(report_o, encoding="utf-8")
 
+        # 結果（レース確定後のみ。検証機能の着順・払戻が読めないとき用）
+        url_result = f"https://nar.netkeiba.com/race/result.html?race_id={race_id}"
+        html_result = fetch(page, url_result, "結果")
+        (OUTPUT_DIR / "result.html").write_text(html_result, encoding="utf-8")
+        report_r = analyze(html_result, "結果")
+        print(report_r)
+        (OUTPUT_DIR / "report_result.txt").write_text(report_r, encoding="utf-8")
+
         browser.close()
 
     print(f"\n✅ デバッグファイルを {OUTPUT_DIR.resolve()} に保存しました。")
-    print("   report_shutuba.txt と report_odds.txt の内容を AI に貼り付けて、セレクタの修正を依頼してください。")
+    print("   report_shutuba.txt・report_odds.txt・report_result.txt の内容を AI に貼り付けて、セレクタの修正を依頼してください。")
 
 if __name__ == "__main__":
     main()

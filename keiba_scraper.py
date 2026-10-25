@@ -7,6 +7,8 @@
 #   python keiba_scraper.py 盛岡 5           … 当日の盛岡5R を直接取得
 #   python keiba_scraper.py 盛岡 5 1025      … 日付を指定（YYYYMMDD / MMDD / M/D も可）
 
+import json
+import random
 import re
 import subprocess
 import sys
@@ -34,11 +36,13 @@ except ImportError:
 KEIBA_CODES = {
     "門別": "30", "盛岡": "35", "水沢": "36",
     "浦和": "42", "船橋": "43", "大井": "44", "川崎": "45",
-    "金沢": "46", "笠松": "48", "名古屋": "49",
+    "金沢": "46", "笠松": "47", "名古屋": "48",
     "園田": "50", "姫路": "51", "高知": "54", "佐賀": "55",
     "帯広(ば)": "65",
 }
 CODE_TO_NAME = {v: k for k, v in KEIBA_CODES.items()}
+# コマンドラインで受け付ける別名
+NAME_ALIASES = {"帯広": "帯広(ば)", "ばんえい": "帯広(ば)", "帯広ばんえい": "帯広(ば)"}
 
 # keiba.go.jp (NAR公式) の競馬場コード — netkeiba と異なる
 # 姫路は未確認。帯広(ばんえい)は未定義のため過去成績の補完をしない
@@ -61,20 +65,27 @@ UA = (
 COND_MAP = {"稍": "稍重", "不": "不良", "良": "良", "重": "重",
             "稍重": "稍重", "不良": "不良"}
 
+# 買い目に採用する期待値の下限。
+# 控除率（約20〜25%）を越えるには市場より大きく高い確率を見積もる必要があり、
+# 多数の候補から期待値の最大値を選ぶと推定の上振れを拾いやすいので、1.0 より高く取る。
+# 検証（verify）の実績を見て決め直す
+EV_MIN = 1.2
+
 # AI への指示文（出力テキストの末尾に付ける）。文言を変えるときはここだけ直す
+# {EV_MIN} は実行時に EV_MIN の値に置き換わる
 PROMPT_TEXT = """
 【AIへの指示】
 上記データだけを使って、このレースの買い目を決めてください。
 
 ■ 目的と制約
 ・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。
-・予算は1000円、最大3点、各100円単位。期待値が1.0以上の買い目がなければ「見送り」と答えてください。
+・予算は1000円、最大3点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
 
 ■ 手順
-1. 市場評価：単勝オッズから各馬の市場勝率 =（1/オッズ）÷ 全出走馬の（1/オッズ）の合計 を計算する。単勝が「--」の馬は計算から外し、その旨を書く。
+1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
 2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。
 3. 各馬の評価：次の観点で、市場評価より上か下かを判断する。
    ・人気と着順：過去走で人気より上の着順に来ているか（人気以上に走る馬か、人気を裏切る馬か）
@@ -87,20 +98,30 @@ PROMPT_TEXT = """
    ・騎手：乗り替わりの有無と騎手コンビ成績
    ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
 4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
-5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値1.0以上の候補から、期待値の高い順に最大3点を選び、資金を配分する。
+5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大3点を選び、資金を配分する。
 
 ■ 出力フォーマット（この順で出力）
-1. 【前提】出走頭数、欠損データ、計算から外した馬
+1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬
 2. 【展開予想】逃げ・先行候補とペースを2〜3行で
 3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
 4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）
 5. 【総評】50字以内
+6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+#PRED
+馬番,推定勝率,推定複勝率
+1,12.5,35.0
+#BET
+券種,組み合わせ,金額
+ワイド,3-7,500
 """
 
 TIMEOUT_PAGE     = 20000  # ページロード待機 (ms)
 TIMEOUT_SELECTOR = 10000  # セレクタ出現待機 (ms)
 RETRY            = 2      # ページ取得の試行回数
 REQUEST_INTERVAL = 2.0    # サイトへのアクセス間隔の下限 (秒)。サーバ負荷を避けるため短くしない
+
+
+RECORD_DIR = OUTPUT_DIR / "records"  # 予想と結果の記録（1レース1ファイル）
 
 
 # ========== 表示幅（全角=2）を考慮した整形 ==========
@@ -735,29 +756,51 @@ def _extract_combos(html, all_combos):
             }
 
 
+# オッズ表の中身を1本の文字列にする（切替前後の比較用）
+_COMBO_SIG_JS = """() => [...document.querySelectorAll('td.Odds[cart-item]')]
+    .map(e => e.getAttribute('cart-item') + ':' + e.innerText).join('|')"""
+
+# 表の中身が切替前と違い、オッズの数字が入っていれば true
+_COMBO_CHANGED_JS = """(before) => {
+    const cells = [...document.querySelectorAll('td.Odds[cart-item]')];
+    const sig = cells.map(e => e.getAttribute('cart-item') + ':' + e.innerText).join('|');
+    return cells.length > 0 && sig !== before && cells.some(e => /\\d+\\.\\d/.test(e.innerText));
+}"""
+
+
 def scrape_combo_odds(page, url, label):
+    """人気上位10組と注記（読めなかった部分があれば）を返す"""
     html = fetch_page(page, url, "td.Odds[cart-item]")
     if not html:
-        return []
+        return [], ""
     all_combos = {}
     _extract_combos(html, all_combos)
 
     # 三連複は軸馬ごとに表が切り替わるので、全軸馬を順に読む
+    note = ""
     if "type=b7" in url:
         options = BeautifulSoup(html, "html.parser").select("#list_select_horse option")
         values = [o.get("value") for o in options if o.get("value")]
+        skipped = []
         for val in values[1:]:
             try:
+                before = page.evaluate(_COMBO_SIG_JS)
                 wait_interval()
                 page.select_option("#list_select_horse", value=val)
-                page.wait_for_selector("td.Odds[cart-item]", timeout=TIMEOUT_SELECTOR)
+                # 切替前の表にも td.Odds[cart-item] はあるため、セレクタ待ちでは古い表を読んでしまう。
+                # 表の中身（組み合わせとオッズ）が切替前から変わり、オッズの数字が入るまで待つ
+                page.wait_for_function(_COMBO_CHANGED_JS, arg=before, timeout=TIMEOUT_SELECTOR)
                 _extract_combos(page.content(), all_combos)
             except Exception:
-                continue
+                skipped.append(val)
+        if skipped:
+            note = (f"三連複オッズは軸 {len(values)}頭中 {len(skipped)}頭分の表を読めなかった"
+                    "（人気上位10組が不完全な可能性）")
+            print(f"  ※{note}")
 
     top = sorted(all_combos.values(), key=lambda x: x["オッズ"])[:10]
     print(f"  {label}: {len(top)}組取得（全{len(all_combos)}組中）")
-    return [{"組み合わせ": c["組み合わせ"], "オッズ": c["オッズ表示"]} for c in top]
+    return [{"組み合わせ": c["組み合わせ"], "オッズ": c["オッズ表示"]} for c in top], note
 
 
 # ========== データマージ・チェック ==========
@@ -795,6 +838,28 @@ def add_derived_fields(h, race_date):
         h["斤量差"] = f"{diff:+.1f}"
     except ValueError:
         pass
+
+
+def add_market_prob(horses):
+    """単勝オッズから各馬の市場勝率(%)を計算して h["市場勝率"] に入れる。
+    市場勝率 =（1/オッズ）÷ 全出走馬の（1/オッズ）の合計。
+    返り値は単勝の払戻率の目安 = 1 ÷ Σ(1/オッズ)（オッズの端数切り捨てがあるので概算）"""
+    inv = {}
+    for h in horses:
+        if h.get("取消"):
+            continue
+        try:
+            odds = float(h.get("単勝", ""))
+        except ValueError:
+            continue
+        if odds > 0:
+            inv[h["馬番"]] = 1 / odds
+    total = sum(inv.values())
+    for h in horses:
+        h["市場勝率"] = inv[h["馬番"]] / total * 100 if total and h["馬番"] in inv else None
+    # 単勝が欠けた馬がいると Σ(1/オッズ) が小さくなり払戻率を過大に見積もるので、全頭そろったときだけ返す
+    active = sum(1 for h in horses if not h.get("取消"))
+    return 1 / total if total and len(inv) == active else None
 
 
 def check_data(horses):
@@ -846,7 +911,7 @@ def copy_to_clipboard(text):
 # ========== AI貼り付け用テキスト整形 ==========
 
 def format_for_ai(horses, keibajo, date, race_no, race_info=None,
-                  wide_top=None, sanren_top=None, warnings=None):
+                  wide_top=None, sanren_top=None, warnings=None, payout_rate=None):
     d = f"{date[:4]}/{date[4:6]}/{date[6:]}"
     ri = race_info or {}
     title = f"{d} {keibajo} {race_no}R"
@@ -862,10 +927,13 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
         + (f" / {ri['頭数']}頭" if ri.get("頭数") else ""),
         "",
     ]
+    if payout_rate:
+        lines += [f"単勝の払戻率（オッズから逆算した目安）: {payout_rate * 100:.1f}%"
+                  "　※市場勝率は控除分を除いて合計100%にそろえた値", ""]
 
     cols = [("馬番", 4, ">"), ("馬名", 20, "<"), ("性齢", 5, "<"), ("斤量", 5, ">"),
             ("騎手", 11, "<"), ("調教師", 11, "<"), ("馬体重", 9, ">"),
-            ("単勝", 7, ">"), ("人気", 5, ">"), ("複勝", 12, ">"), ("脚質", 5, "<")]
+            ("単勝", 7, ">"), ("市場勝率", 9, ">"), ("人気", 5, ">"), ("複勝", 12, ">"), ("脚質", 5, "<")]
     lines.append(" ".join(pad(c, w, a) for c, w, a in cols))
     rule = "-" * (sum(w for _, w, _ in cols) + len(cols) - 1)
     lines.append(rule)
@@ -879,7 +947,9 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
         weight_str = f"{weight}({diff:+d})" if isinstance(weight, int) else str(weight)
         vals = [h["馬番"], h["馬名"], h.get("性齢", ""), h.get("斤量", ""),
                 h.get("騎手", ""), h.get("調教師", ""), weight_str,
-                h.get("単勝", "--"), h.get("人気", ""), h.get("複勝", "--"), h.get("脚質", "")]
+                h.get("単勝", "--"),
+                f"{h['市場勝率']:.1f}%" if h.get("市場勝率") is not None else "--",
+                h.get("人気", ""), h.get("複勝", "--"), h.get("脚質", "")]
         lines.append(" ".join(pad(v, w, a) for v, (_, w, a) in zip(vals, cols)))
     lines.append(rule)
 
@@ -935,7 +1005,7 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
     if warnings:
         lines += ["", "【データの欠損】"] + [f"・{w}" for w in warnings]
 
-    lines += ["", *PROMPT_TEXT.strip().split("\n")]
+    lines += ["", *PROMPT_TEXT.replace("{EV_MIN}", f"{EV_MIN:.1f}").strip().split("\n")]
     return "\n".join(line.rstrip() for line in lines)
 
 
@@ -981,14 +1051,17 @@ def collect_race(page, keibajo_name, race_date, race_no):
     print("\n[単勝・複勝オッズ]")
     tan_fuku = scrape_tan_fuku(page, odds_url + "b1")
     print("\n[ワイドオッズ]")
-    wide_top = scrape_combo_odds(page, odds_url + "b5", "ワイド")
+    wide_top, _ = scrape_combo_odds(page, odds_url + "b5", "ワイド")
     print("\n[三連複オッズ]")
-    sanren_top = scrape_combo_odds(page, odds_url + "b7", "三連複")
+    sanren_top, sanren_note = scrape_combo_odds(page, odds_url + "b7", "三連複")
 
     merged = merge_data(horses, tan_fuku)
+    payout_rate = add_market_prob(merged)
     warnings = check_data(merged)
+    if sanren_note:
+        warnings.append(sanren_note)
     text = format_for_ai(merged, keibajo_name, race_date, race_no, race_info,
-                         wide_top, sanren_top, warnings)
+                         wide_top, sanren_top, warnings, payout_rate)
 
     print("\n" + "=" * 70)
     print(text)
@@ -1007,6 +1080,488 @@ def collect_race(page, keibajo_name, race_date, race_no):
     else:
         print("\nクリップボードへのコピーに失敗しました。上のファイルを開いてコピーしてください。")
 
+    record = new_record(race_id, keibajo_name, race_date, race_no, race_info, merged, payout_rate)
+    save_record(record)
+    ask_ai_answer(record, path.with_name(path.stem + "_ai.txt"), text)
+
+
+# ========== 予想の記録 ==========
+
+def new_record(race_id, keibajo, race_date, race_no, race_info, horses, payout_rate):
+    """収集時点のオッズと市場勝率を記録用の dict にする（AI の回答と結果はあとで入る）"""
+    ri = race_info or {}
+    return {
+        "race_id": race_id,
+        "日付": race_date,
+        "競馬場": keibajo,
+        "レース番号": race_no,
+        "レース名": ri.get("レース名", ""),
+        "クラス": ri.get("クラス", ""),
+        "収集時刻": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "EV_MIN": EV_MIN,
+        "払戻率": payout_rate,
+        "馬": {
+            str(int(h["馬番"])): {"馬名": h.get("馬名", ""), "単勝": h.get("単勝", "--"),
+                        "市場勝率": h.get("市場勝率"), "取消": bool(h.get("取消"))}
+            for h in horses
+        },
+        "AI": None,
+        "結果": None,
+    }
+
+
+def record_path(race_id):
+    return RECORD_DIR / f"{race_id}.json"
+
+
+def save_record(record):
+    RECORD_DIR.mkdir(parents=True, exist_ok=True)
+    record_path(record["race_id"]).write_text(
+        json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def load_records():
+    if not RECORD_DIR.exists():
+        return []
+    recs = []
+    for f in sorted(RECORD_DIR.glob("*.json")):
+        try:
+            recs.append(json.loads(f.read_text(encoding="utf-8")))
+        except (OSError, ValueError) as e:
+            print(f"  記録を読めませんでした: {f.name}（{e}）")
+    return recs
+
+
+def read_clipboard():
+    """Windows のクリップボードの文字列を返す。読めなければ空文字"""
+    if sys.platform == "win32":
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw"],
+                capture_output=True, check=True)
+            return r.stdout.decode("utf-8", errors="replace")
+        except Exception:
+            pass
+    try:
+        import tkinter
+        root = tkinter.Tk()
+        root.withdraw()
+        text = root.clipboard_get()
+        root.destroy()
+        return text
+    except Exception:
+        return ""
+
+
+def _num(text):
+    """'12.5' '12.5%' '1,000円' などを float にする。読めなければ None"""
+    t = re.sub(r"[%％円,，\s]", "", str(text))
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def normalize_bet_type(name):
+    """券種名をそろえる（三連複→3連複 など）"""
+    t = re.sub(r"\s", "", str(name)).replace("三", "3").replace("３", "3")
+    return {"3複": "3連複", "3単": "3連単"}.get(t, t)
+
+
+# 券種ごとの (組み合わせの頭数, 着順の順序を区別するか)
+BET_SPECS = {
+    "単勝": (1, False), "複勝": (1, False),
+    "枠連": (2, False), "馬連": (2, False), "ワイド": (2, False),
+    "枠単": (2, True), "馬単": (2, True),
+    "3連複": (3, False), "3連単": (3, True),
+}
+
+
+def combo_key(bet_type, numbers):
+    """組み合わせを照合用の文字列にする。順序を区別しない券種は昇順に並べる"""
+    nums = [str(int(n)) for n in numbers]
+    if not BET_SPECS.get(bet_type, (0, False))[1]:
+        nums = sorted(nums, key=int)
+    return "-".join(nums)
+
+
+def parse_ai_block(text):
+    """AI の回答から #PRED と #BET のブロックを読む。#PRED がなければ None を返す。
+    返り値: {"予想": {馬番: {"勝率": %, "複勝率": %}}, "買い目": [{"券種","組み合わせ","金額"}]}"""
+    lines = [ln.strip() for ln in text.replace("\r", "").split("\n")]
+    if "#PRED" not in lines:
+        return None
+    # 指示文の書式例にも #PRED があるので、最後に出てくる #PRED から読む
+    lines = lines[len(lines) - 1 - lines[::-1].index("#PRED"):]
+    pred, bets, section = {}, [], None
+    for ln in lines:
+        if ln in ("#PRED", "#BET"):
+            section = ln
+            continue
+        if not ln or ln.startswith("```"):
+            if section == "#BET" and ln.startswith("```"):
+                break
+            continue
+        cells = [c.strip() for c in re.split(r"[,，\t]", ln)]
+        if section == "#PRED" and len(cells) >= 3 and cells[0].isdigit():
+            win, place = _num(cells[1]), _num(cells[2])
+            if win is not None and place is not None:
+                pred[str(int(cells[0]))] = {"勝率": win, "複勝率": place}
+        elif section == "#BET" and len(cells) >= 3:
+            bet_type = normalize_bet_type(cells[0])
+            nums = re.findall(r"\d+", cells[1])
+            amount = _num(cells[2])
+            if bet_type in BET_SPECS and nums and amount:
+                bets.append({"券種": bet_type, "組み合わせ": combo_key(bet_type, nums),
+                             "金額": int(amount)})
+    if not pred:
+        return None
+    return {"予想": pred, "買い目": bets}
+
+
+def ask_ai_answer(record, ai_text_path, scraped_text=None):
+    """AI の回答をクリップボードから読み、記録に加える。s で記録しない"""
+    while True:
+        ans = input("\nAI の回答（記録用ブロックを含む全文）をコピーしたら Enter"
+                    " [s=記録しない]: ").strip().lower()
+        if ans == "s":
+            print("  記録しませんでした（あとで run.bat record で記録できます）。")
+            return False
+        text = read_clipboard()
+        if scraped_text and text.strip() == scraped_text.strip():
+            print("  クリップボードの中身が収集データのままです。AI の回答をコピーしてください。")
+            continue
+        parsed = parse_ai_block(text)
+        if not parsed:
+            print("  記録用ブロック（#PRED）が見つかりません。回答の全文をコピーし直してください。")
+            continue
+        total = sum(v["勝率"] for v in parsed["予想"].values())
+        if abs(total - 100) > 5:
+            print(f"  ※推定勝率の合計が {total:.1f}% です（100% から外れています）。そのまま記録します。")
+        record["AI"] = {**parsed, "記録時刻": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        save_record(record)
+        ai_text_path.write_text(text, encoding="utf-8")
+        bets = parsed["買い目"]
+        desc = " / ".join(f"{b['券種']} {b['組み合わせ']} {b['金額']}円" for b in bets) or "見送り"
+        print(f"  記録しました: {len(parsed['予想'])}頭の予想、買い目 {desc}")
+        return True
+
+
+def run_record():
+    """AI の回答が未記録のレースを選んで、あとから記録する"""
+    recs = [r for r in load_records() if not r.get("AI")]
+    if not recs:
+        print("\nAI の回答が未記録のレースはありません。")
+        return
+    recs = recs[-15:]
+    print("\nAI の回答が未記録のレース（新しい順に最大15件）:")
+    recs.reverse()
+    for i, r in enumerate(recs, 1):
+        print(f"  {i:2d}. {r['日付']} {r['競馬場']} {r['レース番号']}R {r.get('レース名', '')}")
+    r = recs[ask_choice("\n番号: ", len(recs)) - 1]
+    path = OUTPUT_DIR / f"{r['日付']}_{r['競馬場']}{r['レース番号']}R_ai.txt"
+    ask_ai_answer(r, path)
+
+
+# ========== レース結果の取得 ==========
+
+# 着順表と払戻表が描画されるまで待つ（クラス名に頼らず、見出しの文字で判定する）
+_RESULT_READY_JS = """() => {
+    const hasOrder = [...document.querySelectorAll('table')].some(
+        t => t.innerText.includes('着順') && t.innerText.includes('馬番')
+             && t.querySelectorAll('td').length > 10);
+    const hasPay = /単勝[\\s\\S]{0,80}円/.test(document.body.innerText);
+    return hasOrder && hasPay;
+}"""
+
+
+def _cell_texts(tr):
+    return [re.sub(r"\s+", "", c.get_text()) for c in tr.find_all(["th", "td"])]
+
+
+def parse_result(html):
+    """結果ページから着順と払戻を読む。
+    返り値: {"着順": {馬番: "1" / "取消" など}, "払戻": {券種: {組み合わせ: 円(100円あたり)}}, "注記": [...]}"""
+    soup = BeautifulSoup(html, "html.parser")
+    order, notes = {}, []
+
+    # 着順表: 見出し行に「着順」と「馬番」がある表
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        head = next((tr for tr in rows if tr.find("th")), None)
+        if not head:
+            continue
+        headers = _cell_texts(head)
+        if "着順" not in headers or "馬番" not in headers:
+            continue
+        i_rank, i_no = headers.index("着順"), headers.index("馬番")
+        for tr in rows:
+            tds = tr.find_all("td")
+            if len(tds) <= max(i_rank, i_no):
+                continue
+            no = re.sub(r"\D", "", tds[i_no].get_text())
+            rank = re.sub(r"\s+", "", tds[i_rank].get_text())
+            if no:
+                order[str(int(no))] = rank
+        if order:
+            break
+
+    # 払戻表: 行の先頭が券種名で、続くセルが「組み合わせ」「払戻（○円）」の行
+    payouts = {}
+    for tr in soup.find_all("tr"):
+        cells = tr.find_all(["th", "td"])
+        if len(cells) < 3:
+            continue
+        bet_type = normalize_bet_type(cells[0].get_text())
+        if bet_type not in BET_SPECS:
+            continue
+        k = BET_SPECS[bet_type][0]
+        nums = re.findall(r"\d+", cells[1].get_text(" "))
+        pays = [int(x.replace(",", "")) for x in re.findall(r"([\d,]+)\s*円", cells[2].get_text(" "))]
+        if not pays:
+            continue
+        combos = [nums[i:i + k] for i in range(0, len(nums), k)]
+        if len(combos) != len(pays) or any(len(c) != k for c in combos):
+            notes.append(f"{bet_type}の払戻を読めませんでした（組み合わせ {len(combos)} / 払戻 {len(pays)}）")
+            continue
+        table = payouts.setdefault(bet_type, {})
+        for c, pay in zip(combos, pays):
+            table[combo_key(bet_type, c)] = pay
+    return {"着順": order, "払戻": payouts, "注記": notes}
+
+
+def scrape_result(page, race_id):
+    url = f"{NETKEIBA}/race/result.html?race_id={race_id}"
+    html = fetch_page(page, url)
+    if not html:
+        return None
+    try:
+        page.wait_for_function(_RESULT_READY_JS, timeout=TIMEOUT_SELECTOR)
+        html = page.content()
+    except PlaywrightTimeout:
+        pass  # 未確定のときは表が出ない。取れた分で判定する
+    res = parse_result(html)
+    finished = any(v.isdigit() for v in res["着順"].values())
+    if not finished or "単勝" not in res["払戻"]:
+        return None
+    res["取得時刻"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return res
+
+
+# ========== 検証 ==========
+
+def settle_bets(record):
+    """買い目ごとの払戻を計算する。払戻が読めていない券種があれば None を返す
+    （出走取消を含む買い目は返還として購入額をそのまま戻す）"""
+    res, ai = record["結果"], record["AI"]
+    scratched = {no for no, rank in res["着順"].items() if rank in ("取消", "除外")}
+    rows = []
+    for b in ai["買い目"]:
+        if set(b["組み合わせ"].split("-")) & scratched:
+            ret, status = b["金額"], "返還"
+        elif b["券種"] not in res["払戻"]:
+            return None
+        else:
+            pay = res["払戻"][b["券種"]].get(b["組み合わせ"])
+            ret = b["金額"] // 100 * pay if pay else 0
+            status = "的中" if pay else "不的中"
+        rows.append({**b, "払戻": ret, "判定": status})
+    return rows
+
+
+def horse_rows(record):
+    """キャリブレーション用に、馬ごとの (市場勝率, AI勝率, AI複勝率, 1着か, 複勝圏か) を作る。
+    取消・除外の馬を除き、市場勝率と AI 勝率は残った馬で合計1にそろえ直す"""
+    res, pred = record["結果"], record["AI"]["予想"]
+    runners = [no for no, rank in res["着順"].items() if rank not in ("取消", "除外")]
+    rows = []
+    for no in runners:
+        m = record["馬"].get(no, {}).get("市場勝率")
+        a = pred.get(no)
+        if m is None or a is None:
+            return []  # 欠けがあるレースは比較が公平でないので使わない
+        rows.append({"馬番": no, "市場": m / 100, "AI勝率": a["勝率"] / 100,
+                     "AI複勝率": a["複勝率"] / 100, "着順": res["着順"][no]})
+    sm, sa = sum(r["市場"] for r in rows), sum(r["AI勝率"] for r in rows)
+    place_n = 3 if len(runners) >= 8 else 2  # 7頭以下は複勝が2着まで
+    for r in rows:
+        r["市場"] /= sm
+        r["AI勝率"] /= sa
+        r["1着"] = 1 if r["着順"] == "1" else 0
+        r["複勝圏"] = 1 if r["着順"].isdigit() and int(r["着順"]) <= place_n else 0
+    return rows
+
+
+def bootstrap_ci(values_fn, n_items, b=2000, seed=0):
+    """レース単位で復元抽出して統計量の95%区間（2.5%・97.5%点）を返す"""
+    rng = random.Random(seed)
+    stats = []
+    for _ in range(b):
+        idx = [rng.randrange(n_items) for _ in range(n_items)]
+        v = values_fn(idx)
+        if v is not None:
+            stats.append(v)
+    if not stats:
+        return None, None
+    stats.sort()
+    return stats[int(0.025 * len(stats))], stats[int(0.975 * len(stats)) - 1]
+
+
+def calibration_table(pairs, edges):
+    """(予測確率, 実績0/1) の組を区間に分け、件数・予測の平均・実績の割合を返す"""
+    out = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        sel = [(p, y) for p, y in pairs if lo <= p * 100 < hi or (hi == 100 and p * 100 == 100)]
+        if sel:
+            out.append((lo, hi, len(sel), sum(p for p, _ in sel) / len(sel) * 100,
+                        sum(y for _, y in sel) / len(sel) * 100))
+    return out
+
+
+def summarize(records):
+    """記録済みのレースから回収率・キャリブレーションを集計してテキストを返す"""
+    lines = ["=" * 60, "  検証結果", "=" * 60]
+    races = [r for r in records if r.get("AI") and r.get("結果")]
+    lines.append(f"対象: 結果まで記録済みのレース {len(races)}件"
+                 f"（AI 回答なし {sum(1 for r in records if not r.get('AI'))}件・"
+                 f"結果未取得 {sum(1 for r in records if r.get('AI') and not r.get('結果'))}件は除外）")
+    if not races:
+        return "\n".join(lines)
+
+    # ---- 回収率 ----
+    bet_rows, per_race, skipped, unknown = [], [], 0, 0
+    for r in races:
+        rows = settle_bets(r)
+        if rows is None:
+            unknown += 1
+            continue
+        if not rows:
+            skipped += 1
+            continue
+        for row in rows:
+            bet_rows.append({"race_id": r["race_id"], "日付": r["日付"], "競馬場": r["競馬場"],
+                             "レース番号": r["レース番号"], **row})
+        per_race.append((sum(x["金額"] for x in rows), sum(x["払戻"] for x in rows)))
+    lines += ["", "【回収率】",
+              f"  買ったレース {len(per_race)}件 / 見送り {skipped}件"
+              + (f" / 払戻を読めず除外 {unknown}件" if unknown else "")]
+    if per_race:
+        spent = sum(a for a, _ in per_race)
+        ret = sum(b for _, b in per_race)
+        hit_races = sum(1 for a, b in per_race if b > 0)
+        lo, hi = bootstrap_ci(
+            lambda idx: (sum(per_race[i][1] for i in idx) / s if (s := sum(per_race[i][0] for i in idx)) else None),
+            len(per_race))
+        lines.append(f"  購入 {spent:,}円 → 払戻 {ret:,}円　回収率 {ret / spent * 100:.1f}%"
+                     + (f"（95%区間 {lo * 100:.0f}〜{hi * 100:.0f}%）" if lo is not None else ""))
+        lines.append(f"  的中したレース {hit_races}/{len(per_race)}件")
+        by_type = {}
+        for x in bet_rows:
+            t = by_type.setdefault(x["券種"], [0, 0, 0, 0])
+            t[0] += 1
+            t[1] += x["判定"] == "的中"
+            t[2] += x["金額"]
+            t[3] += x["払戻"]
+        for k, (n, hit, a, b) in by_type.items():
+            lines.append(f"  {pad(k, 6)} {n:3d}点 的中{hit:3d}点　購入 {a:,}円 → {b:,}円（{b / a * 100:.0f}%）")
+
+    # ---- 推定確率の精度 ----
+    race_rows = [rows for r in races if (rows := horse_rows(r))]
+    lines += ["", "【推定勝率の精度（ブライアスコア、小さいほど良い）】"]
+    if race_rows:
+        def brier(rows, key):
+            return sum((x[key] - x["1着"]) ** 2 for x in rows)
+        bm = [brier(rows, "市場") for rows in race_rows]
+        ba = [brier(rows, "AI勝率") for rows in race_rows]
+        n = len(race_rows)
+        diff = [a - m for a, m in zip(ba, bm)]
+        lo, hi = bootstrap_ci(lambda idx: sum(diff[i] for i in idx) / len(idx), n)
+        lines.append(f"  対象 {n}レース　市場 {sum(bm) / n:.4f} / AI {sum(ba) / n:.4f}")
+        lines.append(f"  AI − 市場 = {sum(diff) / n:+.4f}（95%区間 {lo:+.4f}〜{hi:+.4f}）")
+        if hi < 0:
+            lines.append("  → AI の推定勝率は市場（単勝オッズ）より当たっている")
+        elif lo > 0:
+            lines.append("  → AI の推定勝率は市場（単勝オッズ）より外れている")
+        else:
+            lines.append("  → AI と市場の差は、このレース数では区別できない")
+
+        all_rows = [x for rows in race_rows for x in rows]
+        edges = [0, 5, 10, 20, 35, 100]
+        lines += ["", "【キャリブレーション：推定勝率】（推定○%の馬が実際に何%勝ったか）",
+                  "  区間        件数  AI推定  実際    |  件数  市場推定  実際"]
+        ai_tab = {(lo, hi): v for lo, hi, *v in calibration_table([(x["AI勝率"], x["1着"]) for x in all_rows], edges)}
+        mk_tab = {(lo, hi): v for lo, hi, *v in calibration_table([(x["市場"], x["1着"]) for x in all_rows], edges)}
+        for lo_, hi_ in zip(edges[:-1], edges[1:]):
+            a = ai_tab.get((lo_, hi_))
+            m = mk_tab.get((lo_, hi_))
+            fa = f"{a[0]:5d}  {a[1]:5.1f}% {a[2]:5.1f}%" if a else f"{'':5}  {'':6} {'':6}"
+            fm = f"{m[0]:5d}  {m[1]:6.1f}%  {m[2]:5.1f}%" if m else ""
+            lines.append(f"  {lo_:3d}〜{hi_:3d}%  {fa}  |  {fm}")
+
+        place_pairs = [(x["AI複勝率"], x["複勝圏"]) for x in all_rows]
+        bp = sum((p - y) ** 2 for p, y in place_pairs) / len(place_pairs)
+        lines += ["", f"【キャリブレーション：推定複勝率】（ブライアスコア {bp:.4f}）",
+                  "  区間        件数  AI推定  実際"]
+        for lo_, hi_, cnt, mp, act in calibration_table(place_pairs, [0, 10, 20, 35, 50, 70, 100]):
+            lines.append(f"  {lo_:3d}〜{hi_:3d}%  {cnt:5d}  {mp:5.1f}% {act:5.1f}%")
+
+        # Excel で見る用の明細
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        with open(OUTPUT_DIR / "verify_horses.csv", "w", encoding="utf-8-sig", newline="") as f:
+            f.write("race_id,日付,競馬場,R,馬番,市場勝率,AI勝率,AI複勝率,着順\n")
+            for r, rows in ((r, horse_rows(r)) for r in races):
+                for x in rows:
+                    f.write(f"{r['race_id']},{r['日付']},{r['競馬場']},{r['レース番号']},{x['馬番']},"
+                            f"{x['市場'] * 100:.2f},{x['AI勝率'] * 100:.2f},{x['AI複勝率'] * 100:.2f},{x['着順']}\n")
+    else:
+        lines.append("  市場勝率と AI 推定がそろったレースがありません。")
+
+    if bet_rows:
+        with open(OUTPUT_DIR / "verify_bets.csv", "w", encoding="utf-8-sig", newline="") as f:
+            f.write("race_id,日付,競馬場,R,券種,組み合わせ,金額,払戻,判定\n")
+            for x in bet_rows:
+                f.write(f"{x['race_id']},{x['日付']},{x['競馬場']},{x['レース番号']},{x['券種']},"
+                        f"{x['組み合わせ']},{x['金額']},{x['払戻']},{x['判定']}\n")
+
+    if len(races) < 30:
+        lines += ["", f"※レース数が {len(races)}件と少ないため、区間が広く結論は出せません。"
+                      "目安として50レース以上たまってから判断してください。"]
+    return "\n".join(lines)
+
+
+def run_verify():
+    """結果が未取得のレースの結果を取りに行き、集計を表示・保存する"""
+    recs = load_records()
+    today = datetime.now().strftime("%Y%m%d")
+    pending = [r for r in recs if r.get("AI") and not r.get("結果") and r["日付"] <= today]
+    if pending:
+        print(f"\n結果を取得します: {len(pending)}件")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_context(user_agent=UA).new_page()
+            try:
+                for r in pending:
+                    label = f"{r['日付']} {r['競馬場']} {r['レース番号']}R"
+                    res = scrape_result(page, r["race_id"])
+                    if not res:
+                        print(f"  {label}: 結果未確定または取得できず（あとで再実行してください）")
+                        continue
+                    r["結果"] = res
+                    save_record(r)
+                    note = f"（{' / '.join(res['注記'])}）" if res["注記"] else ""
+                    print(f"  {label}: 取得しました{note}")
+            finally:
+                browser.close()
+    else:
+        print("\n結果を取りに行くレースはありません。")
+
+    text = summarize(load_records())
+    print("\n" + text)
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    (OUTPUT_DIR / "verify_summary.txt").write_text(text, encoding="utf-8")
+    print(f"\n集計を保存しました: {OUTPUT_DIR / 'verify_summary.txt'}")
+
 
 # ========== メイン ==========
 
@@ -1017,6 +1572,7 @@ def parse_args(argv):
     name = argv[0]
     if name.isdigit() and name in CODE_TO_NAME:
         name = CODE_TO_NAME[name]
+    name = NAME_ALIASES.get(name, name)
     if name not in KEIBA_CODES:
         print(f"競馬場名が不明です: {argv[0]}（使えるもの: {' / '.join(KEIBA_CODES)}）")
         sys.exit(1)
@@ -1035,6 +1591,14 @@ def main():
     print("=" * 60)
     print("  地方競馬 自動収集スクリプト v5（netkeiba + keiba.go.jp）")
     print("=" * 60)
+
+    cmd = sys.argv[1].lower() if len(sys.argv) >= 2 else ""
+    if cmd in ("verify", "検証"):
+        run_verify()
+        return
+    if cmd in ("record", "記録"):
+        run_record()
+        return
 
     direct = parse_args(sys.argv[1:])
 
