@@ -1,0 +1,14 @@
+# 仮想環境
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# エディタ・ツール設定
+.vs/
+.vscode/
+.claude/
+
+# 実行時の生成物（スクレイピング結果）
+output/
+debug_output/
