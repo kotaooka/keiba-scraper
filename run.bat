@@ -1,28 +1,15 @@
 @echo off
-rem Check if the virtual environment directory exists
-if not exist venv\Scripts\activate.bat (
-    echo Virtual environment not found. Please run setup.bat to create the virtual environment.
-    pause
-    exit /b
-)
-rem Activate the virtual environment
-call venv\Scripts\activate.bat
+rem Run keiba_scraper.py inside the virtual environment.
+rem Usage: run.bat                 (interactive)
+rem        run.bat [venue] [race no] [date]   e.g. run.bat 35 5 1025
+cd /d "%~dp0"
+chcp 65001 > nul
 
-rem Check if Python is installed
-where /q python
-if %ERRORLEVEL% neq 0 (
-    echo Python is not installed. Please install Python and try again.
+if not exist venv\Scripts\python.exe (
+    echo Virtual environment not found. Run setup.bat first.
     pause
-    exit /b
+    exit /b 1
 )
 
-rem Check if keiba_scraper.py exists
-if not exist keiba_scraper.py (
-    echo keiba_scraper.py does not exist. Please verify the file path and try again.
-    pause
-    exit /b
-)
-
-rem Launch the application
-python keiba_scraper.py
+venv\Scripts\python.exe keiba_scraper.py %*
 pause

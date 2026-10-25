@@ -1,34 +1,46 @@
-# keiba_scraper.py v4
+# keiba_scraper.py v5
+# 地方競馬の出馬表・オッズ・過去成績を netkeiba / keiba.go.jp から集め、
+# AI に貼り付けるテキストを作る。
+#
+# 使い方:
+#   python keiba_scraper.py                 … 対話形式（当日の開催一覧から選ぶ）
+#   python keiba_scraper.py 盛岡 5           … 当日の盛岡5R を直接取得
+#   python keiba_scraper.py 盛岡 5 1025      … 日付を指定（YYYYMMDD / MMDD / M/D も可）
 
-import sys
 import re
+import subprocess
+import sys
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 except ImportError:
-    print("pip install playwright && playwright install chromium を実行してください。")
+    print("playwright が入っていません。setup.bat を実行してください。")
     sys.exit(1)
 
 try:
     from bs4 import BeautifulSoup
 except ImportError:
-    print("pip install beautifulsoup4 を実行してください。")
+    print("beautifulsoup4 が入っていません。setup.bat を実行してください。")
     sys.exit(1)
 
 
 # ========== 設定 ==========
 
+# netkeiba の競馬場コード（race_id の5〜6桁目）
 KEIBA_CODES = {
     "門別": "30", "盛岡": "35", "水沢": "36",
     "浦和": "42", "船橋": "43", "大井": "44", "川崎": "45",
     "金沢": "46", "笠松": "48", "名古屋": "49",
     "園田": "50", "姫路": "51", "高知": "54", "佐賀": "55",
+    "帯広(ば)": "65",
 }
+CODE_TO_NAME = {v: k for k, v in KEIBA_CODES.items()}
 
 # keiba.go.jp (NAR公式) の競馬場コード — netkeiba と異なる
-# 姫路のみ未確認
+# 姫路は未確認。帯広(ばんえい)は未定義のため過去成績の補完をしない
 KEIBAGO_CODES = {
     "門別": "36", "盛岡": "10", "水沢": "11",
     "浦和": "18", "船橋": "19", "大井": "20", "川崎": "21",
@@ -36,6 +48,7 @@ KEIBAGO_CODES = {
     "園田": "27", "姫路": "28", "高知": "31", "佐賀": "32",
 }
 
+NETKEIBA = "https://nar.netkeiba.com"
 OUTPUT_DIR = Path(__file__).parent / "output"
 
 UA = (
@@ -49,245 +62,315 @@ COND_MAP = {"稍": "稍重", "不": "不良", "良": "良", "重": "重",
 
 TIMEOUT_PAGE     = 20000  # ページロード待機 (ms)
 TIMEOUT_SELECTOR = 10000  # セレクタ出現待機 (ms)
+RETRY            = 2      # ページ取得の試行回数
 
 
-# ========== メイン処理 ==========
+# ========== 表示幅（全角=2）を考慮した整形 ==========
 
-def main():
-    print("=" * 60)
-    print("  地方競馬 自動収集スクリプト v4（netkeiba + keiba.go.jp）")
-    print("=" * 60)
+def disp_width(s):
+    """全角文字を2、半角文字を1として表示幅を返す"""
+    return sum(2 if unicodedata.east_asian_width(c) in "FWA" else 1 for c in str(s))
 
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    codes = list(KEIBA_CODES.keys())
 
-    while True:
-        # ===== レース選択 =====
-        print("\n競馬場を選択してください:")
-        for i, name in enumerate(codes, 1):
-            print(f"  {i:2d}. {name}")
+def pad(s, width, align="<"):
+    """表示幅で左寄せ(<)・右寄せ(>)する"""
+    s = str(s)
+    space = " " * max(0, width - disp_width(s))
+    return s + space if align == "<" else space + s
 
-        while True:
-            try:
-                idx = int(input("\n番号を入力: ")) - 1
-                if 0 <= idx < len(codes):
-                    keibajo_name = codes[idx]
-                    keibajo_code = KEIBA_CODES[keibajo_name]
-                    break
-            except ValueError:
-                pass
-            print("正しい番号を入力してください。")
 
-        today = datetime.now().strftime("%Y%m%d")
-        date_input = input(f"\nレース日（YYYYMMDD）[Enter={today}]: ").strip()
-        race_date = date_input if date_input else today
+# ========== 入力処理 ==========
 
-        while True:
-            try:
-                race_no = int(input("レース番号（例: 3）: "))
-                if 1 <= race_no <= 12:
-                    break
-            except ValueError:
-                pass
-            print("1〜12の数字を入力してください。")
-
-        year  = race_date[:4]
-        month = race_date[4:6]
-        day   = race_date[6:8]
-        race_id = f"{year}{keibajo_code}{month}{day}{race_no:02d}"
-
-        url_shutuba  = f"https://nar.netkeiba.com/race/shutuba.html?race_id={race_id}"
-        url_tan_fuku = f"https://nar.netkeiba.com/odds/?race_id={race_id}&type=b1"
-        url_wide     = f"https://nar.netkeiba.com/odds/?race_id={race_id}&type=b5"
-        url_sanren   = f"https://nar.netkeiba.com/odds/?race_id={race_id}&type=b7"
-
-        print(f"\n収集対象: {keibajo_name} {year}/{month}/{day} {race_no}R")
-        print(f"race_id: {race_id}")
-        print("\nブラウザを起動中...")
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            ctx = browser.new_context(user_agent=UA)
-            page = ctx.new_page()
-
-            # 出馬表
-            print("\n[出馬表 取得中]")
-            shutuba_data, shutuba_soup = scrape_shutuba(page, url_shutuba)
-
-            # レース基本情報
-            race_info = scrape_race_info(shutuba_soup)
-            print(
-                f"  距離:{race_info['距離']} / 馬場:{race_info['馬場種別']} "
-                f"/ 状態:{race_info['馬場状態']} / クラス:{race_info['クラス']}"
-            )
-
-            # プレミアム限定馬への keiba.go.jp 補完
-            premium_horses = [h for h in shutuba_data if h.get("過去成績_premium")]
-            if premium_horses:
-                print(f"\n[keiba.go.jp から過去成績補完中] {len(premium_horses)}頭がプレミアム限定")
-                keibago_map = scrape_keibago_past5(page, keibajo_name, race_date, race_no)
-                if keibago_map:
-                    for h in shutuba_data:
-                        no = h["馬番"]
-                        if h.get("過去成績_premium") and no in keibago_map:
-                            h["過去成績"] = keibago_map[no]
-                            h["過去成績_premium"] = False
-                            print(f"  馬番{no}: {len(h['過去成績'])}走補完完了")
-                        elif h.get("過去成績_premium"):
-                            print(f"  馬番{no}: keiba.go.jp でも取得できず")
-                else:
-                    print("  keiba.go.jp の取得に失敗しました")
-
-            # 単勝・複勝
-            print("\n[単勝・複勝オッズ 取得中]")
-            tan_fuku = scrape_tan_fuku(page, url_tan_fuku)
-
-            # ワイド
-            print("\n[ワイドオッズ 取得中]")
-            wide_top = scrape_combo_odds(page, url_wide, "ワイド")
-
-            # 三連複
-            print("\n[三連複オッズ 取得中]")
-            sanren_top = scrape_combo_odds(page, url_sanren, "三連複")
-
-            browser.close()
-
-        if not shutuba_data:
-            print("\n出馬表のデータが取得できませんでした。")
-            print("race_idが正しいか確認してください:", url_shutuba)
+def parse_date(text, today=None):
+    """日付入力を YYYYMMDD に正規化する。不正なら None を返す。
+    受け付ける形式: 空(=当日) / YYYYMMDD / MMDD / M/D / YYYY/M/D / YYYY-MM-DD"""
+    today = today or datetime.now()
+    t = text.strip()
+    try:
+        if not t:
+            d = today
+        elif re.fullmatch(r"\d{8}", t):
+            d = datetime.strptime(t, "%Y%m%d")
+        elif re.fullmatch(r"\d{4}", t):
+            d = datetime(today.year, int(t[:2]), int(t[2:]))
         else:
-            merged = merge_data(shutuba_data, tan_fuku)
+            parts = [p for p in re.split(r"[/\-.]", t) if p]
+            if len(parts) == 2:
+                d = datetime(today.year, int(parts[0]), int(parts[1]))
+            elif len(parts) == 3:
+                d = datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+            else:
+                return None
+    except ValueError:
+        return None
+    return d.strftime("%Y%m%d")
 
-            output_text = format_for_claude(
-                merged, keibajo_name, race_date, race_no,
-                race_info=race_info,
-                wide_top=wide_top,
-                sanren_top=sanren_top,
-            )
 
-            print("\n" + "=" * 70)
-            print(output_text)
-            print("=" * 70)
+def ask_date():
+    today = datetime.now().strftime("%Y%m%d")
+    while True:
+        d = parse_date(input(f"\nレース日 [Enter={today[:4]}/{today[4:6]}/{today[6:]}]（例: 1025, 10/25）: "))
+        if d:
+            return d
+        print("日付として読めませんでした。例: 20261025 / 1025 / 10/25")
 
-            filename = OUTPUT_DIR / f"{race_date}_{keibajo_name}{race_no}R.txt"
-            filename.write_text(output_text, encoding="utf-8")
-            print(f"\nファイル保存: {filename}")
-            print("\n上記テキストをコピーして以下のAIに貼り付けてください:")
-            print("  Claude  : https://claude.ai")
-            print("  Copilot : https://copilot.microsoft.com")
 
-        # ===== 続行確認 =====
-        ans = input("\n別のレースを予想しますか？ [Y/n]: ").strip().lower()
-        if ans in ("n", "no"):
-            print("\n終了します。")
-            break
+def ask_choice(prompt, n, default=None):
+    """1〜n の番号入力。Enter で default を返す"""
+    while True:
+        s = input(prompt).strip()
+        if not s and default is not None:
+            return default
+        if s.isdigit() and 1 <= int(s) <= n:
+            return int(s)
+        print(f"1〜{n} の番号を入力してください。")
 
 
 # ========== 共通: ページ取得 ==========
 
 def fetch_page(page, url, wait_selector=None, timeout=TIMEOUT_PAGE):
-    page.goto(url, wait_until="domcontentloaded", timeout=timeout)
-    if wait_selector:
+    """ページを開いて HTML を返す。失敗時は RETRY 回まで再試行し、最後は None を返す"""
+    for attempt in range(1, RETRY + 1):
         try:
-            page.wait_for_selector(wait_selector, timeout=TIMEOUT_SELECTOR)
-        except PlaywrightTimeout:
-            print("  要素待機タイムアウト（続行）")
-    return page.content()
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            if wait_selector:
+                try:
+                    page.wait_for_selector(wait_selector, timeout=TIMEOUT_SELECTOR)
+                except PlaywrightTimeout:
+                    print("  要素待機タイムアウト（取得できた分で続行）")
+            return page.content()
+        except Exception as e:
+            print(f"  ページ取得失敗（{attempt}/{RETRY}回目）: {type(e).__name__}")
+    return None
 
 
-# ========== 出馬表スクレイピング（dl.HorseList 対応） ==========
+# ========== 開催一覧 ==========
+
+def fetch_race_list(page, race_date):
+    """指定日の開催一覧を取得する。
+    返り値: [{"name": 競馬場名, "races": [{"race_id","no","time","title","heads"}...]}, ...]"""
+    url = f"{NETKEIBA}/top/race_list_sub.html?kaisai_date={race_date}"
+    html = fetch_page(page, url)
+    if not html:
+        return []
+    return parse_race_list(html)
+
+
+def parse_race_list(html):
+    soup = BeautifulSoup(html, "html.parser")
+    venues = []
+    for dl in soup.select("dl.RaceList_DataList"):
+        races = []
+        for li in dl.select("li.RaceList_DataItem"):
+            a = li.select_one("a[href*='race_id=']")
+            if not a:
+                continue
+            m = re.search(r"race_id=(\d{12})", a.get("href", ""))
+            if not m:
+                continue
+            race_id = m.group(1)
+            data = li.select_one(".RaceData")
+            time_el = data.select_one("span") if data else None
+            heads = re.search(r"(\d+)頭", li.get_text())
+            title_el = li.select_one(".ItemTitle")
+            races.append({
+                "race_id": race_id,
+                "no": int(race_id[-2:]),
+                "time": time_el.get_text(strip=True) if time_el else "",
+                "title": title_el.get_text(strip=True) if title_el else "",
+                "heads": heads.group(1) if heads else "",
+            })
+        if not races:
+            continue
+        code = races[0]["race_id"][4:6]
+        name = CODE_TO_NAME.get(code)
+        if not name:
+            # 未登録の競馬場は見出しから名前を取る（"9回 盛岡 4日目" → "盛岡"）
+            title = dl.select_one(".RaceList_DataTitle")
+            raw = title.get_text(" ", strip=True) if title else code
+            name = re.sub(r"\d+回|\d+日目", "", raw).strip() or code
+        venues.append({"name": name, "races": races})
+    return venues
+
+
+def next_race_index(races, race_date, now=None):
+    """発走前で最も早いレースの位置を返す。全レース終了なら最終レース"""
+    now = now or datetime.now()
+    if race_date != now.strftime("%Y%m%d"):
+        return 0
+    for i, r in enumerate(races):
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", r["time"])
+        if m and (int(m.group(1)), int(m.group(2))) > (now.hour, now.minute):
+            return i
+    return len(races) - 1
+
+
+def choose_race(page, race_date):
+    """開催一覧から競馬場・レースを選ばせる。(競馬場名, レース番号) を返す"""
+    venues = fetch_race_list(page, race_date)
+    if not venues:
+        print("\n開催一覧を取得できませんでした。競馬場とレース番号を直接入力してください。")
+        return choose_race_manual()
+
+    print("\nこの日の開催:")
+    for i, v in enumerate(venues, 1):
+        r0, r1 = v["races"][0], v["races"][-1]
+        print(f"  {i:2d}. {pad(v['name'], 10)} {len(v['races'])}R（{r0['time']}〜{r1['time']}）")
+    vi = ask_choice("\n競馬場の番号: ", len(venues))
+    venue = venues[vi - 1]
+
+    races = venue["races"]
+    nxt = next_race_index(races, race_date)
+    print(f"\n{venue['name']} のレース:")
+    for i, r in enumerate(races):
+        mark = " ← 次" if i == nxt and race_date == datetime.now().strftime("%Y%m%d") else ""
+        print(f"  {r['no']:2d}R  {r['time']:>5}  {pad(r['title'], 24)} {r['heads']:>2}頭{mark}")
+    nos = [r["no"] for r in races]
+    while True:
+        s = input(f"\nレース番号 [Enter={races[nxt]['no']}R]: ").strip().upper().rstrip("R")
+        if not s:
+            return venue["name"], races[nxt]["no"]
+        if s.isdigit() and int(s) in nos:
+            return venue["name"], int(s)
+        print(f"この日のレース番号から選んでください: {', '.join(map(str, nos))}")
+
+
+def choose_race_manual():
+    names = list(KEIBA_CODES.keys())
+    for i, name in enumerate(names, 1):
+        print(f"  {i:2d}. {name}")
+    name = names[ask_choice("\n競馬場の番号: ", len(names)) - 1]
+    no = ask_choice("レース番号（1〜12）: ", 12)
+    return name, no
+
+
+# ========== 出馬表 ==========
 
 def scrape_shutuba(page, url):
-    """出馬表を取得。(horses_list, soup) のタプルを返す"""
-    html = fetch_page(page, url, ".HorseList, table")
+    """出馬表を取得。(horses, soup) を返す。取得失敗時は ([], None)"""
+    html = fetch_page(page, url, "table.ShutubaTable, dl.HorseList")
+    if not html:
+        return [], None
     soup = BeautifulSoup(html, "html.parser")
-    horses = []
-
-    dl_list = soup.select("dl.HorseList")
-
-    if not dl_list:
-        # フォールバック: tr 構造 (旧ページ)
-        return _scrape_shutuba_tr(soup), soup
-
-    for dl in dl_list:
-        try:
-            h = _parse_dl_horse(dl)
-            if h and h.get("馬番", "").isdigit():
-                horses.append(h)
-        except Exception:
-            continue
-
+    horses = parse_shutuba(soup)
     print(f"  出馬表: {len(horses)}頭取得")
-    premium_count = sum(1 for h in horses if h.get("過去成績_premium"))
-    if premium_count:
-        print(f"  うち過去成績プレミアム限定: {premium_count}頭")
     return horses, soup
 
 
+def parse_shutuba(soup):
+    """出馬表 soup から馬のリストを作る。
+    現行ページ（table.ShutubaTable）を優先し、旧ページ（dl.HorseList）にも対応する"""
+    rows = soup.select("table.ShutubaTable tr.HorseList")
+    if rows:
+        horses = [h for h in (_parse_tr_horse(tr) for tr in rows) if h]
+    else:
+        horses = [h for h in (_parse_dl_horse(dl) for dl in soup.select("dl.HorseList")) if h]
+
+    # 脚質は出馬表下の「脚質」表から馬番で引く
+    kyaku = parse_kyaku_type(soup)
+    for h in horses:
+        if not h.get("脚質"):
+            h["脚質"] = kyaku.get(h["馬番"], "")
+    return horses
+
+
+def _text(el):
+    return el.get_text(strip=True) if el else ""
+
+
+def _parse_tr_horse(tr):
+    """table.ShutubaTable の tr.HorseList 1行から horse dict を作る"""
+    umaban = tr.find("td", class_=re.compile(r"^Umaban"))
+    no = _text(umaban)
+    if not no.isdigit():
+        return None
+    waku = tr.find("td", class_=re.compile(r"^Waku\d"))
+    name_a = tr.select_one(".HorseName a")
+
+    h = {
+        "枠番": _text(waku),
+        "馬番": no,
+        "馬名": (name_a.get("title") or _text(name_a)) if name_a else "",
+        "性齢": _text(tr.select_one(".Age")),
+        "騎手": _text(tr.select_one("td.Jockey a")),
+        "調教師": _text(tr.select_one("td.Trainer a")),
+        "脚質": "",
+        "過去成績": [],
+        "要補完": True,  # 現行ページは出馬表に過去成績がないため keiba.go.jp で補完する
+    }
+
+    # 斤量（td.Txt_C のうち "54.0" 形式のもの。▲などの減量記号は除く）
+    h["斤量"] = ""
+    for td in tr.select("td.Txt_C"):
+        t = re.sub(r"[▲△☆★◇]", "", td.get_text(strip=True))
+        if re.fullmatch(r"\d{2}\.\d", t):
+            h["斤量"] = t
+            break
+
+    # 馬体重 "432(0)" / "430(-3)" / 未発表は数字なし
+    m = re.search(r"(\d{3})\s*\(([+-]?\d+)\)", _text(tr.select_one("td.Weight")))
+    if m:
+        h["馬体重"], h["体重増減"] = int(m.group(1)), int(m.group(2))
+    else:
+        h["馬体重"], h["体重増減"] = "未発表", 0
+
+    # 出馬表に載っている単勝・人気（オッズページが取れなかったときの予備）
+    odds_m = re.search(r"\d+\.\d", _text(tr.select_one("td.Popular.Txt_R")))
+    h["単勝_出馬表"] = odds_m.group(0) if odds_m else ""
+    ninki = _text(tr.select_one("td.Popular.Txt_C"))
+    h["人気"] = ninki if ninki.isdigit() else ""
+
+    row_text = tr.get_text()
+    h["取消"] = "Cancel" in (tr.get("class") or []) or "取消" in row_text or "除外" in row_text
+    return h
+
+
+def parse_kyaku_type(soup):
+    """脚質表（table.Kyaku_Type）から {馬番: 脚質} を作る"""
+    result = {}
+    for tr in soup.select("table.Kyaku_Type tr"):
+        label = _text(tr.find("th"))
+        for num in tr.select(".Kyaku_Type_Num"):
+            if _text(num).isdigit():
+                result[_text(num)] = label
+    return result
+
+
 def _parse_dl_horse(dl):
-    """dl.HorseList 1要素から horse dict を生成する"""
-    h = {}
+    """旧ページ dl.HorseList 1要素から horse dict を作る"""
+    h = {"取消": "Cancel" in (dl.get("class") or []) or bool(dl.select_one(".Cancel_Txt"))}
 
-    # 取消チェック
-    h["取消"] = (
-        "Cancel" in (dl.get("class") or [])
-        or bool(dl.select_one(".Cancel_Txt"))
-    )
-
-    # 枠番: class="Waku1" … "Waku8" (Waku_Horse ではない)
     for dt in dl.find_all("dt"):
         classes = " ".join(dt.get("class") or [])
         if re.search(r"\bWaku[1-8]\b", classes) and "Waku_Horse" not in classes:
             h["枠番"] = dt.get_text(strip=True)
             break
 
-    # 馬番
-    wh = dl.select_one("dt.Waku_Horse")
-    h["馬番"] = wh.get_text(strip=True) if wh else ""
+    h["馬番"] = _text(dl.select_one("dt.Waku_Horse"))
+    if not h["馬番"].isdigit():
+        return None
+    h["馬名"] = _text(dl.select_one("dt.HorseName a"))
+    h["脚質"] = _text(dl.select_one(".Horse06 .Type span"))
 
-    # 馬名
-    name_a = dl.select_one("dt.HorseName a")
-    h["馬名"] = name_a.get_text(strip=True) if name_a else ""
-
-    # 脚質: dt.Horse06 > div.Type > span
-    type_el = dl.select_one(".Horse06 .Type span")
-    h["脚質"] = type_el.get_text(strip=True) if type_el else ""
-
-    # 馬体重 / 増減
-    wt_el = dl.select_one(".Horse07 span.transition-color")
-    if wt_el:
-        wt_text = wt_el.get_text(separator="", strip=True)
-        m = re.search(r"(\d+)kg\s*\(([+-]?\d+)\)", wt_text)
-        if m:
-            h["馬体重"] = int(m.group(1))
-            h["体重増減"] = int(m.group(2))
-        else:
-            h["馬体重"] = "未発表"
-            h["体重増減"] = 0
+    wt = dl.select_one(".Horse07 span.transition-color")
+    m = re.search(r"(\d+)kg\s*\(([+-]?\d+)\)", wt.get_text(separator="", strip=True)) if wt else None
+    if m:
+        h["馬体重"], h["体重増減"] = int(m.group(1)), int(m.group(2))
     else:
-        h["馬体重"] = "未発表"
-        h["体重増減"] = 0
+        h["馬体重"], h["体重増減"] = "未発表", 0
 
-    # 性齢 (dd.Jockey span.Barei → "牡3 黒鹿" の最初のトークン)
     barei = dl.select_one("dd.Jockey span.Barei")
-    if barei:
-        tokens = barei.get_text(strip=True).split()
-        h["性齢"] = tokens[0] if tokens else ""
-    else:
-        h["性齢"] = ""
+    tokens = barei.get_text(strip=True).split() if barei else []
+    h["性齢"] = tokens[0] if tokens else ""
 
-    # 騎手 (span.Change の "替" を除外)
     jockey_a = dl.select_one("dd.Jockey a")
     if jockey_a:
         for ch in jockey_a.select(".Change"):
             ch.decompose()
-        h["騎手"] = jockey_a.get_text(strip=True)
-    else:
-        h["騎手"] = ""
+    h["騎手"] = _text(jockey_a)
 
-    # 斤量 (dd.Jockey の最後のテキスト行から数値を抽出)
-    jockey_dd = dl.select_one("dd.Jockey")
     h["斤量"] = ""
+    jockey_dd = dl.select_one("dd.Jockey")
     if jockey_dd:
         for line in reversed(jockey_dd.get_text(separator="\n").split("\n")):
             cleaned = re.sub(r"[▲△☆★]", "", line).strip()
@@ -295,231 +378,146 @@ def _parse_dl_horse(dl):
                 h["斤量"] = cleaned
                 break
 
-    # 調教師 (dt.Horse05 の最初の a — "高知・目迫大輔" → "目迫大輔")
-    trainer_els = dl.select(".Horse05 a")
-    if trainer_els:
-        raw = trainer_els[0].get_text(strip=True)
-        h["調教師"] = re.sub(r"^[^・・]+[・・]", "", raw)
-    else:
-        h["調教師"] = ""
+    trainer = dl.select_one(".Horse05 a")
+    h["調教師"] = re.sub(r"^[^・]+・", "", _text(trainer))
 
-    # 過去5走 (netkeiba free 分)
-    past_lis = dl.select("dd.Past_Wrapper li.Past")
-    h["過去成績"] = [r for r in (_parse_netkeiba_past_li(li) for li in past_lis) if r]
-
-    # プレミアム限定フラグ
-    h["過去成績_premium"] = bool(dl.select("dd.Past_Wrapper li.Past5_Sample"))
-
+    past = [r for r in (_parse_netkeiba_past_li(li) for li in dl.select("dd.Past_Wrapper li.Past")) if r]
+    h["過去成績"] = past
+    h["要補完"] = bool(dl.select("dd.Past_Wrapper li.Past5_Sample")) or not past
+    h["単勝_出馬表"], h["人気"] = "", ""
     return h
 
 
 def _parse_netkeiba_past_li(li):
-    """li.Past 1要素から過去成績レコードを生成する"""
-    rec = {}
-
-    # 着順
+    """旧ページ li.Past 1要素から過去成績レコードを作る"""
     num_el = li.select_one(".Data04 .Num")
-    if num_el:
-        t = num_el.get_text(strip=True)
-        rec["着順"] = t + "着" if t.isdigit() else t
-    else:
+    if not num_el:
         return None
+    t = num_el.get_text(strip=True)
+    rec = {"着順": t + "着" if t.isdigit() else t}
 
-    # 日付・競馬場
-    data01 = li.select_one(".Data01")
-    if data01:
-        raw = data01.get_text(strip=True)
-        m = re.match(r"(\d{2}/\d{2})\s*(.+?)\s*(\d+)R", raw)
-        if m:
-            rec["日付"] = m.group(1)
-            rec["競馬場"] = m.group(2).strip()
+    m = re.match(r"(\d{2}/\d{2})\s*(.+?)\s*(\d+)R", _text(li.select_one(".Data01")))
+    if m:
+        rec["日付"], rec["競馬場"] = m.group(1), m.group(2).strip()
 
-    # 距離・馬場種別 (e.g. "ダ1400" → "ダ1400m")
-    dist_el = li.select_one(".Data09")
-    if dist_el:
-        d = dist_el.get_text(strip=True)
-        rec["距離"] = d + "m" if d and d[-1].isdigit() else d
-
-    # 馬場状態
-    cond_el = li.select_one(".Data11")
-    if cond_el:
-        rec["馬場"] = COND_MAP.get(cond_el.get_text(strip=True), cond_el.get_text(strip=True))
-
-    # タイム
-    time_el = li.select_one(".Data12")
-    if time_el:
-        rec["タイム"] = time_el.get_text(strip=True)
-
-    # コーナー通過順
+    d = _text(li.select_one(".Data09"))
+    rec["距離"] = d + "m" if d and d[-1].isdigit() else d
+    cond = _text(li.select_one(".Data11"))
+    rec["馬場"] = COND_MAP.get(cond, cond)
+    rec["タイム"] = _text(li.select_one(".Data12"))
     corners = [c.get_text(strip=True) for c in li.select(".Data20 .Corner") if c.get_text(strip=True) != "-"]
     rec["通過"] = "-".join(corners)
-
-    # 上がり3F ("後43.9" → "43.9")
-    last3f_el = li.select_one(".Data21")
-    if last3f_el:
-        m2 = re.search(r"(\d{2}\.\d)", last3f_el.get_text(strip=True))
-        rec["上がり"] = m2.group(1) if m2 else ""
-
+    m2 = re.search(r"(\d{2}\.\d)", _text(li.select_one(".Data21")))
+    rec["上がり"] = m2.group(1) if m2 else ""
     return rec
-
-
-def _scrape_shutuba_tr(soup):
-    """旧 tr.HorseList 構造へのフォールバック"""
-    horses = []
-    rows = (
-        soup.select("tr.HorseList") or
-        soup.select("tr.Shutuba_HorseList") or
-        [r for r in soup.select("tbody tr") if len(r.find_all("td")) >= 6]
-    )
-    for row in rows:
-        cells = row.find_all("td")
-        if len(cells) < 6:
-            continue
-        try:
-            horse = {
-                "枠番": cells[0].get_text(strip=True),
-                "馬番": cells[1].get_text(strip=True),
-                "脚質": "",
-                "過去成績": [],
-                "過去成績_premium": True,
-            }
-            name_el = row.select_one(".HorseName a") or row.select_one("td:nth-child(4) a")
-            horse["馬名"] = name_el.get_text(strip=True) if name_el else cells[3].get_text(strip=True)
-            horse["性齢"] = cells[4].get_text(strip=True) if len(cells) > 4 else ""
-            horse["斤量"] = cells[5].get_text(strip=True) if len(cells) > 5 else ""
-            jockey_el = row.select_one(".Jockey a")
-            horse["騎手"] = jockey_el.get_text(strip=True) if jockey_el else (cells[6].get_text(strip=True) if len(cells) > 6 else "")
-            horse["調教師"] = ""
-            weight_el = row.select_one(".Weight")
-            if weight_el:
-                wt = weight_el.get_text(strip=True)
-                m = re.match(r"(\d+)\(([+-]?\d+)\)", wt)
-                if m:
-                    horse["馬体重"] = int(m.group(1))
-                    horse["体重増減"] = int(m.group(2))
-                else:
-                    horse["馬体重"] = wt
-                    horse["体重増減"] = 0
-            else:
-                horse["馬体重"] = "未発表"
-                horse["体重増減"] = 0
-            horse["取消"] = bool(row.select_one(".Cancel") or "取消" in row.get_text())
-            if horse["馬番"].isdigit():
-                horses.append(horse)
-        except (IndexError, AttributeError):
-            continue
-    print(f"  出馬表(tr): {len(horses)}頭取得")
-    return horses
 
 
 # ========== レース基本情報 ==========
 
 def scrape_race_info(soup):
-    """出馬表 soup からレース条件（距離・馬場種別・馬場状態・クラス）を取得"""
-    info = {"距離": "不明", "馬場種別": "不明", "馬場状態": "不明", "クラス": ""}
+    """出馬表 soup からレース条件を取得"""
+    info = {"レース名": "", "発走": "", "距離": "不明", "馬場種別": "不明",
+            "馬場状態": "不明", "クラス": "", "頭数": ""}
+    if soup is None:
+        return info
 
-    # RaceData01: "16:05発走 / ダ1400m (右) / 天候:晴 / 馬場:稍"
+    info["レース名"] = _text(soup.select_one(".RaceName"))
+
+    # RaceData01: "14:05発走 / ダ1200m (左) / 天候:小雨 / 馬場:不"
     rd1 = soup.select_one(".RaceData01")
     if rd1:
         text = rd1.get_text(separator=" ", strip=True)
+        m0 = re.search(r"(\d{1,2}:\d{2})発走", text)
+        if m0:
+            info["発走"] = m0.group(1)
         m = re.search(r"(ダート|ダ|芝|障害|障)\s*(\d+)\s*m", text)
         if m:
-            surface_map = {"ダ": "ダート", "障": "障害"}
-            info["馬場種別"] = surface_map.get(m.group(1), m.group(1))
+            info["馬場種別"] = {"ダ": "ダート", "障": "障害"}.get(m.group(1), m.group(1))
             info["距離"] = m.group(2) + "m"
         m2 = re.search(r"馬場[:：]\s*(良|稍重|稍|重|不良|不)", text)
         if m2:
             info["馬場状態"] = COND_MAP.get(m2.group(1), m2.group(1))
 
-    # RaceData02: "2回 高知 5日目 サラ系３歳 3歳 10頭 ..."
+    # RaceData02: "9回 盛岡 4日目 サラ系一般 C2 9頭"
     rd2 = soup.select_one(".RaceData02")
     if rd2:
-        text2 = rd2.get_text(separator=" ", strip=True)
-        m3 = re.search(r"(重賞|オープン|A[12]|B|C[1-3]|サラ系\S+)", text2)
+        spans = [s.get_text(strip=True) for s in rd2.find_all("span")]
+        for s in spans:
+            if re.search(r"サラ|アラ|ばん|歳|一般|重賞|オープン|[A-C]\d", s):
+                info["クラス"] = s
+                break
+        m3 = re.search(r"(\d+)頭", rd2.get_text())
         if m3:
-            info["クラス"] = m3.group(1)
-
+            info["頭数"] = m3.group(1)
     return info
 
 
 # ========== keiba.go.jp 過去成績補完 ==========
 
 def scrape_keibago_past5(page, keibajo_name, race_date, race_no):
-    """
-    keiba.go.jp の DetalInfo ページから全馬の過去5走を取得する。
-    返り値: {馬番(str): [past_race_dict, ...]}
-    """
+    """keiba.go.jp の出馬表ページから全馬の過去5走を取得する。
+    返り値: {馬番(str): [past_race_dict, ...]}"""
     code = KEIBAGO_CODES.get(keibajo_name)
     if not code:
-        print(f"  keiba.go.jp コード未定義: {keibajo_name}")
+        print(f"  keiba.go.jp のコード未定義のため補完しません: {keibajo_name}")
         return {}
 
-    year  = race_date[:4]
-    month = race_date[4:6]
-    day   = race_date[6:8]
     url = (
-        f"https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/DebaTable"
-        f"?k_babaCode={code}&k_raceDate={year}%2F{month}%2F{day}&k_raceNo={race_no}"
+        "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/DebaTable"
+        f"?k_babaCode={code}&k_raceDate={race_date[:4]}%2F{race_date[4:6]}%2F{race_date[6:]}"
+        f"&k_raceNo={race_no}"
     )
-    print(f"  keiba.go.jp: {url}")
+    html = fetch_page(page, url, "section.cardTable")
+    if not html:
+        return {}
     try:
-        html = fetch_page(page, url, "section.cardTable")
         return _parse_keibago_table(html)
     except Exception as e:
-        print(f"  keiba.go.jp 取得エラー: {e}")
+        print(f"  keiba.go.jp 解析エラー: {e}")
         return {}
 
 
 def _parse_keibago_table(html):
-    """section.cardTable の tbody から全馬の過去5走を抽出する"""
+    """section.cardTable の tbody から全馬の過去5走を抽出する。
+    各馬は tBorder 行から始まるブロック（通常5行）"""
     soup = BeautifulSoup(html, "html.parser")
     result = {}
-
     table = soup.select_one("section.cardTable table tbody")
     if not table:
         print("  section.cardTable が見つかりません")
         return result
 
-    rows = table.find_all("tr", recursive=False)
+    # tBorder 行ごとにブロックへ分ける（行数を5行固定と決め打ちしない）
+    blocks, cur = [], None
+    for row in table.find_all("tr", recursive=False):
+        if "tBorder" in (row.get("class") or []):
+            cur = [row]
+            blocks.append(cur)
+        elif cur is not None:
+            cur.append(row)
 
-    # tBorder が各馬の先頭行
-    # 各馬は 5行ずつ (tBorder + 後続4行)
-    i = 0
-    while i < len(rows):
-        if "tBorder" not in (rows[i].get("class") or []):
-            i += 1
+    for rows in blocks:
+        if len(rows) < 4:
             continue
-
-        # 5行取得
-        horse_rows = rows[i: i + 5]
-        if len(horse_rows) < 5:
-            break
-
-        horse_no, past5 = _parse_keibago_horse(horse_rows)
+        horse_no, past5 = _parse_keibago_horse(rows)
         if horse_no:
             result[horse_no] = past5
-
-        i += 5
 
     print(f"  keiba.go.jp 解析: {len(result)}頭")
     return result
 
 
-def _parse_keibago_horse(horse_rows):
-    """keiba.go.jp の5行ブロックから (馬番, past5_list) を返す"""
-    row1, row2, row3, row4, row5 = horse_rows
-
-    # 馬番
-    horse_no_td = row1.select_one("td.horseNum")
-    if not horse_no_td:
+def _parse_keibago_horse(rows):
+    """keiba.go.jp の馬1頭分のブロックから (馬番, past5_list) を返す"""
+    row1 = rows[0]
+    horse_no = _text(row1.select_one("td.horseNum"))
+    if not horse_no.isdigit():
         return None, []
-    horse_no = horse_no_td.get_text(strip=True)
 
-    # 過去5走 基本情報 (row1 の div.raceInfo × 5)
     race_infos = row1.select("td div.raceInfo")
 
-    # タイム・コーナー・上がり (row4 の td[2:])
-    row4_tds = row4.find_all("td")
+    # タイム・コーナー・上がりの行（通常4行目）
+    row4_tds = rows[3].find_all("td")
     time_tds = row4_tds[2:] if len(row4_tds) >= 7 else row4_tds[max(0, len(row4_tds) - 5):]
 
     past5 = []
@@ -527,8 +525,6 @@ def _parse_keibago_horse(horse_rows):
         rec = _parse_keibago_raceinfo(ri)
         if rec is None:
             continue
-
-        # タイム・コーナー・上がり を結合
         if idx < len(time_tds):
             t = time_tds[idx].get_text(strip=True)
             m1 = re.search(r"(\d:\d{2}\.\d)", t)
@@ -540,303 +536,269 @@ def _parse_keibago_horse(horse_rows):
             m3 = re.search(r"(\d{2}\.\d)\s*$", t)
             if m3:
                 rec["上がり"] = m3.group(1)
-
         past5.append(rec)
-
     return horse_no, past5
 
 
 def _parse_keibago_raceinfo(ri):
-    """div.raceInfo 1要素から過去成績レコードを生成する"""
-    rec = {}
-
-    # 着順 (span.pastRank)
+    """div.raceInfo 1要素から過去成績レコードを作る"""
     rank_el = ri.select_one(".pastRank")
     if not rank_el:
         return None
     rank_classes = " ".join(rank_el.get("class") or [])
     rank_text = rank_el.get_text(strip=True)
-
-    if "rank_01" in rank_classes:
-        rec["着順"] = "1着"
-    elif "rank_02" in rank_classes:
-        rec["着順"] = "2着"
-    elif "rank_03" in rank_classes:
-        rec["着順"] = "3着"
+    m_rank = re.search(r"rank_0([1-3])", rank_classes)
+    if m_rank:
+        rec = {"着順": f"{m_rank.group(1)}着"}
     elif rank_text.isdigit():
-        rec["着順"] = rank_text + "着"
+        rec = {"着順": rank_text + "着"}
     else:
-        rec["着順"] = rank_text  # "取止", "除外" 等
+        rec = {"着順": rank_text}  # "取止", "除外" 等
 
-    # div.raceInfo のテキストを行で処理
-    lines = [l.strip() for l in ri.get_text(separator="\n").split("\n") if l.strip()]
-
-    for line in lines:
-        # 日付・馬場・頭数: "26.03.17　良　12頭" or "26.03.17　稍重　12頭"
-        m_date = re.search(
-            r"(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不)\s+(\d+)頭", line
-        )
+    for line in (l.strip() for l in ri.get_text(separator="\n").split("\n")):
+        if not line:
+            continue
+        # "26.03.17　良　12頭"
+        m_date = re.search(r"(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不)\s+(\d+)頭", line)
         if m_date:
             rec["日付"] = f"20{m_date.group(1)}/{m_date.group(2)}/{m_date.group(3)}"
             rec["馬場"] = COND_MAP.get(m_date.group(4), m_date.group(4))
             continue
-
-        # 競馬場・馬場種別・距離: "浦和　左1400　2番" or "Ｊ小倉　右1000　4番"
-        # "Ｊ福島　芝右1200　16番"
-        m_venue = re.search(
-            r"([^\s　]+)\s*[　\s]+(芝)?[右左][内外]?(\d{3,4})\s*[　\s]+\d+番", line
-        )
+        # "浦和　左1400　2番" / "Ｊ福島　芝右1200　16番"
+        m_venue = re.search(r"([^\s　]+)\s*[　\s]+(芝)?[右左直][内外線]?(\d{3,4})\s*[　\s]+\d+番", line)
         if m_venue:
-            venue = m_venue.group(1).lstrip("Ｊ")  # JRA場の全角"Ｊ"を除去
-            surface = "芝" if m_venue.group(2) else "ダ"
-            rec["競馬場"] = venue
-            rec["距離"] = surface + m_venue.group(3) + "m"
+            rec["競馬場"] = m_venue.group(1).lstrip("Ｊ")
+            rec["距離"] = ("芝" if m_venue.group(2) else "ダ") + m_venue.group(3) + "m"
 
     return rec if rec.get("日付") else None
 
 
 # ========== 単勝・複勝オッズ ==========
 
-def scrape_tan_fuku(page, url):
-    html = fetch_page(page, url, "table.RaceOdds_HorseList_Table")
+def _row_horse_no(tr):
+    """オッズ表の1行から馬番を返す。
+    枠番の列（同枠2頭目も枠番が入る）を馬番と取り違えないよう、
+    選択チェックボックスの value（"..._c0_9"）を優先する"""
+    chk = tr.select_one("input.HorseCheck_Select, input[type=checkbox]")
+    if chk:
+        m = re.search(r"_c0_(\d+)$", chk.get("value", ""))
+        if m:
+            return m.group(1)
+    tds = tr.find_all("td")
+    if len(tds) >= 2 and tds[1].get_text(strip=True).isdigit():
+        return tds[1].get_text(strip=True)  # 0列目=枠番、1列目=馬番
+    return None
+
+
+def parse_tan_fuku(html):
+    """単勝・複勝ページの HTML から {馬番: {"単勝","複勝"}} を作る"""
     soup = BeautifulSoup(html, "html.parser")
-
     tables = soup.select("table.RaceOdds_HorseList_Table")
-    print(f"  RaceOdds_HorseList_Table: {len(tables)}テーブル検出")
 
-    if not tables:
-        print("  ⚠️ テーブルが見つかりません。フォールバック処理へ。")
-        return _fallback_tan_fuku(html)
-
-    def parse_odds_table(table):
+    def parse_table(table):
         result = {}
-        for row in table.select("tr"):
-            tds = row.find_all("td")
-            if len(tds) < 4:
-                continue
-            horse_no = None
-            for td in tds[:3]:
-                t = td.get_text(strip=True)
-                if t.isdigit() and 1 <= int(t) <= 18:
-                    horse_no = t
-                    break
-            if not horse_no:
-                continue
-            odds_el = row.select_one("td.Odds span") or row.select_one("td.Odds")
-            if odds_el:
-                odds_text = odds_el.get_text(strip=True)
-            else:
-                odds_text = "--"
-                for td in reversed(tds):
-                    t = td.get_text(strip=True)
-                    if re.match(r"^\d{1,4}\.\d+$", t):
-                        odds_text = t
-                        break
-            result[horse_no] = odds_text
+        for tr in table.select("tr"):
+            no = _row_horse_no(tr)
+            odds_el = tr.select_one("td.Odds")
+            if no and odds_el:
+                result[no] = odds_el.get_text(" ", strip=True) or "--"
         return result
 
-    tan_dict  = parse_odds_table(tables[0])
-    fuku_dict = parse_odds_table(tables[1]) if len(tables) >= 2 else {}
-
-    print(f"  単勝: {len(tan_dict)}頭 / 複勝: {len(fuku_dict)}頭")
-
-    odds_dict = {}
-    for no in set(tan_dict) | set(fuku_dict):
-        odds_dict[no] = {"単勝": tan_dict.get(no, "--"), "複勝": fuku_dict.get(no, "--")}
-
-    print(f"  単複オッズ合計: {len(odds_dict)}頭取得")
-    return odds_dict
+    tan = parse_table(tables[0]) if tables else {}
+    fuku = parse_table(tables[1]) if len(tables) >= 2 else {}
+    return {no: {"単勝": tan.get(no, "--"), "複勝": fuku.get(no, "--")} for no in set(tan) | set(fuku)}
 
 
-def _fallback_tan_fuku(html):
-    soup = BeautifulSoup(html, "html.parser")
-    odds_dict = {}
-    for row in soup.find_all("tr"):
-        tds = row.find_all("td")
-        if len(tds) < 3:
-            continue
-        horse_no = None
-        for td in tds[:3]:
-            t = td.get_text(strip=True)
-            if t.isdigit() and 1 <= int(t) <= 18:
-                horse_no = t
-                break
-        if not horse_no:
-            continue
-        nums = re.findall(r"\d{1,4}\.\d+", row.get_text())
-        if nums and horse_no not in odds_dict:
-            odds_dict[horse_no] = {"単勝": nums[0], "複勝": "--"}
-    print(f"  フォールバック単複: {len(odds_dict)}頭取得")
-    return odds_dict
+def scrape_tan_fuku(page, url):
+    html = fetch_page(page, url, "table.RaceOdds_HorseList_Table td.Odds")
+    if not html:
+        return {}
+    odds = parse_tan_fuku(html)
+    print(f"  単複オッズ: {len(odds)}頭取得")
+    return odds
 
 
 # ========== ワイド・三連複 ==========
 
+def _extract_combos(html, all_combos):
+    soup = BeautifulSoup(html, "html.parser")
+    for td in soup.select("td.Odds[cart-item]"):
+        m = re.search(r"_c0_(.+)$", td.get("cart-item", ""))
+        if not m:
+            continue
+        horses = m.group(1).split("_")
+        if not all(h.isdigit() for h in horses):
+            continue
+        key = "-".join(sorted(horses, key=int))
+        nums = re.findall(r"\d+\.\d+", td.get_text(separator=" ", strip=True).replace(",", ""))
+        if not nums:
+            continue
+        low = float(nums[0])
+        if key not in all_combos or low < all_combos[key]["オッズ"]:
+            all_combos[key] = {
+                "組み合わせ": key,
+                "オッズ": low,
+                "オッズ表示": f"{nums[0]} - {nums[1]}" if len(nums) >= 2 else nums[0],
+            }
+
+
 def scrape_combo_odds(page, url, label):
-    html = fetch_page(page, url, "table.Odds_Table")
+    html = fetch_page(page, url, "td.Odds[cart-item]")
+    if not html:
+        return []
     all_combos = {}
+    _extract_combos(html, all_combos)
 
-    def extract_from_html(html_content):
-        soup = BeautifulSoup(html_content, "html.parser")
-        for td in soup.select("td.Odds[cart-item]"):
-            cart = td.get("cart-item", "")
-            m = re.search(r"_c0_(.+)$", cart)
-            if not m:
-                continue
-            horses = m.group(1).split("_")
-            if not all(h.isdigit() for h in horses):
-                continue
-            combo_key = "-".join(sorted(horses, key=int))
-            raw = td.get_text(separator=" ", strip=True).replace(",", "")
-            nums = re.findall(r"\d+\.\d+", raw)
-            if not nums:
-                continue
-            odds_low = float(nums[0])
-            if combo_key not in all_combos or odds_low < all_combos[combo_key]["オッズ"]:
-                combo_display = "-".join(horses)
-                odds_display = f"{nums[0]} - {nums[1]}" if len(nums) >= 2 else nums[0]
-                all_combos[combo_key] = {
-                    "組み合わせ": combo_display,
-                    "オッズ": odds_low,
-                    "オッズ表示": odds_display,
-                }
-
-    extract_from_html(html)
-
+    # 三連複は軸馬ごとに表が切り替わるので、全軸馬を順に読む
     if "type=b7" in url:
-        soup_init = BeautifulSoup(html, "html.parser")
-        options = soup_init.select("#list_select_horse option")
-        horse_values = [opt.get("value") for opt in options if opt.get("value")]
-        first_val = horse_values[0] if horse_values else None
-
-        for val in horse_values:
-            if val == first_val:
-                continue
+        options = BeautifulSoup(html, "html.parser").select("#list_select_horse option")
+        values = [o.get("value") for o in options if o.get("value")]
+        for val in values[1:]:
             try:
                 page.select_option("#list_select_horse", value=val)
                 page.wait_for_selector("td.Odds[cart-item]", timeout=TIMEOUT_SELECTOR)
-                extract_from_html(page.content())
+                _extract_combos(page.content(), all_combos)
             except Exception:
                 continue
 
-    sorted_combos = sorted(all_combos.values(), key=lambda x: x["オッズ"])[:10]
-    result = [{"組み合わせ": c["組み合わせ"], "オッズ": c["オッズ表示"]} for c in sorted_combos]
-
-    print(f"  {label}: {len(result)}組取得（全{len(all_combos)}組中）")
-    return result
+    top = sorted(all_combos.values(), key=lambda x: x["オッズ"])[:10]
+    print(f"  {label}: {len(top)}組取得（全{len(all_combos)}組中）")
+    return [{"組み合わせ": c["組み合わせ"], "オッズ": c["オッズ表示"]} for c in top]
 
 
-# ========== データマージ ==========
+# ========== データマージ・チェック ==========
 
-def merge_data(shutuba, tan_fuku):
-    for horse in shutuba:
-        no = horse["馬番"]
-        if no in tan_fuku:
-            horse.update(tan_fuku[no])
-        else:
-            horse.setdefault("単勝", "--")
-            horse.setdefault("複勝", "--")
-    return shutuba
+def merge_data(horses, tan_fuku):
+    for h in horses:
+        odds = tan_fuku.get(h["馬番"], {})
+        h["単勝"] = odds.get("単勝", "--")
+        h["複勝"] = odds.get("複勝", "--")
+        # オッズページで取れなかった単勝は出馬表の値で埋める
+        if h["単勝"] in ("", "--") and h.get("単勝_出馬表"):
+            h["単勝"] = h["単勝_出馬表"]
+    return horses
 
 
-# ========== Claude貼り付け用テキスト整形 ==========
+def check_data(horses):
+    """取得漏れを一覧にする（出力テキストにも載せ、AI に欠損を伝える）"""
+    active = [h for h in horses if not h.get("取消")]
+    items = [
+        ("単勝", lambda h: h.get("単勝") in ("", "--")),
+        ("複勝", lambda h: h.get("複勝") in ("", "--")),
+        ("騎手", lambda h: not h.get("騎手")),
+        ("調教師", lambda h: not h.get("調教師")),
+        ("脚質", lambda h: not h.get("脚質")),
+        ("過去成績", lambda h: not h.get("過去成績")),
+    ]
+    warnings = []
+    for label, missing in items:
+        nos = [h["馬番"] for h in active if missing(h)]
+        if nos:
+            warnings.append(f"{label}未取得: 馬番 {', '.join(nos)}")
+    if any(h.get("馬体重") == "未発表" for h in active):
+        warnings.append("馬体重は未発表（発走約2時間前に発表）")
+    return warnings
 
-def format_for_claude(horses, keibajo, date, race_no,
-                      race_info=None, wide_top=None, sanren_top=None):
+
+# ========== クリップボード ==========
+
+def copy_to_clipboard(text):
+    """Windows のクリップボードへコピーする。成功したら True"""
+    if sys.platform != "win32":
+        return False
+    try:
+        # clip.exe は BOM 付き UTF-16 を Unicode として受け取る
+        subprocess.run(["clip"], input=text.encode("utf-16"), check=True)
+        return True
+    except Exception:
+        pass
+    try:
+        import tkinter
+        root = tkinter.Tk()
+        root.withdraw()
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        root.update()
+        root.destroy()
+        return True
+    except Exception:
+        return False
+
+
+# ========== AI貼り付け用テキスト整形 ==========
+
+def format_for_ai(horses, keibajo, date, race_no, race_info=None,
+                  wide_top=None, sanren_top=None, warnings=None):
     d = f"{date[:4]}/{date[4:6]}/{date[6:]}"
     ri = race_info or {}
+    title = f"{d} {keibajo} {race_no}R"
+    if ri.get("レース名"):
+        title += f" {ri['レース名']}"
     lines = [
-        f"【{d} {keibajo} {race_no}R 出馬表 + オッズ + 過去成績】",
-        f"収集時刻: {datetime.now().strftime('%H:%M:%S')}",
+        f"【{title} 出馬表 + オッズ + 過去成績】",
+        f"収集時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        + (f" / 発走: {ri['発走']}" if ri.get("発走") else ""),
         "",
-        f"レース条件: {ri.get('馬場種別','不明')} {ri.get('距離','不明')} "
-        f"/ 馬場状態: {ri.get('馬場状態','不明')} / クラス: {ri.get('クラス','不明')}",
+        f"レース条件: {ri.get('馬場種別', '不明')} {ri.get('距離', '不明')} "
+        f"/ 馬場状態: {ri.get('馬場状態', '不明')} / クラス: {ri.get('クラス') or '不明'}"
+        + (f" / {ri['頭数']}頭" if ri.get("頭数") else ""),
         "",
-        f"{'馬番':>3} {'馬名':<14} {'性齢':>4} {'斤量':>4} "
-        f"{'騎手':<8} {'調教師':<8} {'馬体重':>10} {'単勝':>6} {'複勝':>13} {'脚質':>4}",
-        "-" * 90,
     ]
 
+    cols = [("馬番", 4, ">"), ("馬名", 20, "<"), ("性齢", 5, "<"), ("斤量", 5, ">"),
+            ("騎手", 11, "<"), ("調教師", 11, "<"), ("馬体重", 9, ">"),
+            ("単勝", 7, ">"), ("人気", 5, ">"), ("複勝", 12, ">"), ("脚質", 5, "<")]
+    lines.append(" ".join(pad(c, w, a) for c, w, a in cols))
+    rule = "-" * (sum(w for _, w, _ in cols) + len(cols) - 1)
+    lines.append(rule)
+
     for h in horses:
         if h.get("取消"):
-            lines.append(f"  {h['馬番']:>2} {h['馬名']:<14} ※取消")
+            lines.append(f"{pad(h['馬番'], 4, '>')} {pad(h['馬名'], 20)} ※取消・除外")
             continue
-
         weight = h.get("馬体重", "未発表")
-        diff   = h.get("体重増減", 0)
-        weight_str = (
-            f"{weight}({'+' if diff >= 0 else ''}{diff})"
-            if isinstance(weight, int) else str(weight)
-        )
-
-        lines.append(
-            f"  {h['馬番']:>2} {h['馬名']:<14} {h.get('性齢',''):>4} "
-            f"{h.get('斤量',''):>4} {h.get('騎手',''):<8} "
-            f"{h.get('調教師',''):<8} {weight_str:>10} "
-            f"{h.get('単勝','--'):>6} {h.get('複勝','--'):>13} "
-            f"{h.get('脚質',''):>4}"
-        )
-
-    lines.append("-" * 90)
+        diff = h.get("体重増減", 0)
+        weight_str = f"{weight}({diff:+d})" if isinstance(weight, int) else str(weight)
+        vals = [h["馬番"], h["馬名"], h.get("性齢", ""), h.get("斤量", ""),
+                h.get("騎手", ""), h.get("調教師", ""), weight_str,
+                h.get("単勝", "--"), h.get("人気", ""), h.get("複勝", "--"), h.get("脚質", "")]
+        lines.append(" ".join(pad(v, w, a) for v, (_, w, a) in zip(vals, cols)))
+    lines.append(rule)
 
     # 各馬の過去成績
-    lines.append("")
-    lines.append("【各馬の過去成績（直近5走）】")
-    lines.append(
-        f"  {'馬番':>3} {'馬名':<14}  "
-        f"{'日付':<12} {'競馬場':>6} {'距離':>7} {'馬場':>4} "
-        f"{'着順':>4} {'タイム':>8} {'通過':>10} {'上がり':>6}"
-    )
-    lines.append("  " + "-" * 82)
+    pcols = [("日付", 10, "<"), ("競馬場", 6, "<"), ("距離", 7, "<"), ("馬場", 4, "<"),
+             ("着順", 4, ">"), ("タイム", 6, ">"), ("通過", 11, ">"), ("上がり", 6, ">")]
+    lines += ["", "【各馬の過去成績（直近5走）】",
+              f"{pad('馬番', 4, '>')} {pad('馬名', 20)} " + " ".join(pad(c, w, a) for c, w, a in pcols)]
+    lines.append("-" * (4 + 1 + 20 + 1 + sum(w for _, w, _ in pcols) + len(pcols) - 1))
 
     for h in horses:
         if h.get("取消"):
             continue
-        no   = h["馬番"]
-        name = h["馬名"]
+        prefix = f"{pad(h['馬番'], 4, '>')} {pad(h['馬名'], 20)} "
         hist = h.get("過去成績", [])
-        is_premium = h.get("過去成績_premium", False)
-
-        prefix = f"  {no:>3} {name:<14}"
-
         if not hist:
-            note = "（keiba.go.jp 未取得）" if is_premium else "（過去成績なし）"
-            lines.append(f"{prefix}  {note}")
+            lines.append(prefix + "（過去成績を取得できず）")
             continue
-
         for i, r in enumerate(hist):
-            row_prefix = prefix if i == 0 else " " * (3 + 1 + 14 + 2)
-            lines.append(
-                f"{row_prefix}  "
-                f"{r.get('日付',''):<12} "
-                f"{r.get('競馬場',''):>6} "
-                f"{r.get('距離',''):>7} "
-                f"{r.get('馬場',''):>4} "
-                f"{r.get('着順',''):>4} "
-                f"{r.get('タイム',''):>8} "
-                f"{r.get('通過',''):>10} "
-                f"{r.get('上がり',''):>6}"
-            )
+            row = " ".join(pad(r.get(c, ""), w, a) for c, w, a in pcols)
+            lines.append((prefix if i == 0 else " " * disp_width(prefix)) + row)
 
-    # ワイド人気上位
-    if wide_top:
-        lines.append("")
-        lines.append("【ワイド 人気上位】")
-        for i, c in enumerate(wide_top[:10], 1):
-            lines.append(f"  {i:2d}位  {c['組み合わせ']:<8}  {c['オッズ']}倍")
+    for label, combos in (("ワイド", wide_top), ("三連複", sanren_top)):
+        if combos:
+            lines += ["", f"【{label} 人気上位】"]
+            for i, c in enumerate(combos[:10], 1):
+                lines.append(f"  {i:2d}位  {pad(c['組み合わせ'], 8)}  {c['オッズ']}倍")
 
-    # 三連複人気上位
-    if sanren_top:
-        lines.append("")
-        lines.append("【三連複 人気上位】")
-        for i, c in enumerate(sanren_top[:10], 1):
-            lines.append(f"  {i:2d}位  {c['組み合わせ']:<8}  {c['オッズ']}倍")
+    if warnings:
+        lines += ["", "【データの欠損】"] + [f"・{w}" for w in warnings]
 
     lines += [
         "",
-        "【Claudeへの指示】",
+        "【AIへの指示】",
         "上記データをもとに、このレースで的中する可能性が最も高い買い方を予想してください。",
         "本命一点買いより、配当とのバランスが取れた買い目を優先してください。",
+        "データの欠損がある項目は、推測で補わず欠損として扱ってください。",
         "",
         "■ 分析観点（優先度順に考慮すること）",
         "・人気と実力の乖離：単勝オッズが高いのに過去成績が優秀な馬（穴馬）を特定する",
@@ -859,8 +821,125 @@ def format_for_claude(horses, keibajo, date, race_no,
         "   - 各買い目の推定期待値（オッズ × 推定的中率）を記載",
         "5. 【総評】50字以内で結論",
     ]
+    return "\n".join(line.rstrip() for line in lines)
 
-    return "\n".join(lines)
+
+# ========== 1レース分の収集 ==========
+
+def collect_race(page, keibajo_name, race_date, race_no):
+    code = KEIBA_CODES.get(keibajo_name)
+    if not code:
+        print(f"未対応の競馬場です: {keibajo_name}")
+        return
+    race_id = f"{race_date[:4]}{code}{race_date[4:8]}{race_no:02d}"
+    url_shutuba = f"{NETKEIBA}/race/shutuba.html?race_id={race_id}"
+    odds_url = f"{NETKEIBA}/odds/?race_id={race_id}&type="
+
+    print(f"\n収集対象: {keibajo_name} {race_date[:4]}/{race_date[4:6]}/{race_date[6:]} {race_no}R"
+          f"（race_id: {race_id}）")
+
+    print("\n[出馬表]")
+    horses, soup = scrape_shutuba(page, url_shutuba)
+    if not horses:
+        print("出馬表を取得できませんでした。日付・競馬場・レース番号を確認してください:")
+        print(f"  {url_shutuba}")
+        return
+    race_info = scrape_race_info(soup)
+    print(f"  {race_info['レース名']} / {race_info['馬場種別']}{race_info['距離']} "
+          f"/ 馬場:{race_info['馬場状態']} / {race_info['クラス']}")
+
+    need = [h for h in horses if h.get("要補完") and not h.get("取消")]
+    if need:
+        print(f"\n[過去成績: keiba.go.jp から取得] {len(need)}頭")
+        past_map = scrape_keibago_past5(page, keibajo_name, race_date, race_no)
+        for h in need:
+            if h["馬番"] in past_map:
+                h["過去成績"] = past_map[h["馬番"]]
+
+    print("\n[単勝・複勝オッズ]")
+    tan_fuku = scrape_tan_fuku(page, odds_url + "b1")
+    print("\n[ワイドオッズ]")
+    wide_top = scrape_combo_odds(page, odds_url + "b5", "ワイド")
+    print("\n[三連複オッズ]")
+    sanren_top = scrape_combo_odds(page, odds_url + "b7", "三連複")
+
+    merged = merge_data(horses, tan_fuku)
+    warnings = check_data(merged)
+    text = format_for_ai(merged, keibajo_name, race_date, race_no, race_info,
+                         wide_top, sanren_top, warnings)
+
+    print("\n" + "=" * 70)
+    print(text)
+    print("=" * 70)
+
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    path = OUTPUT_DIR / f"{race_date}_{keibajo_name}{race_no}R.txt"
+    path.write_text(text, encoding="utf-8")
+    print(f"\nファイル保存: {path}")
+    if warnings:
+        print("取得できなかった項目:")
+        for w in warnings:
+            print(f"  ・{w}")
+    if copy_to_clipboard(text):
+        print("\n★ クリップボードにコピーしました。AI のチャット欄に貼り付けてください。")
+    else:
+        print("\nクリップボードへのコピーに失敗しました。上のファイルを開いてコピーしてください。")
+
+
+# ========== メイン ==========
+
+def parse_args(argv):
+    """コマンドライン引数 [競馬場] [レース番号] [日付] を解釈する"""
+    if not argv:
+        return None
+    name = argv[0]
+    if name.isdigit() and name in CODE_TO_NAME:
+        name = CODE_TO_NAME[name]
+    if name not in KEIBA_CODES:
+        print(f"競馬場名が不明です: {argv[0]}（使えるもの: {' / '.join(KEIBA_CODES)}）")
+        sys.exit(1)
+    no_text = argv[1].upper().rstrip("R") if len(argv) >= 2 else ""
+    if not (no_text.isdigit() and 1 <= int(no_text) <= 12):
+        print("レース番号を 1〜12 で指定してください。例: keiba_scraper.py 盛岡 5")
+        sys.exit(1)
+    date = parse_date(argv[2]) if len(argv) >= 3 else parse_date("")
+    if not date:
+        print(f"日付として読めません: {argv[2]}")
+        sys.exit(1)
+    return name, int(no_text), date
+
+
+def main():
+    print("=" * 60)
+    print("  地方競馬 自動収集スクリプト v5（netkeiba + keiba.go.jp）")
+    print("=" * 60)
+
+    direct = parse_args(sys.argv[1:])
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_context(user_agent=UA).new_page()
+        try:
+            if direct:
+                name, no, date = direct
+                collect_race(page, name, date, no)
+                return
+
+            race_date = ask_date()
+            while True:
+                name, no = choose_race(page, race_date)
+                collect_race(page, name, race_date, no)
+
+                ans = input("\n続けますか？ [Enter=別のレース / d=日付を変える / q=終了]: ").strip().lower()
+                if ans in ("q", "n", "no"):
+                    break
+                if ans == "d":
+                    race_date = ask_date()
+        except KeyboardInterrupt:
+            print("\n中断しました。")
+        finally:
+            browser.close()
+    print("\n終了します。")
 
 
 if __name__ == "__main__":

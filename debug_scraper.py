@@ -3,21 +3,29 @@ debug_scraper.py
 netkeibaのHTML構造を確認してkeiba_scraper.pyのセレクタを修正するためのデバッグツール。
 
 使い方:
-    python debug_scraper.py
+    python debug_scraper.py 202635102505
+    （引数は race_id = YYYY + 競馬場コード(2桁) + MMDD + レース番号(2桁)。省略時は入力を求める）
     → debug_output/ フォルダにHTMLとセレクタ候補が保存される
 """
 
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from pathlib import Path
+import re
+import sys
 import time
 
-# デバッグ用URL（門別11R: 2026年5月6日）
-# race_id形式: YYYY + 競馬場コード(2桁) + MMDD + レース番号(2桁)
-RACE_ID   = "202630050611"
-URL_SHUTUBA = f"https://nar.netkeiba.com/race/shutuba.html?race_id={RACE_ID}"
-URL_ODDS    = f"https://nar.netkeiba.com/odds/index.html?race_id={RACE_ID}&type=b6"
-OUTPUT_DIR  = Path("debug_output")
+OUTPUT_DIR  = Path(__file__).parent / "debug_output"
+
+
+def get_race_id():
+    """コマンドライン引数か入力から12桁の race_id を得る"""
+    rid = sys.argv[1] if len(sys.argv) >= 2 else input("race_id（12桁、例: 202635102505）: ")
+    rid = rid.strip()
+    if not re.fullmatch(r"\d{12}", rid):
+        print("race_id は12桁の数字で指定してください。")
+        sys.exit(1)
+    return rid
 
 def fetch(page, url, label):
     """指定URLを開いてHTMLを返す。networkidleまで最大30秒待機"""
@@ -88,13 +96,13 @@ def analyze(html, label):
     return "\n".join(lines)
 
 def main():
+    race_id = get_race_id()
+    url_shutuba = f"https://nar.netkeiba.com/race/shutuba.html?race_id={race_id}"
+    url_odds    = f"https://nar.netkeiba.com/odds/?race_id={race_id}&type=b1"
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"]
-        )
+        browser = p.chromium.launch(headless=True)
         context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -106,14 +114,14 @@ def main():
         page = context.new_page()
 
         # 出馬表
-        html_shutuba = fetch(page, URL_SHUTUBA, "出馬表")
+        html_shutuba = fetch(page, url_shutuba, "出馬表")
         (OUTPUT_DIR / "shutuba.html").write_text(html_shutuba, encoding="utf-8")
         report_s = analyze(html_shutuba, "出馬表")
         print(report_s)
         (OUTPUT_DIR / "report_shutuba.txt").write_text(report_s, encoding="utf-8")
 
         # オッズ
-        html_odds = fetch(page, URL_ODDS, "オッズ")
+        html_odds = fetch(page, url_odds, "オッズ")
         (OUTPUT_DIR / "odds.html").write_text(html_odds, encoding="utf-8")
         report_o = analyze(html_odds, "オッズ")
         print(report_o)
@@ -122,7 +130,7 @@ def main():
         browser.close()
 
     print(f"\n✅ デバッグファイルを {OUTPUT_DIR.resolve()} に保存しました。")
-    print("   report_shutuba.txt と report_odds.txt の内容をClaudeに貼り付けてください。")
+    print("   report_shutuba.txt と report_odds.txt の内容を AI に貼り付けて、セレクタの修正を依頼してください。")
 
 if __name__ == "__main__":
     main()
