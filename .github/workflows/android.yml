@@ -1,0 +1,35 @@
+# android/ 以下が変わったら、デバッグ版 APK をビルドして Artifacts に置く
+name: Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      - name: Build debug APK
+        working-directory: android
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keiba-collector-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          retention-days: 30

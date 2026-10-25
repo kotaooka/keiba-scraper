@@ -1,0 +1,799 @@
+// scraper.js — keiba_scraper.py（PC版）の解析・整形を移植したもの。
+// アプリの WebView が各ページを開いたあとにこのファイルを注入し、KS.xxx(document) を呼ぶ。
+// PC版の解析を直したときは、ここも同じように直す（android/README の「PC版との対応」参照）。
+(function (global) {
+  "use strict";
+
+  // ========== 設定（PC版と同じ値） ==========
+
+  // netkeiba の競馬場コード（race_id の5〜6桁目）
+  const KEIBA_CODES = {
+    "門別": "30", "盛岡": "35", "水沢": "36",
+    "浦和": "42", "船橋": "43", "大井": "44", "川崎": "45",
+    "金沢": "46", "笠松": "47", "名古屋": "48",
+    "園田": "50", "姫路": "51", "高知": "54", "佐賀": "55",
+    "帯広(ば)": "65",
+  };
+  const CODE_TO_NAME = {};
+  for (const [k, v] of Object.entries(KEIBA_CODES)) CODE_TO_NAME[v] = k;
+
+  // keiba.go.jp (NAR公式) の競馬場コード — netkeiba と異なる
+  const KEIBAGO_CODES = {
+    "門別": "36", "盛岡": "10", "水沢": "11",
+    "浦和": "18", "船橋": "19", "大井": "20", "川崎": "21",
+    "金沢": "22", "笠松": "23", "名古屋": "24",
+    "園田": "27", "姫路": "28", "高知": "31", "佐賀": "32",
+  };
+
+  const NETKEIBA = "https://nar.netkeiba.com";
+  const COND_MAP = { "稍": "稍重", "不": "不良", "良": "良", "重": "重", "稍重": "稍重", "不良": "不良" };
+
+  // 買い目に採用する期待値の下限（PC版の EV_MIN と同じ）
+  const EV_MIN = 1.2;
+
+  // AI への指示文（PC版の PROMPT_TEXT と同じ文面にそろえる）
+  const PROMPT_TEXT = `
+【AIへの指示】
+上記データだけを使って、このレースの買い目を決めてください。
+
+■ 目的と制約
+・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。
+・予算は1000円、最大3点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
+・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
+・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
+・ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
+
+■ 手順
+1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
+2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。
+3. 各馬の評価：次の観点で、市場評価より上か下かを判断する。
+   ・人気と着順：過去走で人気より上の着順に来ているか（人気以上に走る馬か、人気を裏切る馬か）
+   ・負け幅：着順より「差」を重視する。頭数が少ないレースの着順は割り引いて見る
+   ・条件適性：今回と同じ馬場種別・近い距離（±200m）での着順、「成績」の左・右・場・距
+   ・クラス：過去走のクラスと今回のクラスを比べ、昇級・降級を判断する。中央(J)のレースは別物として扱う
+   ・近走の推移：直近3走の着順・差・上がりが良化しているか悪化しているか
+   ・タイム：同じ競馬場・同じ距離・近い馬場状態のレース同士でだけ比べる（条件が違うタイムは比べない）
+   ・前走間隔：中1週以内や3か月以上は割り引いて考える
+   ・騎手：乗り替わりの有無と騎手コンビ成績
+   ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
+4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
+5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大3点を選び、資金を配分する。
+
+■ 出力フォーマット（この順で出力）
+1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬
+2. 【展開予想】逃げ・先行候補とペースを2〜3行で
+3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
+4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）
+5. 【総評】50字以内
+6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+#PRED
+馬番,推定勝率,推定複勝率
+1,12.5,35.0
+#BET
+券種,組み合わせ,金額
+ワイド,3-7,500
+`;
+
+  // ========== 文字列ユーティリティ ==========
+
+  // BeautifulSoup の get_text(sep, strip=True) と同じ：テキストノードを前後空白を除いて sep でつなぐ
+  function gt(el, sep) {
+    if (!el) return "";
+    const doc = el.ownerDocument || el;
+    const walker = doc.createTreeWalker(el, 4 /* NodeFilter.SHOW_TEXT */);
+    const parts = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      const p = n.nodeValue.trim();
+      if (p) parts.push(p);
+    }
+    return parts.join(sep || "");
+  }
+
+  // BeautifulSoup の get_text()（前後空白を除かない）
+  function raw(el) {
+    return el ? el.textContent : "";
+  }
+
+  // 全角文字を2、半角文字を1とした表示幅（Python の east_asian_width が F/W/A の文字を2とするのに近づける）
+  function charWidth(c) {
+    const cp = c.codePointAt(0);
+    if (cp < 0x80) return 1;
+    if ((cp >= 0xff61 && cp <= 0xff9f)) return 1; // 半角カナ
+    if (cp >= 0x1100) return 2;
+    // ラテン補助・記号などの曖昧幅（A）は2として扱う（PC版と同じ）
+    if (cp >= 0xa1) return AMBIGUOUS.has(cp) ? 2 : 1;
+    return 1;
+  }
+  // 0x00A1〜0x10FF の曖昧幅のうち出力に出うる主なもの
+  const AMBIGUOUS = new Set([0xa1, 0xa4, 0xa7, 0xa8, 0xaa, 0xad, 0xae, 0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb6, 0xb7,
+    0xb8, 0xb9, 0xba, 0xbc, 0xbd, 0xbe, 0xbf, 0xc6, 0xd0, 0xd7, 0xd8, 0xde, 0xdf, 0xe0, 0xe1, 0xe6, 0xe8, 0xe9,
+    0xea, 0xec, 0xed, 0xf0, 0xf2, 0xf3, 0xf7, 0xf8, 0xf9, 0xfa, 0xfc, 0xfe]);
+
+  function dispWidth(s) {
+    let w = 0;
+    for (const c of String(s)) w += charWidth(c);
+    return w;
+  }
+
+  function pad(s, width, align) {
+    s = String(s);
+    const space = " ".repeat(Math.max(0, width - dispWidth(s)));
+    return align === ">" ? space + s : s + space;
+  }
+
+  function hasClassMatching(el, re) {
+    return [...el.classList].some((c) => re.test(c));
+  }
+
+  function nowStamp() {
+    const d = new Date();
+    const z = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
+  }
+
+  // ========== 開催一覧 ==========
+
+  function parseRaceList(doc) {
+    const venues = [];
+    for (const dl of doc.querySelectorAll("dl.RaceList_DataList")) {
+      const races = [];
+      for (const li of dl.querySelectorAll("li.RaceList_DataItem")) {
+        const a = li.querySelector("a[href*='race_id=']");
+        if (!a) continue;
+        const m = (a.getAttribute("href") || "").match(/race_id=(\d{12})/);
+        if (!m) continue;
+        const raceId = m[1];
+        const data = li.querySelector(".RaceData");
+        const timeEl = data ? data.querySelector("span") : null;
+        const heads = raw(li).match(/(\d+)頭/);
+        const titleEl = li.querySelector(".ItemTitle");
+        races.push({
+          race_id: raceId,
+          no: parseInt(raceId.slice(-2), 10),
+          time: gt(timeEl),
+          title: gt(titleEl),
+          heads: heads ? heads[1] : "",
+        });
+      }
+      if (!races.length) continue;
+      const code = races[0].race_id.slice(4, 6);
+      let name = CODE_TO_NAME[code];
+      if (!name) {
+        // 未登録の競馬場は見出しから名前を取る（"9回 盛岡 4日目" → "盛岡"）
+        const title = dl.querySelector(".RaceList_DataTitle");
+        const rawTitle = title ? gt(title, " ") : code;
+        name = rawTitle.replace(/\d+回|\d+日目/g, "").trim() || code;
+      }
+      venues.push({ name, races });
+    }
+    return venues;
+  }
+
+  // 発走前で最も早いレースの位置。全レース終了なら最終レース
+  function nextRaceIndex(races, raceDate) {
+    const now = new Date();
+    const z = (n) => String(n).padStart(2, "0");
+    const today = `${now.getFullYear()}${z(now.getMonth() + 1)}${z(now.getDate())}`;
+    if (raceDate !== today) return 0;
+    for (let i = 0; i < races.length; i++) {
+      const m = races[i].time.match(/^(\d{1,2}):(\d{2})$/);
+      if (m && (+m[1] > now.getHours() || (+m[1] === now.getHours() && +m[2] > now.getMinutes()))) return i;
+    }
+    return races.length - 1;
+  }
+
+  // ========== 出馬表 ==========
+
+  function parseShutuba(doc) {
+    const rows = doc.querySelectorAll("table.ShutubaTable tr.HorseList");
+    let horses;
+    if (rows.length) {
+      horses = [...rows].map(parseTrHorse).filter(Boolean);
+    } else {
+      horses = [...doc.querySelectorAll("dl.HorseList")].map(parseDlHorse).filter(Boolean);
+    }
+    const kyaku = parseKyakuType(doc);
+    for (const h of horses) {
+      if (!h["脚質"]) h["脚質"] = kyaku[h["馬番"]] || "";
+    }
+    return { horses, race_info: parseRaceInfo(doc) };
+  }
+
+  function parseTrHorse(tr) {
+    const tds = [...tr.querySelectorAll("td")];
+    const umaban = tds.find((td) => hasClassMatching(td, /^Umaban/));
+    const no = gt(umaban);
+    if (!/^\d+$/.test(no)) return null;
+    const waku = tds.find((td) => hasClassMatching(td, /^Waku\d/));
+    const nameA = tr.querySelector(".HorseName a");
+
+    const h = {
+      "枠番": gt(waku),
+      "馬番": no,
+      "馬名": nameA ? (nameA.getAttribute("title") || gt(nameA)) : "",
+      "性齢": gt(tr.querySelector(".Age")),
+      "騎手": gt(tr.querySelector("td.Jockey a")),
+      "調教師": gt(tr.querySelector("td.Trainer a")),
+      "脚質": "",
+      "過去成績": [],
+      "要補完": true,
+    };
+
+    h["斤量"] = "";
+    for (const td of tr.querySelectorAll("td.Txt_C")) {
+      const t = gt(td).replace(/[▲△☆★◇]/g, "");
+      if (/^\d{2}\.\d$/.test(t)) {
+        h["斤量"] = t;
+        break;
+      }
+    }
+
+    const m = gt(tr.querySelector("td.Weight")).match(/(\d{3})\s*\(([+-]?\d+)\)/);
+    if (m) {
+      h["馬体重"] = parseInt(m[1], 10);
+      h["体重増減"] = parseInt(m[2], 10);
+    } else {
+      h["馬体重"] = "未発表";
+      h["体重増減"] = 0;
+    }
+
+    const oddsM = gt(tr.querySelector("td.Popular.Txt_R")).match(/\d+\.\d/);
+    h["単勝_出馬表"] = oddsM ? oddsM[0] : "";
+    const ninki = gt(tr.querySelector("td.Popular.Txt_C"));
+    h["人気"] = /^\d+$/.test(ninki) ? ninki : "";
+
+    const rowText = raw(tr);
+    h["取消"] = tr.classList.contains("Cancel") || rowText.includes("取消") || rowText.includes("除外");
+    return h;
+  }
+
+  function parseKyakuType(doc) {
+    const result = {};
+    for (const tr of doc.querySelectorAll("table.Kyaku_Type tr")) {
+      const label = gt(tr.querySelector("th"));
+      for (const num of tr.querySelectorAll(".Kyaku_Type_Num")) {
+        if (/^\d+$/.test(gt(num))) result[gt(num)] = label;
+      }
+    }
+    return result;
+  }
+
+  function parseDlHorse(dl) {
+    const h = { "取消": dl.classList.contains("Cancel") || !!dl.querySelector(".Cancel_Txt") };
+
+    for (const dt of dl.querySelectorAll("dt")) {
+      const classes = dt.getAttribute("class") || "";
+      if (/\bWaku[1-8]\b/.test(classes) && !classes.includes("Waku_Horse")) {
+        h["枠番"] = gt(dt);
+        break;
+      }
+    }
+
+    h["馬番"] = gt(dl.querySelector("dt.Waku_Horse"));
+    if (!/^\d+$/.test(h["馬番"])) return null;
+    h["馬名"] = gt(dl.querySelector("dt.HorseName a"));
+    h["脚質"] = gt(dl.querySelector(".Horse06 .Type span"));
+
+    const wt = dl.querySelector(".Horse07 span.transition-color");
+    const m = wt ? gt(wt).match(/(\d+)kg\s*\(([+-]?\d+)\)/) : null;
+    if (m) {
+      h["馬体重"] = parseInt(m[1], 10);
+      h["体重増減"] = parseInt(m[2], 10);
+    } else {
+      h["馬体重"] = "未発表";
+      h["体重増減"] = 0;
+    }
+
+    const barei = dl.querySelector("dd.Jockey span.Barei");
+    const tokens = barei ? gt(barei).split(/\s+/).filter(Boolean) : [];
+    h["性齢"] = tokens.length ? tokens[0] : "";
+
+    const jockeyA = dl.querySelector("dd.Jockey a");
+    if (jockeyA) for (const ch of jockeyA.querySelectorAll(".Change")) ch.remove();
+    h["騎手"] = gt(jockeyA);
+
+    h["斤量"] = "";
+    const jockeyDd = dl.querySelector("dd.Jockey");
+    if (jockeyDd) {
+      const lines = gt(jockeyDd, "\n").split("\n").reverse();
+      for (const line of lines) {
+        const cleaned = line.replace(/[▲△☆★]/g, "").trim();
+        if (/^\d{2}\.\d$/.test(cleaned)) {
+          h["斤量"] = cleaned;
+          break;
+        }
+      }
+    }
+
+    const trainer = dl.querySelector(".Horse05 a");
+    h["調教師"] = gt(trainer).replace(/^[^・]+・/, "");
+
+    const past = [...dl.querySelectorAll("dd.Past_Wrapper li.Past")].map(parseNetkeibaPastLi).filter(Boolean);
+    h["過去成績"] = past;
+    h["要補完"] = dl.querySelectorAll("dd.Past_Wrapper li.Past5_Sample").length > 0 || !past.length;
+    h["単勝_出馬表"] = "";
+    h["人気"] = "";
+    return h;
+  }
+
+  function parseNetkeibaPastLi(li) {
+    const numEl = li.querySelector(".Data04 .Num");
+    if (!numEl) return null;
+    const t = gt(numEl);
+    const rec = { "着順": /^\d+$/.test(t) ? t + "着" : t };
+
+    const m = gt(li.querySelector(".Data01")).match(/(\d{2}\/\d{2})\s*(.+?)\s*(\d+)R/);
+    if (m) {
+      rec["日付"] = m[1];
+      rec["競馬場"] = m[2].trim();
+    }
+    const d = gt(li.querySelector(".Data09"));
+    rec["距離"] = d && /\d$/.test(d) ? d + "m" : d;
+    const cond = gt(li.querySelector(".Data11"));
+    rec["馬場"] = COND_MAP[cond] || cond;
+    rec["タイム"] = gt(li.querySelector(".Data12"));
+    rec["通過"] = [...li.querySelectorAll(".Data20 .Corner")].map((c) => gt(c)).filter((c) => c !== "-").join("-");
+    const m2 = gt(li.querySelector(".Data21")).match(/(\d{2}\.\d)/);
+    rec["上がり"] = m2 ? m2[1] : "";
+    return rec;
+  }
+
+  // ========== レース基本情報 ==========
+
+  function parseRaceInfo(doc) {
+    const info = { "レース名": "", "発走": "", "距離": "不明", "馬場種別": "不明",
+      "馬場状態": "不明", "クラス": "", "頭数": "" };
+    info["レース名"] = gt(doc.querySelector(".RaceName"));
+
+    const rd1 = doc.querySelector(".RaceData01");
+    if (rd1) {
+      const text = gt(rd1, " ");
+      const m0 = text.match(/(\d{1,2}:\d{2})発走/);
+      if (m0) info["発走"] = m0[1];
+      const m = text.match(/(ダート|ダ|芝|障害|障)\s*(\d+)\s*m/);
+      if (m) {
+        info["馬場種別"] = { "ダ": "ダート", "障": "障害" }[m[1]] || m[1];
+        info["距離"] = m[2] + "m";
+      }
+      const m2 = text.match(/馬場[:：]\s*(良|稍重|稍|重|不良|不)/);
+      if (m2) info["馬場状態"] = COND_MAP[m2[1]] || m2[1];
+    }
+
+    const rd2 = doc.querySelector(".RaceData02");
+    if (rd2) {
+      for (const span of rd2.querySelectorAll("span")) {
+        const s = gt(span);
+        if (/サラ|アラ|ばん|歳|一般|重賞|オープン|[A-C]\d/.test(s)) {
+          info["クラス"] = s;
+          break;
+        }
+      }
+      const m3 = raw(rd2).match(/(\d+)頭/);
+      if (m3) info["頭数"] = m3[1];
+    }
+    return info;
+  }
+
+  // ========== keiba.go.jp 馬柱 ==========
+
+  function keibagoUrl(keibajo, raceDate, raceNo) {
+    const code = KEIBAGO_CODES[keibajo];
+    if (!code) return null;
+    return "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo/DebaTable" +
+      `?k_babaCode=${code}&k_raceDate=${raceDate.slice(0, 4)}%2F${raceDate.slice(4, 6)}%2F${raceDate.slice(6)}` +
+      `&k_raceNo=${raceNo}`;
+  }
+
+  function directChildren(el, tag) {
+    return [...el.children].filter((c) => c.tagName === tag);
+  }
+
+  function parseKeibago(doc) {
+    const result = {};
+    const tbody = doc.querySelector("section.cardTable table tbody");
+    if (!tbody) return result;
+    const blocks = [];
+    let cur = null;
+    for (const row of directChildren(tbody, "TR")) {
+      if (row.classList.contains("tBorder")) {
+        cur = [row];
+        blocks.push(cur);
+      } else if (cur) {
+        cur.push(row);
+      }
+    }
+    for (const rows of blocks) {
+      if (rows.length < 5) continue;
+      const [no, data] = parseKeibagoHorse(rows);
+      if (no) result[no] = data;
+    }
+    return result;
+  }
+
+  function parseKeibagoHorse(rows) {
+    const [r0, r1, r2, r3, r4] = rows;
+    const no = gt(r0.querySelector("td.horseNum"));
+    if (!/^\d+$/.test(no)) return [null, {}];
+    const data = { "過去成績": [], "条件別成績": {}, "持ち時計": "", "コンビ": "" };
+
+    const arrival = r0.querySelector("table.arrival");
+    if (arrival) {
+      for (const tr of arrival.querySelectorAll("tr")) {
+        const tds = [...tr.querySelectorAll("td")].map((td) => gt(td).replace(/\u00a0/g, ""));
+        if (tds.length === 5 && ["全", "左", "右", "場", "距"].includes(tds[0])) {
+          data["条件別成績"][tds[0]] = tds.slice(1).join("");
+        } else if (tds.length === 2) {
+          data["持ち時計"] = tds[1] ? `${tds[0]}（${tds[1]}）` : tds[0];
+        }
+      }
+    }
+
+    for (const td of directChildren(r1, "TD")) {
+      const m = gt(td, " ").match(/^\d{2}\.\d\s+(\d+-\d+-\d+-\d+)$/);
+      if (m) {
+        data["コンビ"] = m[1];
+        break;
+      }
+    }
+
+    const cols = [r0, r1, r2, r3, r4].map((r) => directChildren(r, "TD").slice(-5));
+    if (cols.some((c) => c.length < 5)) return [no, data];
+
+    for (let k = 0; k < 5; k++) {
+      const rec = parseKeibagoRaceInfo(cols[0][k].querySelector("div.raceInfo"));
+      if (!rec) continue;
+      rec["クラス"] = gt(cols[1][k]);
+
+      const m = gt(cols[2][k], " ").match(/(\d+)人\s+(\d{3})?\s*(\S+)?\s+(\d{2}\.\d)/);
+      if (m) {
+        rec["人気"] = m[1];
+        rec["体重"] = m[2] || "";
+        rec["騎手"] = m[3] || "";
+        rec["斤量"] = m[4];
+      }
+
+      const t = gt(cols[3][k], " ");
+      const m1 = t.match(/\d:\d{2}\.\d/);
+      rec["タイム"] = m1 ? m1[0] : "";
+      const m2 = t.match(/\b\d{1,2}(?:-\d{1,2}){1,3}\b/);
+      rec["通過"] = m2 ? m2[0] : "";
+      const m3 = t.match(/(\d{2}\.\d)\s*$/);
+      rec["上がり"] = m3 ? m3[1] : "";
+
+      const m4 = gt(cols[4][k], " ").match(/^(\d+\.\d)/);
+      rec["差"] = m4 ? (rec["着順"] === "1着" ? "-" : "+") + m4[1] : "";
+
+      data["過去成績"].push(rec);
+    }
+    return [no, data];
+  }
+
+  function parseKeibagoRaceInfo(ri) {
+    if (!ri) return null;
+    const rankEl = ri.querySelector(".pastRank");
+    if (!rankEl) return null;
+    const rankText = gt(rankEl);
+    const mRank = (rankEl.getAttribute("class") || "").match(/rank_(\d{2})/);
+    let rec;
+    if (/^\d+$/.test(rankText)) rec = { "着順": rankText + "着" };
+    else if (mRank && rankText === "") rec = { "着順": `${parseInt(mRank[1], 10)}着` };
+    else rec = { "着順": rankText };
+
+    const text = gt(ri, " ");
+    const mDate = text.match(/(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不)\s+(\d+)頭/);
+    if (!mDate) return null;
+    rec["日付"] = `20${mDate[1]}/${mDate[2]}/${mDate[3]}`;
+    rec["馬場"] = COND_MAP[mDate[4]] || mDate[4];
+    rec["頭数"] = mDate[5];
+
+    const after = text.slice(mDate.index + mDate[0].length);
+    const mVenue = after.match(/(\S+)\s+(芝)?([右左直])[内外線]?(\d{3,4})\s+(\d+)番/);
+    if (mVenue) {
+      rec["競馬場"] = mVenue[1].replace(/^Ｊ+/, "");
+      rec["JRA"] = mVenue[1].startsWith("Ｊ");
+      rec["回り"] = mVenue[3];
+      rec["距離"] = (mVenue[2] ? "芝" : "ダ") + mVenue[4] + "m";
+      rec["馬番"] = mVenue[5];
+    }
+    return rec;
+  }
+
+  // ========== オッズ ==========
+
+  function rowHorseNo(tr) {
+    const chk = tr.querySelector("input.HorseCheck_Select, input[type=checkbox]");
+    if (chk) {
+      const m = (chk.getAttribute("value") || "").match(/_c0_(\d+)$/);
+      if (m) return m[1];
+    }
+    const tds = tr.querySelectorAll("td");
+    if (tds.length >= 2 && /^\d+$/.test(gt(tds[1]))) return gt(tds[1]);
+    return null;
+  }
+
+  function parseTanFuku(doc) {
+    const tables = doc.querySelectorAll("table.RaceOdds_HorseList_Table");
+    const parseTable = (table) => {
+      const result = {};
+      for (const tr of table.querySelectorAll("tr")) {
+        const no = rowHorseNo(tr);
+        const oddsEl = tr.querySelector("td.Odds");
+        if (no && oddsEl) result[no] = gt(oddsEl, " ") || "--";
+      }
+      return result;
+    };
+    const tan = tables.length ? parseTable(tables[0]) : {};
+    const fuku = tables.length >= 2 ? parseTable(tables[1]) : {};
+    const out = {};
+    for (const no of new Set([...Object.keys(tan), ...Object.keys(fuku)])) {
+      out[no] = { "単勝": tan[no] || "--", "複勝": fuku[no] || "--" };
+    }
+    return out;
+  }
+
+  // 組み合わせオッズを all（{組み合わせ: {...}}）に足し込む
+  function extractCombos(doc, all) {
+    for (const td of doc.querySelectorAll("td.Odds[cart-item]")) {
+      const m = (td.getAttribute("cart-item") || "").match(/_c0_(.+)$/);
+      if (!m) continue;
+      const horses = m[1].split("_");
+      if (!horses.every((h) => /^\d+$/.test(h))) continue;
+      const key = horses.slice().sort((a, b) => +a - +b).join("-");
+      const nums = gt(td, " ").replace(/,/g, "").match(/\d+\.\d+/g);
+      if (!nums) continue;
+      const low = parseFloat(nums[0]);
+      if (!(key in all) || low < all[key]["オッズ"]) {
+        all[key] = {
+          "組み合わせ": key,
+          "オッズ": low,
+          "オッズ表示": nums.length >= 2 ? `${nums[0]} - ${nums[1]}` : nums[0],
+        };
+      }
+    }
+    return all;
+  }
+
+  function topCombos(all) {
+    return Object.values(all).sort((a, b) => a["オッズ"] - b["オッズ"]).slice(0, 10)
+      .map((c) => ({ "組み合わせ": c["組み合わせ"], "オッズ": c["オッズ表示"] }));
+  }
+
+  // 三連複の軸馬の選択肢（先頭は表示中の軸）
+  function axisValues(doc) {
+    return [...doc.querySelectorAll("#list_select_horse option")]
+      .map((o) => o.getAttribute("value")).filter(Boolean);
+  }
+
+  // オッズ表の中身を1本の文字列にする（切替前後の比較用。PC版の _COMBO_SIG_JS と同じ）
+  function comboSignature(doc) {
+    return [...doc.querySelectorAll("td.Odds[cart-item]")]
+      .map((e) => e.getAttribute("cart-item") + ":" + e.innerText).join("|");
+  }
+
+  // 表の中身が before から変わり、オッズの数字が入っていれば true（PC版の _COMBO_CHANGED_JS と同じ）
+  function comboChanged(doc, before) {
+    const cells = [...doc.querySelectorAll("td.Odds[cart-item]")];
+    const sig = cells.map((e) => e.getAttribute("cart-item") + ":" + e.innerText).join("|");
+    return cells.length > 0 && sig !== before && cells.some((e) => /\d+\.\d/.test(e.innerText));
+  }
+
+  // 三連複の軸を切り替える（select の値を変えて change を発火する）
+  function selectAxis(doc, value) {
+    const sel = doc.querySelector("#list_select_horse");
+    if (!sel) return false;
+    sel.value = value;
+    sel.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  }
+
+  // ========== データマージ・計算 ==========
+
+  function mergeData(horses, tanFuku) {
+    for (const h of horses) {
+      const odds = tanFuku[h["馬番"]] || {};
+      h["単勝"] = odds["単勝"] || "--";
+      h["複勝"] = odds["複勝"] || "--";
+      if (["", "--"].includes(h["単勝"]) && h["単勝_出馬表"]) h["単勝"] = h["単勝_出馬表"];
+    }
+    return horses;
+  }
+
+  function parseYmd(s, fmt) {
+    // fmt: "YYYYMMDD" or "YYYY/MM/DD"
+    const m = fmt === "YYYYMMDD" ? String(s).match(/^(\d{4})(\d{2})(\d{2})$/) : String(s).match(/^(\d{4})\/(\d{2})\/(\d{2})$/);
+    if (!m) return null;
+    return Date.UTC(+m[1], +m[2] - 1, +m[3]);
+  }
+
+  function addDerivedFields(h, raceDate) {
+    const past = h["過去成績"] || [];
+    h["前走間隔"] = "";
+    h["乗替"] = "";
+    h["斤量差"] = "";
+    if (!past.length) return;
+    const last = past[0];
+    const a = parseYmd(raceDate, "YYYYMMDD");
+    const b = parseYmd(last["日付"] || "", "YYYY/MM/DD");
+    if (a !== null && b !== null) h["前走間隔"] = `${Math.round((a - b) / 86400000)}日`;
+    const nowJ = h["騎手"] || "";
+    const lastJ = last["騎手"] || "";
+    if (nowJ && lastJ) {
+      h["乗替"] = nowJ.startsWith(lastJ) || lastJ.startsWith(nowJ) ? "なし" : `あり（前走 ${lastJ}）`;
+    }
+    const x = Number(h["斤量"]);
+    const y = Number(last["斤量"]);
+    if (h["斤量"] && last["斤量"] && !isNaN(x) && !isNaN(y)) {
+      const diff = x - y;
+      h["斤量差"] = (diff >= 0 ? "+" : "-") + Math.abs(diff).toFixed(1);
+    }
+  }
+
+  // 市場勝率(%)を h["市場勝率"] に入れ、単勝の払戻率の目安を返す（全頭そろわなければ null）
+  function addMarketProb(horses) {
+    const inv = {};
+    for (const h of horses) {
+      if (h["取消"]) continue;
+      const o = Number(h["単勝"]);
+      if (h["単勝"] && !isNaN(o) && o > 0) inv[h["馬番"]] = 1 / o;
+    }
+    const total = Object.values(inv).reduce((s, v) => s + v, 0);
+    for (const h of horses) {
+      h["市場勝率"] = total && h["馬番"] in inv ? inv[h["馬番"]] / total * 100 : null;
+    }
+    const active = horses.filter((h) => !h["取消"]).length;
+    return total && Object.keys(inv).length === active ? 1 / total : null;
+  }
+
+  function checkData(horses) {
+    const active = horses.filter((h) => !h["取消"]);
+    const items = [
+      ["単勝", (h) => ["", "--"].includes(h["単勝"] ?? "")],
+      ["複勝", (h) => ["", "--"].includes(h["複勝"] ?? "")],
+      ["騎手", (h) => !h["騎手"]],
+      ["調教師", (h) => !h["調教師"]],
+      ["脚質", (h) => !h["脚質"]],
+      ["過去成績", (h) => !(h["過去成績"] && h["過去成績"].length)],
+    ];
+    const warnings = [];
+    for (const [label, missing] of items) {
+      const nos = active.filter(missing).map((h) => h["馬番"]);
+      if (nos.length) warnings.push(`${label}未取得: 馬番 ${nos.join(", ")}`);
+    }
+    if (active.some((h) => h["馬体重"] === "未発表")) warnings.push("馬体重は未発表（発走約2時間前に発表）");
+    return warnings;
+  }
+
+  // ========== AI貼り付け用テキスト整形 ==========
+
+  function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt) {
+    ri = ri || {};
+    const d = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6)}`;
+    let title = `${d} ${keibajo} ${raceNo}R`;
+    if (ri["レース名"]) title += ` ${ri["レース名"]}`;
+    const lines = [
+      `【${title} 出馬表 + オッズ + 過去成績】`,
+      `収集時刻: ${collectedAt}` + (ri["発走"] ? ` / 発走: ${ri["発走"]}` : ""),
+      "",
+      `レース条件: ${ri["馬場種別"] || "不明"} ${ri["距離"] || "不明"} ` +
+        `/ 馬場状態: ${ri["馬場状態"] || "不明"} / クラス: ${ri["クラス"] || "不明"}` +
+        (ri["頭数"] ? ` / ${ri["頭数"]}頭` : ""),
+      "",
+    ];
+    if (payoutRate) {
+      lines.push(`単勝の払戻率（オッズから逆算した目安）: ${(payoutRate * 100).toFixed(1)}%` +
+        "　※市場勝率は控除分を除いて合計100%にそろえた値", "");
+    }
+
+    const cols = [["馬番", 4, ">"], ["馬名", 20, "<"], ["性齢", 5, "<"], ["斤量", 5, ">"],
+      ["騎手", 11, "<"], ["調教師", 11, "<"], ["馬体重", 9, ">"],
+      ["単勝", 7, ">"], ["市場勝率", 9, ">"], ["人気", 5, ">"], ["複勝", 12, ">"], ["脚質", 5, "<"]];
+    lines.push(cols.map(([c, w, a]) => pad(c, w, a)).join(" "));
+    const rule = "-".repeat(cols.reduce((s, [, w]) => s + w, 0) + cols.length - 1);
+    lines.push(rule);
+
+    for (const h of horses) {
+      if (h["取消"]) {
+        lines.push(`${pad(h["馬番"], 4, ">")} ${pad(h["馬名"], 20)} ※取消・除外`);
+        continue;
+      }
+      const weight = h["馬体重"] ?? "未発表";
+      const diff = h["体重増減"] || 0;
+      const weightStr = typeof weight === "number" ? `${weight}(${diff >= 0 ? "+" : "-"}${Math.abs(diff)})` : String(weight);
+      const vals = [h["馬番"], h["馬名"], h["性齢"] || "", h["斤量"] || "",
+        h["騎手"] || "", h["調教師"] || "", weightStr,
+        h["単勝"] || "--",
+        h["市場勝率"] != null ? `${h["市場勝率"].toFixed(1)}%` : "--",
+        h["人気"] || "", h["複勝"] || "--", h["脚質"] || ""];
+      lines.push(vals.map((v, i) => pad(v, cols[i][1], cols[i][2])).join(" "));
+    }
+    lines.push(rule);
+
+    const pcols = [["日付", 10, "<"], ["競馬場", 8, "<"], ["回", 2, "<"], ["距離", 7, "<"],
+      ["馬場", 4, "<"], ["頭数", 4, ">"], ["馬番", 4, ">"], ["人気", 4, ">"],
+      ["着順", 4, ">"], ["差", 5, ">"], ["タイム", 6, ">"], ["通過", 11, ">"],
+      ["上がり", 6, ">"], ["騎手", 8, "<"], ["斤量", 4, ">"], ["体重", 4, ">"], ["クラス", 0, "<"]];
+    lines.push(
+      "", "【各馬の過去成績（直近5走、上が新しい）】",
+      "凡例: 差=1着馬とのタイム差（+は遅れた秒数、-は自身が1着で2着馬につけた差）／回=回り（左・右）",
+      "      成績=1着-2着-3着-着外（全=全成績、左・右=回り別、場=今回の競馬場、距=今回の距離）",
+      "      騎手コンビ=今回の騎手でのこの馬の成績／前走間隔・乗替・斤量差は今回との比較",
+      "",
+      pcols.map(([c, w, a]) => pad(c, w, a)).join(" "),
+    );
+    lines.push("-".repeat(130));
+
+    for (const h of horses) {
+      if (h["取消"]) continue;
+      const cond = h["条件別成績"] || {};
+      const info = [];
+      if (Object.keys(cond).length) info.push("成績 " + Object.entries(cond).map(([k, v]) => `${k}${v}`).join(" "));
+      if (h["持ち時計"]) info.push(`持ち時計 ${h["持ち時計"]}`);
+      if (h["コンビ"]) info.push(`騎手コンビ ${h["コンビ"]}`);
+      for (const key of ["前走間隔", "乗替", "斤量差"]) if (h[key]) info.push(`${key} ${h[key]}`);
+      lines.push(`■ ${h["馬番"]} ${h["馬名"]}` + (info.length ? "｜" + info.join("｜") : ""));
+
+      const hist = h["過去成績"] || [];
+      if (!hist.length) {
+        lines.push("  （過去成績を取得できず）");
+        continue;
+      }
+      for (const r0 of hist) {
+        const r = Object.assign({}, r0);
+        if (r["JRA"]) r["競馬場"] = (r["競馬場"] || "") + "(J)";
+        r["回"] = r["回り"] || "";
+        lines.push(pcols.map(([c, w, a]) => pad(r[c] ?? "", w, a)).join(" "));
+      }
+      lines.push("");
+    }
+
+    for (const [label, combos] of [["ワイド", wideTop], ["三連複", sanrenTop]]) {
+      if (combos && combos.length) {
+        lines.push("", `【${label} 人気上位】`);
+        combos.slice(0, 10).forEach((c, i) => {
+          lines.push(`  ${String(i + 1).padStart(2)}位  ${pad(c["組み合わせ"], 8)}  ${c["オッズ"]}倍`);
+        });
+      }
+    }
+
+    if (warnings && warnings.length) {
+      lines.push("", "【データの欠損】", ...warnings.map((w) => `・${w}`));
+    }
+
+    lines.push("", ...PROMPT_TEXT.split("{EV_MIN}").join(EV_MIN.toFixed(1)).trim().split("\n"));
+    return lines.map((l) => l.replace(/\s+$/, "")).join("\n");
+  }
+
+  // 収集した部品から AI 貼り付け用テキストを作る（PC版 collect_race の後半）
+  // parts: {keibajo, race_date, race_no, shutuba:{horses,race_info}, keibago:{}, tan_fuku:{}, wide:[], sanren:[], sanren_note}
+  function build(parts) {
+    const horses = parts.shutuba.horses;
+    const card = parts.keibago || {};
+    for (const h of horses) {
+      const d = card[h["馬番"]];
+      if (!d) continue;
+      if ((d["過去成績"] && d["過去成績"].length) || h["要補完"]) h["過去成績"] = d["過去成績"];
+      h["条件別成績"] = d["条件別成績"];
+      h["持ち時計"] = d["持ち時計"];
+      h["コンビ"] = d["コンビ"];
+    }
+    for (const h of horses) addDerivedFields(h, parts.race_date);
+    mergeData(horses, parts.tan_fuku || {});
+    const payoutRate = addMarketProb(horses);
+    const warnings = checkData(horses);
+    if (parts.sanren_note) warnings.push(parts.sanren_note);
+    for (const n of parts.notes || []) warnings.push(n);
+    return formatForAi(horses, parts.keibajo, parts.race_date, parts.race_no, parts.shutuba.race_info,
+      parts.wide, parts.sanren, warnings, payoutRate, parts.collected_at || nowStamp());
+  }
+
+  global.KS = {
+    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN,
+    gt, dispWidth, pad,
+    parseRaceList, nextRaceIndex,
+    parseShutuba, parseRaceInfo, parseKyakuType,
+    keibagoUrl, parseKeibago,
+    parseTanFuku, extractCombos, topCombos, axisValues, comboSignature, comboChanged, selectAxis,
+    mergeData, addDerivedFields, addMarketProb, checkData, formatForAi, build,
+  };
+})(typeof window !== "undefined" ? window : globalThis);
