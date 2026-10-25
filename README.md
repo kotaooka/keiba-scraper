@@ -2,6 +2,8 @@
 
 netkeiba（NAR）と keiba.go.jp から出馬表・オッズ・過去成績を取得し、AI（Claude など）に貼り付けるテキストを作るツールです。結果は自動でクリップボードにコピーされます。
 
+Android 版もあります（PC なしで収集・共有まで。記録と検証は PC版のみ）。入れ方と使い方は [android/README.md](android/README.md) を参照してください。
+
 ## 必要環境
 
 - Windows 11
