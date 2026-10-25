@@ -10,6 +10,7 @@
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -99,6 +100,7 @@ PROMPT_TEXT = """
 TIMEOUT_PAGE     = 20000  # ページロード待機 (ms)
 TIMEOUT_SELECTOR = 10000  # セレクタ出現待機 (ms)
 RETRY            = 2      # ページ取得の試行回数
+REQUEST_INTERVAL = 2.0    # サイトへのアクセス間隔の下限 (秒)。サーバ負荷を避けるため短くしない
 
 
 # ========== 表示幅（全角=2）を考慮した整形 ==========
@@ -164,10 +166,23 @@ def ask_choice(prompt, n, default=None):
 
 # ========== 共通: ページ取得 ==========
 
+_last_access = 0.0
+
+
+def wait_interval():
+    """前回のアクセスから REQUEST_INTERVAL 秒たつまで待つ（ページ遷移・表の切替の前に必ず呼ぶ）"""
+    global _last_access
+    rest = REQUEST_INTERVAL - (time.monotonic() - _last_access)
+    if rest > 0:
+        time.sleep(rest)
+    _last_access = time.monotonic()
+
+
 def fetch_page(page, url, wait_selector=None, timeout=TIMEOUT_PAGE):
     """ページを開いて HTML を返す。失敗時は RETRY 回まで再試行し、最後は None を返す"""
     for attempt in range(1, RETRY + 1):
         try:
+            wait_interval()
             page.goto(url, wait_until="domcontentloaded", timeout=timeout)
             if wait_selector:
                 try:
@@ -733,6 +748,7 @@ def scrape_combo_odds(page, url, label):
         values = [o.get("value") for o in options if o.get("value")]
         for val in values[1:]:
             try:
+                wait_interval()
                 page.select_option("#list_select_horse", value=val)
                 page.wait_for_selector("td.Odds[cart-item]", timeout=TIMEOUT_SELECTOR)
                 _extract_combos(page.content(), all_combos)
