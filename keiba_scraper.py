@@ -76,11 +76,15 @@ PROMPT_TEXT = """
 1. 市場評価：単勝オッズから各馬の市場勝率 =（1/オッズ）÷ 全出走馬の（1/オッズ）の合計 を計算する。単勝が「--」の馬は計算から外し、その旨を書く。
 2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。
 3. 各馬の評価：次の観点で、市場評価より上か下かを判断する。
-   ・条件適性：今回と同じ馬場種別・近い距離（±200m）での着順
-   ・近走の推移：直近3走の着順と上がりが良化しているか悪化しているか
+   ・人気と着順：過去走で人気より上の着順に来ているか（人気以上に走る馬か、人気を裏切る馬か）
+   ・負け幅：着順より「差」を重視する。頭数が少ないレースの着順は割り引いて見る
+   ・条件適性：今回と同じ馬場種別・近い距離（±200m）での着順、「成績」の左・右・場・距
+   ・クラス：過去走のクラスと今回のクラスを比べ、昇級・降級を判断する。中央(J)のレースは別物として扱う
+   ・近走の推移：直近3走の着順・差・上がりが良化しているか悪化しているか
    ・タイム：同じ競馬場・同じ距離・近い馬場状態のレース同士でだけ比べる（条件が違うタイムは比べない）
-   ・前走からの間隔：前走日付と今回の日付から日数を出し、極端な間隔（中1週以内・3か月以上）は割り引いて考える
-   ・斤量・馬体重の増減、展開との相性
+   ・前走間隔：中1週以内や3か月以上は割り引いて考える
+   ・騎手：乗り替わりの有無と騎手コンビ成績
+   ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
 4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
 5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値1.0以上の候補から、期待値の高い順に最大3点を選び、資金を配分する。
 
@@ -484,14 +488,14 @@ def scrape_race_info(soup):
     return info
 
 
-# ========== keiba.go.jp 過去成績補完 ==========
+# ========== keiba.go.jp 過去成績・馬柱 ==========
 
-def scrape_keibago_past5(page, keibajo_name, race_date, race_no):
-    """keiba.go.jp の出馬表ページから全馬の過去5走を取得する。
-    返り値: {馬番(str): [past_race_dict, ...]}"""
+def scrape_keibago(page, keibajo_name, race_date, race_no):
+    """keiba.go.jp の出馬表（馬柱）から全馬の過去5走と成績集計を取得する。
+    返り値: {馬番(str): {"過去成績": [...], "条件別成績": {...}, "持ち時計": str, "コンビ": str}}"""
     code = KEIBAGO_CODES.get(keibajo_name)
     if not code:
-        print(f"  keiba.go.jp のコード未定義のため補完しません: {keibajo_name}")
+        print(f"  keiba.go.jp のコード未定義のため取得しません: {keibajo_name}")
         return {}
 
     url = (
@@ -503,25 +507,23 @@ def scrape_keibago_past5(page, keibajo_name, race_date, race_no):
     if not html:
         return {}
     try:
-        return _parse_keibago_table(html)
+        return parse_keibago(html)
     except Exception as e:
         print(f"  keiba.go.jp 解析エラー: {e}")
         return {}
 
 
-def _parse_keibago_table(html):
-    """section.cardTable の tbody から全馬の過去5走を抽出する。
-    各馬は tBorder 行から始まるブロック（通常5行）"""
+def parse_keibago(html):
+    """section.cardTable の馬柱を馬ごとのブロック（tBorder 行から始まる5行）に分けて解析する"""
     soup = BeautifulSoup(html, "html.parser")
     result = {}
-    table = soup.select_one("section.cardTable table tbody")
-    if not table:
+    tbody = soup.select_one("section.cardTable table tbody")
+    if not tbody:
         print("  section.cardTable が見つかりません")
         return result
 
-    # tBorder 行ごとにブロックへ分ける（行数を5行固定と決め打ちしない）
     blocks, cur = [], None
-    for row in table.find_all("tr", recursive=False):
+    for row in tbody.find_all("tr", recursive=False):
         if "tBorder" in (row.get("class") or []):
             cur = [row]
             blocks.append(cur)
@@ -529,80 +531,124 @@ def _parse_keibago_table(html):
             cur.append(row)
 
     for rows in blocks:
-        if len(rows) < 4:
+        if len(rows) < 5:
             continue
-        horse_no, past5 = _parse_keibago_horse(rows)
-        if horse_no:
-            result[horse_no] = past5
+        no, data = _parse_keibago_horse(rows)
+        if no:
+            result[no] = data
 
     print(f"  keiba.go.jp 解析: {len(result)}頭")
     return result
 
 
+def _cells(row):
+    """行の直下の td だけを返す（着別成績の入れ子テーブルの td を含めない）"""
+    return row.find_all("td", recursive=False)
+
+
 def _parse_keibago_horse(rows):
-    """keiba.go.jp の馬1頭分のブロックから (馬番, past5_list) を返す"""
-    row1 = rows[0]
-    horse_no = _text(row1.select_one("td.horseNum"))
-    if not horse_no.isdigit():
-        return None, []
+    """馬1頭分の5行から (馬番, data) を返す。
+    各行の末尾5セルが 前走〜5走前 に対応する:
+      1行目: 着順・日付・馬場・頭数・競馬場・回り距離・馬番
+      2行目: レース名（クラス）
+      3行目: 人気・馬体重・騎手・斤量
+      4行目: タイム・通過順・上がり3F
+      5行目: 1着馬とのタイム差・相手馬（自身が1着のときは2着馬との差）"""
+    r0, r1, r2, r3, r4 = rows[:5]
+    no = _text(r0.select_one("td.horseNum"))
+    if not no.isdigit():
+        return None, {}
 
-    race_infos = row1.select("td div.raceInfo")
+    data = {"過去成績": [], "条件別成績": {}, "持ち時計": "", "コンビ": ""}
 
-    # タイム・コーナー・上がりの行（通常4行目）
-    row4_tds = rows[3].find_all("td")
-    time_tds = row4_tds[2:] if len(row4_tds) >= 7 else row4_tds[max(0, len(row4_tds) - 5):]
+    # 着別成績（全・左・右・場・距）と最高タイム
+    arrival = r0.select_one("table.arrival")
+    if arrival:
+        for tr in arrival.find_all("tr"):
+            tds = [td.get_text(strip=True).replace("\xa0", "") for td in tr.find_all("td")]
+            if len(tds) == 5 and tds[0] in ("全", "左", "右", "場", "距"):
+                data["条件別成績"][tds[0]] = "".join(tds[1:])
+            elif len(tds) == 2:
+                data["持ち時計"] = f"{tds[0]}（{tds[1]}）" if tds[1] else tds[0]
 
-    past5 = []
-    for idx, ri in enumerate(race_infos[:5]):
-        rec = _parse_keibago_raceinfo(ri)
+    # 今回の騎手とこの馬のコンビ成績（"54.0 0-1-0-4" の後半）
+    for td in _cells(r1):
+        m = re.fullmatch(r"\d{2}\.\d\s+(\d+-\d+-\d+-\d+)", td.get_text(" ", strip=True))
+        if m:
+            data["コンビ"] = m.group(1)
+            break
+
+    cols = [_cells(r)[-5:] for r in (r0, r1, r2, r3, r4)]
+    if any(len(c) < 5 for c in cols):
+        return no, data
+
+    for k in range(5):
+        rec = _parse_keibago_raceinfo(cols[0][k].select_one("div.raceInfo"))
         if rec is None:
             continue
-        if idx < len(time_tds):
-            t = time_tds[idx].get_text(strip=True)
-            m1 = re.search(r"(\d:\d{2}\.\d)", t)
-            if m1:
-                rec["タイム"] = m1.group(1)
-            m2 = re.search(r"(\d{1,2}(?:-\d{1,2}){1,3})", t)
-            if m2:
-                rec["通過"] = m2.group(1)
-            m3 = re.search(r"(\d{2}\.\d)\s*$", t)
-            if m3:
-                rec["上がり"] = m3.group(1)
-        past5.append(rec)
-    return horse_no, past5
+        rec["クラス"] = cols[1][k].get_text(strip=True)
+
+        # "7人 432 菅原辰 54.0"
+        m = re.search(r"(\d+)人\s+(\d{3})?\s*(\S+)?\s+(\d{2}\.\d)", cols[2][k].get_text(" ", strip=True))
+        if m:
+            rec["人気"] = m.group(1)
+            rec["体重"] = m.group(2) or ""
+            rec["騎手"] = m.group(3) or ""
+            rec["斤量"] = m.group(4)
+
+        # "1:15.9 7-6 37.6"
+        t = cols[3][k].get_text(" ", strip=True)
+        m1 = re.search(r"\d:\d{2}\.\d", t)
+        rec["タイム"] = m1.group(0) if m1 else ""
+        m2 = re.search(r"\b\d{1,2}(?:-\d{1,2}){1,3}\b", t)
+        rec["通過"] = m2.group(0) if m2 else ""
+        m3 = re.search(r"(\d{2}\.\d)\s*$", t)
+        rec["上がり"] = m3.group(1) if m3 else ""
+
+        # "1.7 カンフーヒーロー"：負けは +1.7（勝ち馬から遅れた秒）、勝ちは -1.0（2着につけた差）
+        m4 = re.match(r"(\d+\.\d)", cols[4][k].get_text(" ", strip=True))
+        if m4:
+            rec["差"] = ("-" if rec["着順"] == "1着" else "+") + m4.group(1)
+        else:
+            rec["差"] = ""
+
+        data["過去成績"].append(rec)
+    return no, data
 
 
 def _parse_keibago_raceinfo(ri):
-    """div.raceInfo 1要素から過去成績レコードを作る"""
+    """div.raceInfo 1要素から過去成績レコードを作る。
+    例: "7 26.10.19 稍重 10頭 / 盛岡 左1200 2番"、"16 26.08.30 良 16頭 / Ｊ札幌 芝右2000 8番" """
+    if ri is None:
+        return None
     rank_el = ri.select_one(".pastRank")
     if not rank_el:
         return None
-    rank_classes = " ".join(rank_el.get("class") or [])
     rank_text = rank_el.get_text(strip=True)
-    m_rank = re.search(r"rank_0([1-3])", rank_classes)
-    if m_rank:
-        rec = {"着順": f"{m_rank.group(1)}着"}
-    elif rank_text.isdigit():
+    m_rank = re.search(r"rank_(\d{2})", " ".join(rank_el.get("class") or []))
+    if rank_text.isdigit():
         rec = {"着順": rank_text + "着"}
+    elif m_rank and rank_text == "":
+        rec = {"着順": f"{int(m_rank.group(1))}着"}
     else:
         rec = {"着順": rank_text}  # "取止", "除外" 等
 
-    for line in (l.strip() for l in ri.get_text(separator="\n").split("\n")):
-        if not line:
-            continue
-        # "26.03.17　良　12頭"
-        m_date = re.search(r"(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不)\s+(\d+)頭", line)
-        if m_date:
-            rec["日付"] = f"20{m_date.group(1)}/{m_date.group(2)}/{m_date.group(3)}"
-            rec["馬場"] = COND_MAP.get(m_date.group(4), m_date.group(4))
-            continue
-        # "浦和　左1400　2番" / "Ｊ福島　芝右1200　16番"
-        m_venue = re.search(r"([^\s　]+)\s*[　\s]+(芝)?[右左直][内外線]?(\d{3,4})\s*[　\s]+\d+番", line)
-        if m_venue:
-            rec["競馬場"] = m_venue.group(1).lstrip("Ｊ")
-            rec["距離"] = ("芝" if m_venue.group(2) else "ダ") + m_venue.group(3) + "m"
+    text = ri.get_text(" ", strip=True)
+    m_date = re.search(r"(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不)\s+(\d+)頭", text)
+    if not m_date:
+        return None
+    rec["日付"] = f"20{m_date.group(1)}/{m_date.group(2)}/{m_date.group(3)}"
+    rec["馬場"] = COND_MAP.get(m_date.group(4), m_date.group(4))
+    rec["頭数"] = m_date.group(5)
 
-    return rec if rec.get("日付") else None
+    m_venue = re.search(r"(\S+)\s+(芝)?([右左直])[内外線]?(\d{3,4})\s+(\d+)番", text[m_date.end():])
+    if m_venue:
+        rec["競馬場"] = m_venue.group(1).lstrip("Ｊ")
+        rec["JRA"] = m_venue.group(1).startswith("Ｊ")
+        rec["回り"] = m_venue.group(3)
+        rec["距離"] = ("芝" if m_venue.group(2) else "ダ") + m_venue.group(4) + "m"
+        rec["馬番"] = m_venue.group(5)
+    return rec
 
 
 # ========== 単勝・複勝オッズ ==========
@@ -711,6 +757,30 @@ def merge_data(horses, tan_fuku):
     return horses
 
 
+def add_derived_fields(h, race_date):
+    """前走からの間隔・乗り替わり・斤量差をスクリプト側で計算する"""
+    past = h.get("過去成績") or []
+    h["前走間隔"], h["乗替"], h["斤量差"] = "", "", ""
+    if not past:
+        return
+    last = past[0]
+    try:
+        days = (datetime.strptime(race_date, "%Y%m%d")
+                - datetime.strptime(last.get("日付", ""), "%Y/%m/%d")).days
+        h["前走間隔"] = f"{days}日"
+    except ValueError:
+        pass
+    # keiba.go.jp の騎手名は略記（例: 菅原辰）なので前方一致で比べる
+    now_j, last_j = h.get("騎手", ""), last.get("騎手", "")
+    if now_j and last_j:
+        h["乗替"] = "なし" if now_j.startswith(last_j) or last_j.startswith(now_j) else f"あり（前走 {last_j}）"
+    try:
+        diff = float(h.get("斤量", "")) - float(last.get("斤量", ""))
+        h["斤量差"] = f"{diff:+.1f}"
+    except ValueError:
+        pass
+
+
 def check_data(horses):
     """取得漏れを一覧にする（出力テキストにも載せ、AI に欠損を伝える）"""
     active = [h for h in horses if not h.get("取消")]
@@ -798,23 +868,47 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
     lines.append(rule)
 
     # 各馬の過去成績
-    pcols = [("日付", 10, "<"), ("競馬場", 6, "<"), ("距離", 7, "<"), ("馬場", 4, "<"),
-             ("着順", 4, ">"), ("タイム", 6, ">"), ("通過", 11, ">"), ("上がり", 6, ">")]
-    lines += ["", "【各馬の過去成績（直近5走）】",
-              f"{pad('馬番', 4, '>')} {pad('馬名', 20)} " + " ".join(pad(c, w, a) for c, w, a in pcols)]
-    lines.append("-" * (4 + 1 + 20 + 1 + sum(w for _, w, _ in pcols) + len(pcols) - 1))
+    pcols = [("日付", 10, "<"), ("競馬場", 8, "<"), ("回", 2, "<"), ("距離", 7, "<"),
+             ("馬場", 4, "<"), ("頭数", 4, ">"), ("馬番", 4, ">"), ("人気", 4, ">"),
+             ("着順", 4, ">"), ("差", 5, ">"), ("タイム", 6, ">"), ("通過", 11, ">"),
+             ("上がり", 6, ">"), ("騎手", 8, "<"), ("斤量", 4, ">"), ("体重", 4, ">"), ("クラス", 0, "<")]
+    lines += [
+        "", "【各馬の過去成績（直近5走、上が新しい）】",
+        "凡例: 差=1着馬とのタイム差（+は遅れた秒数、-は自身が1着で2着馬につけた差）／回=回り（左・右）",
+        "      成績=1着-2着-3着-着外（全=全成績、左・右=回り別、場=今回の競馬場、距=今回の距離）",
+        "      騎手コンビ=今回の騎手でのこの馬の成績／前走間隔・乗替・斤量差は今回との比較",
+        "",
+        " ".join(pad(c, w, a) for c, w, a in pcols),
+    ]
+    lines.append("-" * 130)
 
     for h in horses:
         if h.get("取消"):
             continue
-        prefix = f"{pad(h['馬番'], 4, '>')} {pad(h['馬名'], 20)} "
+        cond = h.get("条件別成績") or {}
+        info = []
+        if cond:
+            info.append("成績 " + " ".join(f"{k}{v}" for k, v in cond.items()))
+        if h.get("持ち時計"):
+            info.append(f"持ち時計 {h['持ち時計']}")
+        if h.get("コンビ"):
+            info.append(f"騎手コンビ {h['コンビ']}")
+        for key in ("前走間隔", "乗替", "斤量差"):
+            if h.get(key):
+                info.append(f"{key} {h[key]}")
+        lines.append(f"■ {h['馬番']} {h['馬名']}" + ("｜" + "｜".join(info) if info else ""))
+
         hist = h.get("過去成績", [])
         if not hist:
-            lines.append(prefix + "（過去成績を取得できず）")
+            lines.append("  （過去成績を取得できず）")
             continue
-        for i, r in enumerate(hist):
-            row = " ".join(pad(r.get(c, ""), w, a) for c, w, a in pcols)
-            lines.append((prefix if i == 0 else " " * disp_width(prefix)) + row)
+        for r in hist:
+            r = dict(r)
+            if r.get("JRA"):
+                r["競馬場"] = r.get("競馬場", "") + "(J)"
+            r["回"] = r.get("回り", "")
+            lines.append(" ".join(pad(r.get(c, ""), w, a) for c, w, a in pcols))
+        lines.append("")
 
     for label, combos in (("ワイド", wide_top), ("三連複", sanren_top)):
         if combos:
@@ -853,13 +947,20 @@ def collect_race(page, keibajo_name, race_date, race_no):
     print(f"  {race_info['レース名']} / {race_info['馬場種別']}{race_info['距離']} "
           f"/ 馬場:{race_info['馬場状態']} / {race_info['クラス']}")
 
-    need = [h for h in horses if h.get("要補完") and not h.get("取消")]
-    if need:
-        print(f"\n[過去成績: keiba.go.jp から取得] {len(need)}頭")
-        past_map = scrape_keibago_past5(page, keibajo_name, race_date, race_no)
-        for h in need:
-            if h["馬番"] in past_map:
-                h["過去成績"] = past_map[h["馬番"]]
+    print("\n[馬柱: keiba.go.jp]")
+    card = scrape_keibago(page, keibajo_name, race_date, race_no)
+    for h in horses:
+        d = card.get(h["馬番"])
+        if not d:
+            continue
+        # keiba.go.jp の過去成績は人気・騎手・着差なども含むので、取れたら優先して使う
+        if d["過去成績"] or h.get("要補完"):
+            h["過去成績"] = d["過去成績"]
+        h["条件別成績"] = d["条件別成績"]
+        h["持ち時計"] = d["持ち時計"]
+        h["コンビ"] = d["コンビ"]
+    for h in horses:
+        add_derived_fields(h, race_date)
 
     print("\n[単勝・複勝オッズ]")
     tan_fuku = scrape_tan_fuku(page, odds_url + "b1")
