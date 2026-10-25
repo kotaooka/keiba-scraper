@@ -787,7 +787,39 @@
       parts.wide, parts.sanren, warnings, payoutRate, parts.collected_at || nowStamp());
   }
 
+  // build と同じテキストに、画面の要約に使う情報を添えて返す（アプリの結果画面用）
+  function buildWithInfo(parts) {
+    const text = build(parts);  // build が horses に単勝・市場勝率を書き込む
+    const horses = parts.shutuba.horses;
+    const ri = parts.shutuba.race_info || {};
+    const active = horses.filter((h) => !h["取消"]);
+    const total = active.reduce((s, h) => s + (h["市場勝率"] != null ? 1 / Number(h["単勝"]) : 0), 0);
+    const warnings = checkData(horses);
+    if (parts.sanren_note) warnings.push(parts.sanren_note);
+    return {
+      text,
+      info: {
+        race_name: ri["レース名"] || "",
+        start: ri["発走"] || "",
+        course: [ri["馬場種別"], ri["距離"]].filter((v) => v && v !== "不明").join(" "),
+        cond: ri["馬場状態"] && ri["馬場状態"] !== "不明" ? ri["馬場状態"] : "",
+        cls: ri["クラス"] || "",
+        heads: active.length,
+        payout_rate: total && active.every((h) => h["市場勝率"] != null) ? 1 / total : null,
+        warnings,
+        wide: (parts.wide || []).length,
+        sanren: (parts.sanren || []).length,
+        horses: horses.map((h) => ({
+          no: h["馬番"], waku: h["枠番"] || "", name: h["馬名"] || "", cancel: !!h["取消"],
+          odds: h["単勝"] || "--", prob: h["市場勝率"], jockey: h["騎手"] || "",
+          past: (h["過去成績"] || []).length,
+        })),
+      },
+    };
+  }
+
   global.KS = {
+    buildWithInfo,
     NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,

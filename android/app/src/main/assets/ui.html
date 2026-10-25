@@ -1,0 +1,603 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>地方競馬データ収集</title>
+<style>
+/* 配色は QC Workbench の DESIGN.md（計算ツールの青系）に合わせる */
+:root {
+  --bg: #eef1f4; --surface: #ffffff; --ink: #15212c; --ink2: #475563; --muted: #74818e;
+  --line: #d5dce3; --grid: #e4e9ee;
+  --accent: #1d5c96; --accent-ink: #ffffff; --accent-weak: #e1ebf5;
+  --ok: #17703a; --ok-weak: #e2f2e7; --warn: #8a5300; --warn-weak: #f8ecd9; --ng: #ad2a22; --ng-weak: #f8e4e2;
+  --shadow: 0 1px 2px rgba(21, 33, 44, .06), 0 2px 8px rgba(21, 33, 44, .05);
+  /* 端末に BIZ UDPGothic は無いので、外部から字体を読まずに端末の字体を使う */
+  --f-ui: "BIZ UDPGothic", "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP", system-ui, sans-serif;
+  --f-num: "IBM Plex Mono", ui-monospace, "Roboto Mono", "Droid Sans Mono", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11161b; --surface: #19212a; --ink: #e6ecf2; --ink2: #a9b5c1; --muted: #7d8996;
+    --line: #2b3641; --grid: #253039;
+    --accent: #6ba6df; --accent-ink: #0d1620; --accent-weak: #1c2f43;
+    --ok: #57c483; --ok-weak: #163222; --warn: #e3a84e; --warn-weak: #36280f; --ng: #f07a70; --ng-weak: #3a1c1a;
+    --shadow: none; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11161b; --surface: #19212a; --ink: #e6ecf2; --ink2: #a9b5c1; --muted: #7d8996;
+  --line: #2b3641; --grid: #253039;
+  --accent: #6ba6df; --accent-ink: #0d1620; --accent-weak: #1c2f43;
+  --ok: #57c483; --ok-weak: #163222; --warn: #e3a84e; --warn-weak: #36280f; --ng: #f07a70; --ng-weak: #3a1c1a;
+  --shadow: none; color-scheme: dark;
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--f-ui); font-size: 15px; line-height: 1.55; }
+body { text-autospace: normal; overscroll-behavior-y: contain; }
+button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: pointer; }
+.num { font-family: var(--f-num); font-weight: 500; font-variant-numeric: tabular-nums; }
+.hidden { display: none !important; }
+
+/* ===== 上部の帯 ===== */
+.appbar { position: sticky; top: 0; z-index: 10; background: var(--bg); padding: 12px 16px 0; }
+.appbar-row { display: flex; align-items: center; gap: 8px; min-height: 40px; }
+.appbar h1 { margin: 0; font-size: 18px; font-weight: 700; flex: 1; letter-spacing: .02em; }
+.appbar h1 small { display: block; font-size: 11.5px; font-weight: 400; color: var(--muted); letter-spacing: 0; }
+.icon-btn { width: 40px; height: 40px; border-radius: 20px; display: grid; place-items: center; color: var(--ink2); }
+.icon-btn:active { background: var(--grid); }
+.icon-btn svg { width: 22px; height: 22px; }
+
+/* 日付 */
+.datebar { display: flex; align-items: stretch; gap: 8px; margin-top: 10px; }
+.datebar .step { width: 44px; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); border: 1px solid var(--line); display: grid; place-items: center; color: var(--ink2); font-size: 20px; }
+.datebar .date { flex: 1; position: relative; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); border: 1px solid var(--line); padding: 8px 14px; text-align: left; display: flex; align-items: center; gap: 10px; }
+.datebar .date .d { font-size: 17px; font-weight: 700; }
+.datebar .date .w { color: var(--ink2); font-size: 13px; }
+.datebar .date .tag { margin-left: auto; font-size: 12px; color: var(--accent); background: var(--accent-weak); padding: 2px 8px; border-radius: 10px; }
+.datebar .date .tag.past { color: var(--muted); background: var(--grid); }
+.datebar input[type=date] { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; border: 0; }
+.datebar button:active { filter: brightness(.96); }
+
+/* 競馬場のタブ */
+.venues { display: flex; gap: 8px; overflow-x: auto; padding: 12px 16px 12px; margin: 0 -16px; scrollbar-width: none; }
+.venues::-webkit-scrollbar { display: none; }
+.venue { flex: none; padding: 7px 14px; border-radius: 18px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-weight: 700; white-space: nowrap; }
+.venue span { font-weight: 400; color: var(--muted); font-size: 12.5px; margin-left: 6px; }
+.venue[aria-selected="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.venue[aria-selected="true"] span { color: var(--accent-ink); opacity: .8; }
+
+main { padding: 0 16px 32px; }
+
+/* ===== レース一覧 ===== */
+.races { display: grid; gap: 8px; }
+.race { display: grid; grid-template-columns: 52px 1fr auto; align-items: center; gap: 12px; text-align: left; width: 100%;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; box-shadow: var(--shadow); }
+.race:active { background: var(--accent-weak); }
+.race .no { font-family: var(--f-num); font-weight: 500; font-size: 22px; color: var(--accent); text-align: center; line-height: 1; }
+.race .no small { font-size: 12px; margin-left: 1px; }
+.race .t { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.race .s { color: var(--ink2); font-size: 13px; display: flex; gap: 10px; }
+.race .badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.race.started { opacity: .55; box-shadow: none; }
+.race.next { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, var(--shadow); }
+.badge { font-size: 11.5px; padding: 1px 8px; border-radius: 9px; white-space: nowrap; line-height: 1.6; }
+.badge.next { background: var(--accent); color: var(--accent-ink); font-weight: 700; }
+.badge.done { background: var(--ok-weak); color: var(--ok); }
+.badge.ended { background: var(--grid); color: var(--muted); }
+.chev { color: var(--muted); font-size: 18px; }
+
+.section-title { display: flex; align-items: baseline; justify-content: space-between; margin: 4px 2px 8px; }
+.section-title h2 { margin: 0; font-size: 14px; color: var(--ink2); font-weight: 700; }
+.section-title p { margin: 0; font-size: 12px; color: var(--muted); }
+
+/* 読み込み中の骨組み */
+.skel { height: 66px; border-radius: 14px; background: linear-gradient(90deg, var(--surface) 0%, var(--grid) 50%, var(--surface) 100%); background-size: 200% 100%; animation: sk 1.2s ease-in-out infinite; border: 1px solid var(--line); }
+@keyframes sk { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+.empty { text-align: center; color: var(--ink2); padding: 48px 16px; }
+.empty b { display: block; color: var(--ink); font-size: 16px; margin-bottom: 6px; }
+.empty .btn { margin-top: 16px; }
+
+/* ===== ボタン ===== */
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 48px; padding: 0 18px; border-radius: 12px; font-weight: 700; }
+.btn svg { width: 20px; height: 20px; }
+.btn.primary { background: var(--accent); color: var(--accent-ink); }
+.btn.secondary { background: var(--surface); color: var(--accent); border: 1px solid var(--line); }
+.btn.quiet { color: var(--ink2); }
+.btn.danger { color: var(--ng); background: var(--surface); border: 1px solid var(--line); }
+.btn:active { filter: brightness(.94); }
+.btn:disabled { opacity: .5; }
+.btn-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+/* ===== 収集中・結果の画面 ===== */
+.page-head { display: flex; align-items: center; gap: 4px; margin: 0 -8px; }
+.page-head .back { display: flex; align-items: center; gap: 2px; color: var(--accent); padding: 8px; border-radius: 10px; font-weight: 700; }
+.page-head .back:active { background: var(--grid); }
+.race-title { margin: 6px 0 2px; font-size: 21px; font-weight: 700; line-height: 1.35; }
+.race-title .num { color: var(--accent); }
+.race-sub { color: var(--ink2); font-size: 13px; margin: 0 0 10px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 14px; }
+.chip { font-size: 12.5px; padding: 3px 10px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); color: var(--ink2); }
+
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); padding: 14px; margin-top: 12px; }
+.card h3 { margin: 0 0 8px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+.card h3 .aside { margin-left: auto; font-weight: 400; font-size: 12px; color: var(--muted); }
+
+/* 進捗 */
+.bar { height: 6px; background: var(--grid); border-radius: 3px; overflow: hidden; margin: 4px 0 2px; }
+.bar i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 3px; transition: width .4s ease; }
+.steps { list-style: none; margin: 8px 0 0; padding: 0; }
+.steps li { display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--grid); }
+.steps li:first-child { border-top: 0; }
+.steps .ic { width: 22px; height: 22px; border-radius: 11px; display: grid; place-items: center; font-size: 13px; font-weight: 700; border: 1.5px solid var(--line); color: var(--muted); }
+.steps li[data-s="run"] .ic { border-color: var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; }
+.steps li[data-s="ok"] .ic { background: var(--ok); border-color: var(--ok); color: var(--surface); }
+.steps li[data-s="warn"] .ic { background: var(--warn); border-color: var(--warn); color: var(--surface); }
+.steps li[data-s="ng"] .ic { background: var(--ng); border-color: var(--ng); color: var(--surface); }
+.steps li[data-s="skip"] .ic { border-style: dashed; }
+.steps li[data-s="wait"] .name { color: var(--muted); }
+.steps .name { font-weight: 700; font-size: 14px; }
+.steps .name small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
+.steps .det { color: var(--ink2); font-size: 13px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.note { font-size: 12.5px; color: var(--muted); margin: 10px 2px 0; }
+
+details.log { margin-top: 12px; }
+details.log summary { color: var(--ink2); font-size: 13px; padding: 6px 2px; }
+details.log pre { margin: 6px 0 0; font-family: var(--f-num); font-size: 11.5px; white-space: pre-wrap; color: var(--ink2); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px; max-height: 40vh; overflow: auto; }
+
+/* 結果 */
+.warn-card { background: var(--warn-weak); border-color: transparent; box-shadow: none; }
+.warn-card h3 { color: var(--warn); }
+.warn-card ul { margin: 0; padding-left: 1.2em; font-size: 13px; color: var(--ink); }
+.ok-card { background: var(--ok-weak); border-color: transparent; box-shadow: none; }
+.ok-card h3 { color: var(--ok); margin: 0; }
+
+.horses { display: grid; gap: 2px; }
+.horse { display: grid; grid-template-columns: 28px 1fr 52px 48px 40px; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--grid); font-size: 14px; }
+.horse:first-child { border-top: 0; }
+.horse .n { width: 26px; height: 22px; border-radius: 4px; display: grid; place-items: center; font-family: var(--f-num); font-size: 13px; border: 1px solid var(--line); }
+.horse .nm { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.horse .nm small { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.horse .pb { height: 8px; background: var(--grid); border-radius: 4px; overflow: hidden; }
+.horse .pb i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+.horse .pr { text-align: right; font-family: var(--f-num); font-size: 13px; }
+.horse .od { text-align: right; font-family: var(--f-num); font-size: 13px; color: var(--ink2); }
+.horse.cancel { color: var(--muted); }
+.horse.cancel .nm { text-decoration: line-through; }
+/* 枠の色（JRA・NAR 共通の枠色） */
+.w1 { background: #fff; color: #222; border-color: #bbb !important; } .w2 { background: #222; color: #fff; } .w3 { background: #d6301f; color: #fff; }
+.w4 { background: #1f5fc4; color: #fff; } .w5 { background: #f2c818; color: #222; } .w6 { background: #2e8b3a; color: #fff; }
+.w7 { background: #ee8a1c; color: #fff; } .w8 { background: #e86fa6; color: #fff; }
+.legend { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 8px; }
+
+details.preview summary { list-style: none; display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+details.preview summary::-webkit-details-marker { display: none; }
+details.preview summary::after { content: "›"; margin-left: auto; color: var(--muted); transform: rotate(90deg); transition: transform .2s; font-size: 18px; }
+details.preview[open] summary::after { transform: rotate(-90deg); }
+details.preview pre { margin: 10px -14px -14px; padding: 12px 14px; border-top: 1px solid var(--line); font-family: var(--f-num); font-size: 10.5px; line-height: 1.5; overflow-x: auto; white-space: pre; color: var(--ink); max-height: 60vh; }
+
+.end-actions { display: grid; gap: 8px; margin-top: 16px; }
+.sticky-actions { position: sticky; bottom: 0; background: linear-gradient(to bottom, transparent, var(--bg) 24%); padding: 20px 0 12px; margin-top: 4px; display: grid; gap: 8px; }
+
+/* ===== メニュー・通知 ===== */
+.menu { position: fixed; top: 52px; right: 12px; z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.18); min-width: 240px; padding: 6px; }
+.menu button { display: flex; width: 100%; text-align: left; padding: 11px 12px; border-radius: 8px; gap: 10px; align-items: center; }
+.menu button:active { background: var(--grid); }
+.menu .check { margin-left: auto; color: var(--accent); font-weight: 700; }
+.scrim { position: fixed; inset: 0; z-index: 25; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); opacity: 0; background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 20px; font-size: 14px; transition: all .25s; z-index: 40; pointer-events: none; white-space: nowrap; }
+.toast.show { opacity: 1; transform: translate(-50%, 0); }
+</style>
+</head>
+<body>
+
+<!-- ===== 一覧画面 ===== -->
+<div id="home">
+  <header class="appbar">
+    <div class="appbar-row">
+      <h1>地方競馬データ収集<small>出馬表・オッズ・過去5走を集めて AI へ</small></h1>
+      <button class="icon-btn" id="menuBtn" aria-label="メニュー">
+        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+      </button>
+    </div>
+    <div class="datebar">
+      <button class="step" id="prevDay" aria-label="前の日">‹</button>
+      <label class="date">
+        <span class="d num" id="dateText"></span><span class="w" id="weekText"></span><span class="tag" id="dateTag"></span>
+        <input type="date" id="dateInput" aria-label="レース日">
+      </label>
+      <button class="step" id="nextDay" aria-label="次の日">›</button>
+    </div>
+    <nav class="venues" id="venues" role="tablist"></nav>
+  </header>
+  <main>
+    <div id="raceArea"></div>
+  </main>
+</div>
+
+<!-- ===== 収集中・結果の画面 ===== -->
+<div id="detail" class="hidden">
+  <header class="appbar">
+    <div class="page-head">
+      <button class="back" id="backBtn">‹ レース一覧</button>
+    </div>
+  </header>
+  <main id="detailBody"></main>
+</div>
+
+<div class="scrim hidden" id="scrim"></div>
+<div class="menu hidden" id="menu">
+  <button id="debugToggle">読み込み中のページを表示<span class="check" id="debugCheck"></span></button>
+  <button id="clearCache">収集済みの記録を消す</button>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+// ===== Kotlin とのやり取り =====
+// JS → Kotlin：window.Android（MainActivity の Bridge）
+// Kotlin → JS：App.onRaceList / onStep / onLog / onResult / back / setTheme
+const Native = window.Android || {
+  // ブラウザで開いたとき用のダミー（画面の確認用）
+  loadRaceList() {}, collect() {}, cancel() {}, copy() {}, share() {}, setDebug() {}
+};
+
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const WEEK = ["日", "月", "火", "水", "木", "金", "土"];
+
+// 収集の段階（Scraper.kt の step キーと同じ）
+const STEPS = [
+  ["shutuba", "出馬表", "netkeiba"],
+  ["keibago", "馬柱・過去5走", "keiba.go.jp"],
+  ["tanfuku", "単勝・複勝オッズ", "netkeiba"],
+  ["wide", "ワイドオッズ", "netkeiba"],
+  ["sanren", "三連複オッズ", "netkeiba・軸ごとに切替"],
+  ["build", "テキストを作成", ""],
+];
+
+const state = {
+  date: todayStr(), venues: null, venue: null, loading: false,
+  screen: "home", job: null, debug: false,
+};
+
+// ===== 日付 =====
+function todayStr() { const d = new Date(); return ymd(d); }
+function ymd(d) { return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`; }
+function parseYmd(s) { return new Date(+s.slice(0, 4), +s.slice(4, 6) - 1, +s.slice(6)); }
+function shiftDate(days) { const d = parseYmd(state.date); d.setDate(d.getDate() + days); setDate(ymd(d)); }
+function setDate(s) { state.date = s; renderDate(); loadRaceList(); }
+function renderDate() {
+  const d = parseYmd(state.date), t = todayStr();
+  $("dateText").textContent = `${state.date.slice(0, 4)}/${state.date.slice(4, 6)}/${state.date.slice(6)}`;
+  $("weekText").textContent = `（${WEEK[d.getDay()]}）`;
+  const diff = Math.round((d - parseYmd(t)) / 86400000);
+  const tag = $("dateTag");
+  tag.textContent = diff === 0 ? "今日" : diff === -1 ? "昨日" : diff === 1 ? "明日" : diff < 0 ? `${-diff}日前` : `${diff}日後`;
+  tag.className = "tag" + (diff < 0 ? " past" : "");
+  $("dateInput").value = `${state.date.slice(0, 4)}-${state.date.slice(4, 6)}-${state.date.slice(6)}`;
+}
+
+// ===== 収集済みの記録（この端末だけに保存。同じレースを何度も取りに行かないため） =====
+const CACHE_KEY = "keiba-results";
+function readCache() { try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); } catch (e) { return {}; } }
+function writeCache(c) {
+  // 新しい順に 40 件まで残す
+  const keys = Object.keys(c).sort((a, b) => (c[b].at || "").localeCompare(c[a].at || "")).slice(0, 40);
+  const out = {}; for (const k of keys) out[k] = c[k];
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(out)); } catch (e) { /* 保存できなくても動く */ }
+}
+const cacheKey = (date, venue, no) => `${date}|${venue}|${no}`;
+
+// ===== 開催一覧 =====
+function loadRaceList() {
+  state.loading = true; state.venues = null;
+  renderVenues(); renderRaces();
+  Native.loadRaceList(state.date);
+}
+
+function renderVenues() {
+  const nav = $("venues"); nav.replaceChildren();
+  if (!state.venues) return;
+  for (const v of state.venues) {
+    const b = el("button", "venue", v.name);
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(state.venue === v.name));
+    b.append(el("span", null, `${v.races.length}R`));
+    b.onclick = () => { state.venue = v.name; renderVenues(); renderRaces(); window.scrollTo({ top: 0 }); };
+    nav.append(b);
+  }
+}
+
+function minutesOf(t) { const m = /^(\d{1,2}):(\d{2})$/.exec(t || ""); return m ? +m[1] * 60 + +m[2] : null; }
+
+function renderRaces() {
+  const area = $("raceArea"); area.replaceChildren();
+  if (state.loading) {
+    const list = el("div", "races");
+    for (let i = 0; i < 6; i++) list.append(el("div", "skel"));
+    area.append(list);
+    return;
+  }
+  if (!state.venues || !state.venues.length) {
+    const e = el("div", "empty");
+    e.append(el("b", null, state.venues ? "この日の開催はありません" : "開催一覧を読み込めませんでした"));
+    e.append(el("span", null, state.venues ? "日付を変えてください" : "通信状態を確認して、もう一度読み込んでください"));
+    const retry = el("button", "btn secondary", "もう一度読み込む"); retry.onclick = loadRaceList;
+    e.append(el("br")); e.append(retry);
+    area.append(e);
+    return;
+  }
+  const v = state.venues.find((x) => x.name === state.venue) || state.venues[0];
+  state.venue = v.name;
+  const isToday = state.date === todayStr();
+  const now = new Date(), nowMin = now.getHours() * 60 + now.getMinutes();
+  let nextIdx = -1;
+  if (isToday) nextIdx = v.races.findIndex((r) => { const m = minutesOf(r.time); return m != null && m > nowMin; });
+  const cache = readCache();
+
+  const head = el("div", "section-title");
+  head.append(el("h2", null, `${v.name}　${v.races.length}レース`));
+  head.append(el("p", null, "タップで収集"));
+  area.append(head);
+
+  const list = el("div", "races");
+  v.races.forEach((r, i) => {
+    const b = el("button", "race");
+    const started = isToday && minutesOf(r.time) != null && minutesOf(r.time) <= nowMin;
+    if (started) b.classList.add("started");
+    if (i === nextIdx) b.classList.add("next");
+    const no = el("div", "no", String(r.no)); no.append(el("small", null, "R"));
+    const mid = el("div");
+    mid.append(el("div", "t", r.title || `${r.no}R`));
+    const s = el("div", "s");
+    s.append(el("span", "num", r.time || "--:--"));
+    if (r.heads) s.append(el("span", null, `${r.heads}頭`));
+    mid.append(s);
+    const badges = el("div", "badges");
+    const c = cache[cacheKey(state.date, v.name, r.no)];
+    if (i === nextIdx) badges.append(el("span", "badge next", "次"));
+    else if (started) badges.append(el("span", "badge ended", "発走済み"));
+    if (c) badges.append(el("span", "badge done", `✓ 収集済み ${c.at.slice(11, 16)}`));
+    if (!badges.childElementCount) badges.append(el("span", "chev", "›"));
+    b.append(no, mid, badges);
+    b.onclick = () => c ? showResult(v.name, r, c) : startCollect(v.name, r);
+    list.append(b);
+  });
+  area.append(list);
+  if (nextIdx > 2) requestAnimationFrame(() => {
+    // 次のレースの1つ前が上の帯のすぐ下に来るようにする
+    const target = list.children[nextIdx - 1];
+    const header = document.querySelector("#home .appbar");
+    window.scrollTo({ top: target.getBoundingClientRect().top + window.scrollY - header.offsetHeight - 8 });
+  });
+}
+
+// ===== 収集 =====
+function raceHead(venue, race) {
+  const frag = document.createDocumentFragment();
+  const h = el("h2", "race-title");
+  h.append(document.createTextNode(`${venue} `));
+  h.append(el("span", "num", `${race.no}R`));
+  if (race.title) h.append(document.createTextNode(` ${race.title}`));
+  frag.append(h);
+  const d = parseYmd(state.date);
+  frag.append(el("p", "race-sub", `${state.date.slice(0, 4)}/${state.date.slice(4, 6)}/${state.date.slice(6)}（${WEEK[d.getDay()]}）` +
+    (race.time ? `　${race.time} 発走` : "") + (race.heads ? `　${race.heads}頭` : "")));
+  return frag;
+}
+
+function showScreen(name) {
+  state.screen = name;
+  $("home").classList.toggle("hidden", name !== "home");
+  $("detail").classList.toggle("hidden", name === "home");
+  window.scrollTo({ top: 0 });
+}
+
+function startCollect(venue, race) {
+  state.job = { venue, race, steps: {}, log: [] };
+  showScreen("collect");
+  const body = $("detailBody"); body.replaceChildren();
+  body.append(raceHead(venue, race));
+
+  const card = el("div", "card");
+  const h = el("h3", null, "収集中");
+  const pct = el("span", "aside num", "0 / " + STEPS.length); pct.id = "stepCount";
+  h.append(pct); card.append(h);
+  const bar = el("div", "bar"); const fill = el("i"); fill.id = "barFill"; bar.append(fill); card.append(bar);
+  const ul = el("ul", "steps"); ul.id = "steps";
+  for (const [key, name, sub] of STEPS) {
+    const li = el("li"); li.dataset.key = key; li.dataset.s = "wait";
+    li.append(el("span", "ic"));
+    const n = el("span", "name", name); if (sub) n.append(el("small", null, sub)); li.append(n);
+    li.append(el("span", "det num"));
+    ul.append(li);
+  }
+  card.append(ul);
+  body.append(card);
+  body.append(el("p", "note", "サイトに負荷をかけないよう、アクセスごとに2秒あけています。1レースで1〜2分かかります"));
+
+  const log = el("details", "log");
+  log.append(el("summary", null, "詳細ログ"));
+  const pre = el("pre"); pre.id = "logPre"; log.append(pre);
+  body.append(log);
+
+  const actions = el("div", "sticky-actions");
+  const cancel = el("button", "btn danger", "中止する");
+  cancel.onclick = () => { Native.cancel(); };
+  actions.append(cancel);
+  body.append(actions);
+
+  Native.collect(venue, state.date, race.no);
+}
+
+function setStep(key, s, detail) {
+  if (!state.job) return;
+  state.job.steps[key] = s;
+  const li = document.querySelector(`#steps li[data-key="${key}"]`);
+  if (li) {
+    li.dataset.s = s;
+    li.querySelector(".ic").textContent = { ok: "✓", warn: "!", ng: "×", skip: "–" }[s] || "";
+    if (detail != null) li.querySelector(".det").textContent = detail;
+  }
+  const done = Object.values(state.job.steps).filter((v) => v !== "run").length;
+  const fill = $("barFill"); if (fill) fill.style.width = `${Math.round(done / STEPS.length * 100)}%`;
+  const cnt = $("stepCount"); if (cnt) cnt.textContent = `${done} / ${STEPS.length}`;
+}
+
+function addLog(line) {
+  if (!state.job) return;
+  state.job.log.push(line);
+  const pre = $("logPre"); if (pre) { pre.textContent += (pre.textContent ? "\n" : "") + line; pre.scrollTop = pre.scrollHeight; }
+}
+
+// ===== 結果 =====
+function showResult(venue, race, res, fresh) {
+  state.job = null;
+  showScreen("result");
+  const body = $("detailBody"); body.replaceChildren();
+  const info = res.info;
+  body.append(raceHead(venue, { ...race, title: info.race_name || race.title, time: info.start || race.time, heads: info.heads || race.heads }));
+
+  const chips = el("div", "chips");
+  for (const c of [info.course, info.cond && `馬場 ${info.cond}`, info.cls]) if (c) chips.append(el("span", "chip", c));
+  body.append(chips);
+
+  // 送る・コピー
+  const send = el("button", "btn primary");
+  send.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/></svg>';
+  send.append(document.createTextNode("AIアプリへ送る"));
+  send.onclick = () => Native.share(res.text);
+  const copy = el("button", "btn secondary", "コピー");
+  copy.onclick = () => { Native.copy(res.text); toast("コピーしました"); };
+  const again = el("button", "btn secondary", "オッズを更新");
+  again.onclick = () => startCollect(venue, race);
+  const row = el("div", "btn-row"); row.append(copy, again);
+  const top = el("div"); top.style.display = "grid"; top.style.gap = "8px";
+  top.append(send, row);
+  body.append(top);
+  body.append(el("p", "note", `収集 ${res.at}` + (fresh ? "　テキストはコピー済みです" : "")));
+
+  // 欠損
+  if (info.warnings.length) {
+    const w = el("div", "card warn-card");
+    w.append(el("h3", null, `! データの欠損 ${info.warnings.length}件`));
+    const ul = el("ul"); for (const x of info.warnings) ul.append(el("li", null, x)); w.append(ul);
+    w.append(el("p", "note", "欠損は AI への指示で「推測で補わず市場評価に寄せる」ように伝えています"));
+    body.append(w);
+  } else {
+    const ok = el("div", "card ok-card"); ok.append(el("h3", null, "✓ 欠損なし")); body.append(ok);
+  }
+
+  // 各馬
+  const hc = el("div", "card");
+  const hh = el("h3", null, "単勝オッズと市場勝率");
+  if (info.payout_rate) hh.append(el("span", "aside num", `払戻率 ${(info.payout_rate * 100).toFixed(1)}%`));
+  hc.append(hh);
+  const list = el("div", "horses");
+  const maxP = Math.max(...info.horses.map((h) => h.prob || 0), 1);
+  for (const h of info.horses) {
+    const r = el("div", "horse" + (h.cancel ? " cancel" : ""));
+    r.append(el("span", "n" + (h.waku ? ` w${h.waku}` : ""), h.no));
+    const nm = el("span", "nm", h.name); if (h.jockey) nm.append(el("small", null, h.jockey)); r.append(nm);
+    const pb = el("span", "pb");
+    if (!h.cancel) { const i = el("i"); i.style.width = `${(h.prob || 0) / maxP * 100}%`; pb.append(i); }
+    r.append(pb);
+    r.append(el("span", "pr", h.cancel ? "取消" : h.prob != null ? `${h.prob.toFixed(1)}%` : "--"));
+    r.append(el("span", "od", h.cancel ? "" : h.odds));
+    list.append(r);
+  }
+  hc.append(list);
+  const lg = el("div", "legend");
+  lg.append(el("span", null, `ワイド上位 ${info.wide}組・三連複上位 ${info.sanren}組も送ります`));
+  lg.append(el("span", null, "市場勝率・単勝"));
+  hc.append(lg);
+  body.append(hc);
+
+  // テキスト
+  const pc = el("details", "card preview");
+  const lines = res.text.split("\n").length;
+  pc.append(el("summary", null, `送るテキストを見る（${lines}行）`));
+  pc.append(el("pre", null, res.text));
+  body.append(pc);
+}
+
+// ===== Kotlin から呼ばれる =====
+const App = {
+  onRaceList(list) {
+    state.loading = false;
+    state.venues = list;
+    if (list && !list.some((v) => v.name === state.venue)) state.venue = list.length ? list[0].name : null;
+    renderVenues(); renderRaces();
+  },
+  onStep(key, s, detail) { setStep(key, s, detail); },
+  onLog(line) { addLog(line); },
+  onResult(res, error) {
+    const job = state.job;
+    if (!job) return;
+    if (!res) {
+      // 失敗・中止：進捗画面のまま、理由と戻る操作を出す
+      const body = $("detailBody");
+      const act = body.querySelector(".sticky-actions"); if (act) act.remove();
+      const card = el("div", "card warn-card");
+      card.append(el("h3", null, error === "cancel" ? "中止しました" : "× 収集できませんでした"));
+      if (error && error !== "cancel") card.append(el("p", "note", error));
+      body.append(card);
+      const a = el("div", "end-actions");
+      const retry = el("button", "btn primary", "もう一度収集する"); retry.onclick = () => startCollect(job.venue, job.race);
+      const back = el("button", "btn quiet", "レース一覧に戻る"); back.onclick = goHome;
+      a.append(retry, back); body.append(a);
+      return;
+    }
+    const at = res.at;
+    const c = readCache(); c[cacheKey(state.date, job.venue, job.race.no)] = { at, text: res.text, info: res.info }; writeCache(c);
+    showResult(job.venue, job.race, { at, text: res.text, info: res.info }, true);
+  },
+  // 戻るボタン：一覧以外なら一覧へ戻して true、一覧なら false（アプリを閉じる）
+  back() {
+    if (!$("menu").classList.contains("hidden")) { closeMenu(); return true; }
+    if (state.screen === "home") return false;
+    if (state.screen === "collect" && state.job) { Native.cancel(); }
+    goHome(); return true;
+  },
+  setTheme(t) { document.documentElement.dataset.theme = t; },
+};
+window.App = App;
+
+function goHome() { state.job = null; showScreen("home"); renderRaces(); }
+
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.add("show");
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 1600);
+}
+
+// ===== メニュー =====
+function openMenu() { $("menu").classList.remove("hidden"); $("scrim").classList.remove("hidden"); }
+function closeMenu() { $("menu").classList.add("hidden"); $("scrim").classList.add("hidden"); }
+$("menuBtn").onclick = openMenu;
+$("scrim").onclick = closeMenu;
+$("debugToggle").onclick = () => {
+  state.debug = !state.debug; $("debugCheck").textContent = state.debug ? "✓" : "";
+  Native.setDebug(state.debug); closeMenu();
+};
+$("clearCache").onclick = () => { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} closeMenu(); renderRaces(); toast("記録を消しました"); };
+
+// ===== 日付の操作 =====
+$("prevDay").onclick = () => shiftDate(-1);
+$("nextDay").onclick = () => shiftDate(1);
+$("dateInput").onchange = (e) => { const v = e.target.value; if (v) setDate(v.replace(/-/g, "")); };
+$("dateInput").onclick = (e) => { try { e.target.showPicker(); } catch (err) { /* 未対応なら標準の動き */ } };
+$("backBtn").onclick = () => App.back();
+
+// 当日は「次」「発走済み」を1分ごとに更新する
+setInterval(() => { if (state.screen === "home" && !state.loading && state.date === todayStr()) renderRaces(); }, 60000);
+
+renderDate();
+if (window.Android) loadRaceList();
+</script>
+</body>
+</html>

@@ -24,7 +24,12 @@ import kotlin.coroutines.resume
  * PC版 keiba_scraper.py の fetch_page / collect_race に相当する。
  * すべて UI スレッドから呼ぶこと（WebView の制約）。
  */
-class Scraper(private val web: WebView, private val ksSource: String, private val log: (String) -> Unit) {
+class Scraper(
+    private val web: WebView,
+    private val ksSource: String,
+    private val log: (String) -> Unit,
+    private val step: (key: String, state: String, detail: String) -> Unit,
+) {
 
     companion object {
         const val NETKEIBA = "https://nar.netkeiba.com"
@@ -93,8 +98,14 @@ class Scraper(private val web: WebView, private val ksSource: String, private va
             val done = CompletableDeferred<String>()
             pageLoaded = done
             web.loadUrl(url)
-            val result = withTimeoutOrNull(TIMEOUT_PAGE) { done.await() }
-            pageLoaded = null
+            val result = try {
+                withTimeoutOrNull(TIMEOUT_PAGE) { done.await() }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                web.stopLoading()
+                throw e
+            } finally {
+                pageLoaded = null
+            }
             when (result) {
                 null -> log("  ページ取得タイムアウト（$attempt/${RETRY}回目）")
                 "" -> return true
@@ -141,73 +152,93 @@ class Scraper(private val web: WebView, private val ksSource: String, private va
 
     // ========== 開催一覧 ==========
 
-    data class Race(val raceId: String, val no: Int, val time: String, val title: String, val heads: String)
-    data class Venue(val name: String, val races: List<Race>)
-
-    suspend fun fetchRaceList(raceDate: String): List<Venue>? {
+    /** 開催一覧を JSON 配列の文字列で返す（[{name, races:[{race_id,no,time,title,heads}]}]）。読めなければ null */
+    suspend fun fetchRaceList(raceDate: String): String? {
         if (!load("$NETKEIBA/top/race_list_sub.html?kaisai_date=$raceDate")) return null
         waitFor("document.querySelector('dl.RaceList_DataList')", 5_000)
         val raw = call("KS.parseRaceList(document)")
-        val arr = runCatching { JSONArray(raw) }.getOrNull() ?: return null
-        return (0 until arr.length()).map { i ->
-            val v = arr.getJSONObject(i)
-            val races = v.getJSONArray("races")
-            Venue(v.getString("name"), (0 until races.length()).map { j ->
-                val r = races.getJSONObject(j)
-                Race(r.getString("race_id"), r.getInt("no"), r.optString("time"), r.optString("title"), r.optString("heads"))
-            })
-        }
+        return if (runCatching { JSONArray(raw) }.isSuccess) raw else null
     }
 
     // ========== 1レース分の収集 ==========
 
-    /** 収集して AI 貼り付け用テキストを返す。出馬表が取れなければ null */
-    suspend fun collectRace(keibajo: String, raceDate: String, raceNo: Int): String? {
-        val code = KEIBA_CODES[keibajo] ?: run { log("未対応の競馬場です: $keibajo"); return null }
+    /** 収集の結果。成功なら json（{text, info, at}）、失敗なら error に理由 */
+    data class Outcome(val json: String?, val error: String?)
+
+    private fun count(raw: String, arr: Boolean = false): Int =
+        runCatching { if (arr) JSONArray(raw).length() else JSONObject(raw).length() }.getOrDefault(0)
+
+    /**
+     * 1レース分を集めて AI 貼り付け用テキストを作る。段階ごとに step(キー, 状態, 詳細) を呼ぶ。
+     * キーは ui.html の STEPS と同じ。状態は run / ok / warn / ng / skip。
+     */
+    suspend fun collectRace(keibajo: String, raceDate: String, raceNo: Int): Outcome {
+        val code = KEIBA_CODES[keibajo] ?: return Outcome(null, "未対応の競馬場です: $keibajo")
         val raceId = "${raceDate.substring(0, 4)}$code${raceDate.substring(4, 8)}${"%02d".format(raceNo)}"
         val oddsUrl = "$NETKEIBA/odds/?race_id=$raceId&type="
-        val notes = mutableListOf<String>()
         log("収集対象: $keibajo ${raceDate.substring(0, 4)}/${raceDate.substring(4, 6)}/${raceDate.substring(6)} ${raceNo}R（race_id: $raceId）")
 
-        log("[出馬表]")
-        if (!load("$NETKEIBA/race/shutuba.html?race_id=$raceId")) return null
+        // ---- 出馬表 ----
+        step("shutuba", "run", "")
+        if (!load("$NETKEIBA/race/shutuba.html?race_id=$raceId")) {
+            step("shutuba", "ng", "")
+            return Outcome(null, "出馬表のページを開けませんでした。通信状態を確認してください。")
+        }
         if (!waitFor("document.querySelector('table.ShutubaTable, dl.HorseList')")) log("  要素待機タイムアウト（取得できた分で続行）")
         val shutuba = call("KS.parseShutuba(document)")
         val nHorses = runCatching { JSONObject(shutuba).getJSONArray("horses").length() }.getOrDefault(0)
         log("  出馬表: ${nHorses}頭取得")
         if (nHorses == 0) {
-            log("出馬表を取得できませんでした。日付・競馬場・レース番号を確認してください。")
-            return null
+            step("shutuba", "ng", "0頭")
+            return Outcome(null, "出馬表を読めませんでした。出馬表がまだ出ていないか、ページの構造が変わった可能性があります。")
         }
+        step("shutuba", "ok", "${nHorses}頭")
 
-        log("[馬柱: keiba.go.jp]")
+        // ---- 馬柱（keiba.go.jp） ----
+        step("keibago", "run", "")
         var keibago = "{}"
         val kgUrl = decodeString(call("KS.keibagoUrl(${q(keibajo)}, ${q(raceDate)}, $raceNo)"))
         if (kgUrl.isEmpty()) {
             log("  keiba.go.jp のコード未定義のため取得しません: $keibajo")
+            step("keibago", "skip", "対象外")
         } else if (load(kgUrl)) {
             if (!waitFor("document.querySelector('section.cardTable')")) log("  要素待機タイムアウト（取得できた分で続行）")
             keibago = call("KS.parseKeibago(document)")
-            log("  keiba.go.jp 解析: ${runCatching { JSONObject(keibago).length() }.getOrDefault(0)}頭")
+            val n = count(keibago)
+            log("  keiba.go.jp 解析: ${n}頭")
+            step("keibago", if (n > 0) "ok" else "warn", "${n}頭")
+        } else {
+            step("keibago", "warn", "開けず")
         }
 
-        log("[単勝・複勝オッズ]")
+        // ---- 単勝・複勝 ----
+        step("tanfuku", "run", "")
         var tanFuku = "{}"
         if (load(oddsUrl + "b1")) {
             waitFor("document.querySelector('table.RaceOdds_HorseList_Table td.Odds')")
             tanFuku = call("KS.parseTanFuku(document)")
-            log("  単複オッズ: ${runCatching { JSONObject(tanFuku).length() }.getOrDefault(0)}頭取得")
+            val n = count(tanFuku)
+            log("  単複オッズ: ${n}頭取得")
+            step("tanfuku", if (n > 0) "ok" else "warn", "${n}頭")
+        } else {
+            step("tanfuku", "warn", "開けず")
         }
 
-        log("[ワイドオッズ]")
+        // ---- ワイド ----
+        step("wide", "run", "")
         var wide = "[]"
         if (load(oddsUrl + "b5")) {
             waitFor("document.querySelector('td.Odds[cart-item]')")
             wide = call("KS.topCombos(KS.extractCombos(document, {}))")
-            log("  ワイド: ${runCatching { JSONArray(wide).length() }.getOrDefault(0)}組取得")
+            val n = count(wide, true)
+            log("  ワイド: ${n}組取得")
+            step("wide", if (n > 0) "ok" else "warn", "${n}組")
+        } else {
+            step("wide", "warn", "開けず")
         }
 
-        log("[三連複オッズ]")
+        // ---- 三連複 ----
+        step("sanren", "run", "")
         var sanren = "[]"
         var sanrenNote = ""
         if (load(oddsUrl + "b7")) {
@@ -217,6 +248,7 @@ class Scraper(private val web: WebView, private val ksSource: String, private va
             var skipped = 0
             // 三連複は軸馬ごとに表が切り替わるので、全軸馬を順に読む
             for (i in 1 until axes.length()) {
+                step("sanren", "run", "軸 ${i + 1}/${axes.length()}")
                 val before = decodeString(call("KS.comboSignature(document)"))
                 waitInterval()
                 call("KS.selectAxis(document, ${q(axes.getString(i))})")
@@ -232,20 +264,31 @@ class Scraper(private val web: WebView, private val ksSource: String, private va
                 log("  ※$sanrenNote")
             }
             sanren = call("KS.topCombos(window.__ksAll || {})")
-            log("  三連複: ${runCatching { JSONArray(sanren).length() }.getOrDefault(0)}組取得")
+            val n = count(sanren, true)
+            log("  三連複: ${n}組取得")
+            step("sanren", if (n > 0 && skipped == 0) "ok" else "warn", "${n}組")
+        } else {
+            step("sanren", "warn", "開けず")
         }
 
-        val collectedAt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.JAPAN).format(Date())
+        // ---- テキスト作成 ----
+        step("build", "run", "")
+        val now = Date()
+        val collectedAt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.JAPAN).format(now)
         val parts = """{"keibajo":${q(keibajo)},"race_date":${q(raceDate)},"race_no":$raceNo,""" +
             """"shutuba":$shutuba,"keibago":${safeObj(keibago)},"tan_fuku":${safeObj(tanFuku)},""" +
             """"wide":${safeArr(wide)},"sanren":${safeArr(sanren)},"sanren_note":${q(sanrenNote)},""" +
-            """"notes":${JSONArray(notes)},"collected_at":${q(collectedAt)}}"""
-        val text = decodeString(call("KS.build($parts)"))
-        if (text.isEmpty() || text.startsWith("{")) {
-            log("テキストの作成に失敗しました: ${text.take(200)}")
-            return null
+            """"collected_at":${q(collectedAt)}}"""
+        val built = call("KS.buildWithInfo($parts)")
+        val obj = runCatching { JSONObject(built) }.getOrNull()
+        if (obj == null || !obj.has("text")) {
+            log("テキストの作成に失敗しました: ${built.take(200)}")
+            step("build", "ng", "")
+            return Outcome(null, "テキストの作成に失敗しました。詳細ログを確認してください。")
         }
-        return text
+        obj.put("at", SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.JAPAN).format(now))
+        step("build", "ok", "${obj.getString("text").lines().size}行")
+        return Outcome(obj.toString(), null)
     }
 
     // 解析に失敗した部品（{__error} や null）は空として扱う
