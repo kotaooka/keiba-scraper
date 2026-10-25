@@ -1,4 +1,5 @@
-# android/ 以下が変わったら、デバッグ版 APK をビルドして Artifacts に置く
+# android/ 以下が変わったら、デバッグ版 APK をビルドし、
+# リリース android-latest の APK を差し替える（Artifacts にも置く）
 name: Android APK
 
 on:
@@ -12,6 +13,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # タグとリリースの更新に必要
     steps:
       - uses: actions/checkout@v4
 
@@ -33,3 +36,20 @@ jobs:
           name: keiba-collector-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           retention-days: 30
+
+      - name: Publish to release android-latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk keiba-collector.apk
+          # タグを今回のコミットに付け替える
+          git tag -f android-latest
+          git push -f origin refs/tags/android-latest
+          notes="Android版の最新ビルド（コミット ${GITHUB_SHA::7}、$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M') JST）。
+          keiba-collector.apk をダウンロードしてインストールしてください。入れ方は android/README.md を参照。"
+          if gh release view android-latest > /dev/null 2>&1; then
+            gh release edit android-latest --notes "$notes"
+          else
+            gh release create android-latest --title "Android版（最新）" --notes "$notes" --latest
+          fi
+          gh release upload android-latest keiba-collector.apk --clobber

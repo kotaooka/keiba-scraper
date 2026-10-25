@@ -8,11 +8,11 @@ PC版（`keiba_scraper.py`）と同じデータを集めて、AI に貼り付け
 
 ## インストール
 
-1. GitHub のこのリポジトリで **Actions** → **Android APK** → いちばん新しい成功した実行を開く
-2. 下部の **Artifacts** から `keiba-collector-debug-apk` をダウンロードする（GitHub へのログインが必要。zip で落ちてくる）
-3. zip を展開して `app-debug.apk` を開き、インストールする（初回は「提供元不明のアプリ」の許可を求められる）
+1. スマホで次のリンクを開き、`keiba-collector.apk` をダウンロードする（ログイン不要）
+   https://github.com/kotaooka/keiba-scraper/releases/download/android-latest/keiba-collector.apk
+2. ダウンロードした APK を開いてインストールする（初回は「提供元不明のアプリ」の許可を求められる）
 
-更新するときも同じ手順で上書きインストールできます（署名鍵を固定しているため）。
+更新するときも同じリンクから取り直して上書きインストールできます。リリース `android-latest` は `android/` を変更して push するたびに最新版へ差し替わります（署名鍵を固定しているので上書きできる）。
 
 ## 使い方
 
