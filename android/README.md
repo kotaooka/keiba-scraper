@@ -1,6 +1,8 @@
 # 地方競馬データ収集（Android版）
 
-PC版と同じデータを集めて、AI に送るテキストを作る Android アプリです。スマホだけで、レースを選ぶ → 収集 → AI アプリへ送る、まで完結します。集めるデータ・AI への指示・注意事項は [ルートの README](../README.md) を見てください。
+[README に戻る](../README.md)
+
+スマホだけで、レースを選ぶ → 収集 → AI アプリへ送る → 即PAT で投票、まで進められる Android アプリです。送るテキストの中身は [AI へ送るテキスト](../docs/ai-text.md)、注意事項は [README](../README.md#注意事項) を見てください。
 
 必要なもの：Android 10 以上
 
@@ -91,7 +93,7 @@ PC版と同じデータを集めて、AI に送るテキストを作る Android 
 
 ### 取れないとき
 
-収集中の画面の「取得中のサイトをプレビュー」（または「⋮」）で、画面の下半分にアプリが裏で開いているページが出ます。プレビュー中は画面の下に帯が出て、「閉じる」か戻るボタンで閉じられます。収集が成功すると自動で閉じ、失敗したときは原因を見られるよう開いたままにします。
+収集中の画面の「取得中のサイトをプレビュー」（または「⋮」）で、画面の下半分にアプリが裏で開いているページが出ます。画面の下の帯の「閉じる」か戻るボタンで閉じられ、収集が成功すると自動で閉じます。調べ方は [直す人向け](../docs/development.md#取れなくなったとき) にあります。
 
 ## 端末に保存するもの
 
@@ -104,24 +106,6 @@ PC版と同じデータを集めて、AI に送るテキストを作る Android 
 | 設定 | 予想の条件・表示・お気に入りの競馬場・前回の競馬場・送り先のアプリ |
 | 通知・自動収集の予約 | 発走から1時間たつと消える |
 
-## 開発者向け
+## 直す人向け
 
-### PC版との対応
-
-| PC版 | Android版 |
-|---|---|
-| `keiba_scraper.py` の解析・整形 | `app/src/main/assets/scraper.js`（同じ処理を JavaScript に移植） |
-| `fetch_page`・`collect_race`（Playwright） | `Scraper.kt`（WebView） |
-| 対話（`run.bat`） | `app/src/main/assets/ui.html`（画面）と `MainActivity.kt`（画面との受け渡し） |
-| — | `Reservations.kt`・`Receivers.kt`・`CollectService.kt`（通知・自動収集）、`Updater.kt`（更新） |
-
-- 解析を直したときは、`keiba_scraper.py` と `scraper.js` の両方を同じように直す。指示文（`PROMPT_TEXT`）・予想の条件の既定値（`BUDGET`・`MAX_BETS`・`EV_MIN`）・競馬場コードも両方にある
-- 即PAT・A-PAT の発売カレンダーの解析（`parsePatCalendar`）は Android版だけにある
-- 予想の記録と答え合わせ（`record`・`verify`）は PC版だけにある
-
-### ビルドと配布
-
-- `android/` 以下を push すると、GitHub Actions（`.github/workflows/android.yml`）がデバッグ版をビルドし、リリース `android-latest` の APK と `version.json`（版番号・コミット・ビルド日時・最近の変更）を差し替える。ビルドに失敗したときは、コンパイルエラーを Actions の注釈に出す
-- バージョンは `0.4.<ビルド番号>`。ビルド番号は Actions の実行番号で、push のたびに増える
-- 手元でビルドするときは Android Studio で `android/` を開く
-- `debug.keystore` はデバッグ版の署名を固定するための鍵で、パスワードは Android 標準のデバッグ鍵と同じ `android`。秘密の鍵ではない。鍵を固定しているので、どのビルドも上書きインストールできる
+PC版との対応・ビルドと配布は [docs/development.md](../docs/development.md) にあります。
