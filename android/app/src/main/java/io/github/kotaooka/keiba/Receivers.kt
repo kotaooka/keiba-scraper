@@ -19,6 +19,7 @@ class AlarmReceiver : BroadcastReceiver() {
         if (kind == "result") {
             // 結果の自動取得：正確な時刻で起きたときだけ裏で読める。だめなら「タップで答え合わせ」の通知にする
             val fallback = {
+                ResultChecks.remove(ctx, key)
                 Notifier.post(ctx, "$key|result".hashCode(), "答え合わせ：$title",
                     "結果が出たころです。タップすると結果を取得します", Notifier.openIntent(ctx, "fetch", r))
             }

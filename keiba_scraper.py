@@ -8,6 +8,7 @@
 #   python keiba_scraper.py 盛岡 5 1025      … 日付を指定（YYYYMMDD / MMDD / M/D も可）
 
 import json
+import math
 import random
 import re
 import subprocess
@@ -144,6 +145,14 @@ def pad(s, width, align="<"):
 
 # ========== 入力処理 ==========
 
+def _sum(values):
+    """小数を先頭から順に足す（Python 3.12 以降の sum は誤差を補正するので、Android版の足し方と値がずれる）"""
+    total = 0.0
+    for v in values:
+        total += v
+    return total
+
+
 def parse_date(text, today=None):
     """日付入力を YYYYMMDD に正規化する。不正なら None を返す。
     受け付ける形式: 空(=当日) / YYYYMMDD / MMDD / M/D / YYYY/M/D / YYYY-MM-DD"""
@@ -161,7 +170,12 @@ def parse_date(text, today=None):
             if len(parts) == 2:
                 d = datetime(today.year, int(parts[0]), int(parts[1]))
             elif len(parts) == 3:
-                d = datetime(int(parts[0]), int(parts[1]), int(parts[2]))
+                y = int(parts[0])
+                if len(parts[0]) <= 2:
+                    y += 2000  # 26/10/25 は 2026年
+                elif len(parts[0]) != 4:
+                    return None
+                d = datetime(y, int(parts[1]), int(parts[2]))
             else:
                 return None
     except ValueError:
@@ -966,7 +980,7 @@ def add_market_prob(horses):
             continue
         if odds > 0:
             inv[h["馬番"]] = 1 / odds
-    total = sum(inv.values())
+    total = _sum(inv.values())
     for h in horses:
         h["市場勝率"] = inv[h["馬番"]] / total * 100 if total and h["馬番"] in inv else None
     # 単勝が欠けた馬がいると Σ(1/オッズ) が小さくなり払戻率を過大に見積もるので、全頭そろったときだけ返す
@@ -1256,6 +1270,7 @@ def new_record(race_id, keibajo, race_date, race_no, race_info, horses, payout_r
         "レース名": ri.get("レース名", ""),
         "クラス": ri.get("クラス", ""),
         "収集時刻": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "発走": ri.get("発走", ""),
         "EV_MIN": EV_MIN,
         "払戻率": payout_rate,
         "馬": {
@@ -1314,11 +1329,15 @@ def read_clipboard():
 
 def _num(text):
     """'12.5' '12.5%' '1,000円' などを float にする。読めなければ None"""
-    t = re.sub(r"[%％円,，\s]", "", str(text))
-    try:
-        return float(t)
-    except ValueError:
+    t = re.sub(r"[%％円,，\s]", "", str(text)).translate(_ZEN_DIGITS)
+    # Android版と同じく、普通の数字の書き方だけを受け付ける（nan・inf・1_000 などは読まない）
+    if not re.fullmatch(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", t):
         return None
+    v = float(t)
+    return v if math.isfinite(v) else None
+
+
+_ZEN_DIGITS = str.maketrans("０１２３４５６７８９．－＋", "0123456789.-+")
 
 
 def normalize_bet_type(name):
@@ -1347,7 +1366,7 @@ def combo_key(bet_type, numbers):
 def parse_ai_block(text):
     """AI の回答から #PRED と #BET のブロックを読む。#PRED がなければ None を返す。
     返り値: {"予想": {馬番: {"勝率": %, "複勝率": %}}, "買い目": [{"券種","組み合わせ","金額"}]}"""
-    lines = [ln.strip() for ln in text.replace("\r", "").split("\n")]
+    lines = [ln.strip().lstrip("\ufeff").strip() for ln in text.replace("\r", "").split("\n")]
     if "#PRED" not in lines:
         return None
     # 指示文の書式例にも #PRED があるので、最後に出てくる #PRED から読む
@@ -1361,21 +1380,35 @@ def parse_ai_block(text):
             if section == "#BET" and ln.startswith("```"):
                 break
             continue
-        cells = [c.strip() for c in re.split(r"[,，\t]", ln)]
-        if section == "#PRED" and len(cells) >= 3 and cells[0].isdigit():
-            win, place = _num(cells[1]), _num(cells[2])
-            if win is not None and place is not None:
-                pred[str(int(cells[0]))] = {"勝率": win, "複勝率": place}
-        elif section == "#BET" and len(cells) >= 3:
+        if section == "#PRED":
+            cells = [c.strip() for c in re.split(r"[,，\t]", ln)]
+            if len(cells) >= 3 and re.fullmatch(r"[0-9０-９]+", cells[0]):
+                win, place = _num(cells[1]), _num(cells[2])
+                if win is not None and place is not None:
+                    pred[str(int(cells[0].translate(_ZEN_DIGITS)))] = {"勝率": win, "複勝率": place}
+        elif section == "#BET":
+            # 金額の「1,000」の桁区切りで切れないよう、区切りは最初の2つだけで分ける
+            cells = [c.strip() for c in re.split(r"[,，\t]", ln, maxsplit=2)]
+            if len(cells) < 3:
+                continue
             bet_type = normalize_bet_type(cells[0])
-            nums = re.findall(r"\d+", cells[1])
+            nums = re.findall(r"[0-9]+", cells[1].translate(_ZEN_DIGITS))
             amount = _num(cells[2])
-            if bet_type in BET_SPECS and nums and amount:
+            # 馬番の数が券種と合わない行（「ワイド,3,100」など）は読まない
+            if bet_type in BET_SPECS and len(nums) == BET_SPECS[bet_type][0] and amount and amount > 0:
                 bets.append({"券種": bet_type, "組み合わせ": combo_key(bet_type, nums),
                              "金額": int(amount)})
     if not pred:
         return None
-    return {"予想": pred, "買い目": bets}
+    block = {"予想": pred, "買い目": bets}
+    # 指示文の書式例そのもの（AI の回答に記録用ブロックが無く、指示文ごとコピーしたとき）は記録しない
+    if block == _EXAMPLE_BLOCK:
+        return None
+    return block
+
+
+# 指示文の書式例の記録用ブロック（これと同じなら AI の回答ではない）
+_EXAMPLE_BLOCK = {"予想": {"1": {"勝率": 12.5, "複勝率": 35.0}}, "買い目": [{"券種": "ワイド", "組み合わせ": "3-7", "金額": 500}]}
 
 
 def ask_ai_answer(record, ai_text_path, scraped_text=None):
@@ -1412,9 +1445,10 @@ def run_record():
     if not recs:
         print("\nAI の回答が未記録のレースはありません。")
         return
-    recs = recs[-15:]
+    # race_id は競馬場コードが日付より前にあるので、収集時刻（無ければ日付）で新しい順に並べる
+    recs.sort(key=lambda r: (str(r.get("収集時刻") or r.get("日付", "")), str(r.get("race_id") or "")), reverse=True)
+    recs = recs[:15]
     print("\nAI の回答が未記録のレース（新しい順に最大15件）:")
-    recs.reverse()
     for i, r in enumerate(recs, 1):
         print(f"  {i:2d}. {r['日付']} {r['競馬場']} {r['レース番号']}R {r.get('レース名', '')}")
     r = recs[ask_choice("\n番号: ", len(recs)) - 1]
@@ -1516,7 +1550,8 @@ def settle_bets(record):
     scratched = {no for no, rank in res["着順"].items() if rank in ("取消", "除外")}
     rows = []
     for b in ai["買い目"]:
-        if set(b["組み合わせ"].split("-")) & scratched:
+        # 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
+        if not b["券種"].startswith("枠") and set(b["組み合わせ"].split("-")) & scratched:
             ret, status = b["金額"], "返還"
         elif b["券種"] not in res["払戻"]:
             return None
@@ -1532,7 +1567,9 @@ def horse_rows(record):
     """キャリブレーション用に、馬ごとの (市場勝率, AI勝率, AI複勝率, 1着か, 複勝圏か) を作る。
     取消・除外の馬を除き、市場勝率と AI 勝率は残った馬で合計1にそろえ直す"""
     res, pred = record["結果"], record["AI"]["予想"]
-    runners = [no for no, rank in res["着順"].items() if rank not in ("取消", "除外")]
+    # 馬番の順に並べる（足す順で小数の最後の桁が変わるので、Android版の並び＝数字の順にそろえる）
+    runners = sorted((no for no, rank in res["着順"].items() if rank not in ("取消", "除外")),
+                     key=lambda n: (0, int(n)) if n.isdigit() else (1, n))
     rows = []
     for no in runners:
         m = record["馬"].get(no, {}).get("市場勝率")
@@ -1541,7 +1578,9 @@ def horse_rows(record):
             return []  # 欠けがあるレースは比較が公平でないので使わない
         rows.append({"馬番": no, "市場": m / 100, "AI勝率": a["勝率"] / 100,
                      "AI複勝率": a["複勝率"] / 100, "着順": res["着順"][no]})
-    sm, sa = sum(r["市場"] for r in rows), sum(r["AI勝率"] for r in rows)
+    sm, sa = _sum(r["市場"] for r in rows), _sum(r["AI勝率"] for r in rows)
+    if sm <= 0 or sa <= 0:
+        return []  # AI の推定勝率がすべて0などで、そろえ直せない
     place_n = 3 if len(runners) >= 8 else 2  # 7頭以下は複勝が2着まで
     for r in rows:
         r["市場"] /= sm
@@ -1570,16 +1609,19 @@ def calibration_table(pairs, edges):
     """(予測確率, 実績0/1) の組を区間に分け、件数・予測の平均・実績の割合を返す"""
     out = []
     for lo, hi in zip(edges[:-1], edges[1:]):
-        sel = [(p, y) for p, y in pairs if lo <= p * 100 < hi or (hi == 100 and p * 100 == 100)]
+        # 100% を超える推定（AI の書き誤り）は最後の区間に入れる
+        sel = [(p, y) for p, y in pairs if lo <= p * 100 < hi or (hi == edges[-1] and p * 100 >= hi)]
         if sel:
-            out.append((lo, hi, len(sel), sum(p for p, _ in sel) / len(sel) * 100,
-                        sum(y for _, y in sel) / len(sel) * 100))
+            out.append((lo, hi, len(sel), _sum(p for p, _ in sel) / len(sel) * 100,
+                        _sum(y for _, y in sel) / len(sel) * 100))
     return out
 
 
 def compute_summary(records):
     """記録済みのレースから回収率・精度・キャリブレーションを計算する（数値だけ。Android版の computeSummary と同じ）"""
-    races = [r for r in records if r.get("AI") and r.get("結果")]
+    # 区間（ブートストラップ）は並び順で変わるので、race_id 順にそろえる（Android版と同じ値にするため）
+    races = sorted((r for r in records if r.get("AI") and r.get("結果")),
+                   key=lambda r: (str(r.get("race_id") or ""), str(r.get("日付", "")), str(r.get("競馬場", "")), int(r.get("レース番号") or 0)))
     out = {
         "n_races": len(races),
         "n_no_ai": sum(1 for r in records if not r.get("AI")),
@@ -1602,13 +1644,15 @@ def compute_summary(records):
         for row in rows:
             bet_rows.append({"race_id": r["race_id"], "日付": r["日付"], "競馬場": r["競馬場"],
                              "レース番号": r["レース番号"], **row})
-        per_race.append((sum(x["金額"] for x in rows), sum(x["払戻"] for x in rows)))
+        per_race.append((sum(x["金額"] for x in rows), sum(x["払戻"] for x in rows),
+                         any(x["判定"] == "的中" for x in rows)))
     bets = {"bought": len(per_race), "skipped": skipped, "unknown": unknown,
             "spent": None, "ret": None, "ci": None, "hit_races": 0, "by_type": []}
     if per_race:
-        bets["spent"] = sum(a for a, _ in per_race)
-        bets["ret"] = sum(b for _, b in per_race)
-        bets["hit_races"] = sum(1 for a, b in per_race if b > 0)
+        bets["spent"] = sum(x[0] for x in per_race)
+        bets["ret"] = sum(x[1] for x in per_race)
+        # 返還だけで戻ったレースは的中に数えない
+        bets["hit_races"] = sum(1 for x in per_race if x[2])
         lo, hi = bootstrap_ci(
             lambda idx: (sum(per_race[i][1] for i in idx) / s if (s := sum(per_race[i][0] for i in idx)) else None),
             len(per_race))
@@ -1628,13 +1672,13 @@ def compute_summary(records):
     race_rows = [rows for r in races if (rows := horse_rows(r))]
     if race_rows:
         def brier(rows, key):
-            return sum((x[key] - x["1着"]) ** 2 for x in rows)
+            return _sum((x[key] - x["1着"]) ** 2 for x in rows)
         bm = [brier(rows, "市場") for rows in race_rows]
         ba = [brier(rows, "AI勝率") for rows in race_rows]
         n = len(race_rows)
         diff = [a - m for a, m in zip(ba, bm)]
-        lo, hi = bootstrap_ci(lambda idx: sum(diff[i] for i in idx) / len(idx), n)
-        out["brier"] = {"n": n, "market": sum(bm) / n, "ai": sum(ba) / n, "diff": sum(diff) / n, "ci": [lo, hi]}
+        lo, hi = bootstrap_ci(lambda idx: _sum(diff[i] for i in idx) / len(idx), n)
+        out["brier"] = {"n": n, "market": _sum(bm) / n, "ai": _sum(ba) / n, "diff": _sum(diff) / n, "ci": [lo, hi]}
 
         all_rows = [x for rows in race_rows for x in rows]
         edges = [0, 5, 10, 20, 35, 100]
@@ -1645,7 +1689,7 @@ def compute_summary(records):
         }
         place_pairs = [(x["AI複勝率"], x["複勝圏"]) for x in all_rows]
         out["calib_place"] = {
-            "brier": sum((p - y) ** 2 for p, y in place_pairs) / len(place_pairs),
+            "brier": _sum((p - y) ** 2 for p, y in place_pairs) / len(place_pairs),
             "rows": [list(x) for x in calibration_table(place_pairs, [0, 10, 20, 35, 50, 70, 100])],
         }
     return out
@@ -1737,19 +1781,27 @@ def run_import(path):
     """Android版で書き出した記録（JSON の配列）を output/records/ に取り込む。
     同じ race_id の記録が既にあれば、AI の回答・結果のうち手元に無いほうだけを足す"""
     try:
-        items = json.loads(Path(path).read_text(encoding="utf-8"))
+        items = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as e:
         print(f"読めませんでした: {path}（{e}）")
         return
     if isinstance(items, dict):
         items = items.get("records", [])
-    added = merged = 0
+    if not isinstance(items, list):
+        items = []
+    added = merged = skipped = 0
     for r in items:
         if not isinstance(r, dict) or not r.get("race_id"):
+            skipped += 1  # 競馬場コードの分からないレースなど
             continue
         p = record_path(r["race_id"])
         if p.exists():
-            cur = json.loads(p.read_text(encoding="utf-8"))
+            try:
+                cur = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
+                print(f"  手元の記録を読めないので飛ばします: {p.name}（{e}）")
+                skipped += 1
+                continue
             changed = False
             for k in ("AI", "結果"):
                 if not cur.get(k) and r.get(k):
@@ -1761,15 +1813,30 @@ def run_import(path):
         else:
             save_record(r)
             added += 1
-    print(f"取り込みました: 新しい記録 {added}件・足した記録 {merged}件（{RECORD_DIR}）")
+    print(f"取り込みました: 新しい記録 {added}件・足した記録 {merged}件"
+          + (f"・取り込めなかった記録 {skipped}件" if skipped else "") + f"（{RECORD_DIR}）")
     print("続けて verify.bat で集計できます。")
 
 
 def run_verify():
     """結果が未取得のレースの結果を取りに行き、集計を表示・保存する"""
     recs = load_records()
-    today = datetime.now().strftime("%Y%m%d")
-    pending = [r for r in recs if r.get("AI") and not r.get("結果") and r["日付"] <= today]
+    now = datetime.now()
+    today = now.strftime("%Y%m%d")
+
+    def started(r):
+        # 今日のレースは発走の15分後から（まだ走っていないレースの結果ページを読みに行かない）
+        if r["日付"] < today:
+            return True
+        if r["日付"] > today:
+            return False
+        m = re.fullmatch(r"(\d{1,2}):(\d{2})", str(r.get("発走") or ""))
+        if not m:
+            return True
+        start = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
+        return (now - start).total_seconds() >= 15 * 60
+
+    pending = [r for r in recs if r.get("AI") and not r.get("結果") and started(r)]
     if pending:
         print(f"\n結果を取得します: {len(pending)}件")
         with sync_playwright() as p:

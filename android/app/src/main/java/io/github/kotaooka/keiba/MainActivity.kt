@@ -27,8 +27,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import org.json.JSONObject
+import java.io.File
 
 /**
  * 画面は assets/ui.html（UI 用の WebView）で描き、収集は裏の WebView（Scraper）で行う。
@@ -38,6 +42,8 @@ class MainActivity : Activity() {
 
     private val scope: CoroutineScope = MainScope()
     private var job: Job? = null
+    // 今の job が何か（"list" 一覧の読み込み / "collect" 収集 / "results" 結果の取得）
+    private var jobKind = ""
 
     private lateinit var ui: WebView
     private lateinit var work: WebView
@@ -49,13 +55,16 @@ class MainActivity : Activity() {
     private var uiDark: Boolean? = null
     // 通知から開いたときに、画面の読み込み後に UI へ渡す内容
     private var pendingOpen: String? = null
-    // 書き出し先を選んでもらっている間の、書き出す中身
-    private var pendingExport: String? = null
     private var pageReady = false
+    // 画面の読み込み前に届いた UI への呼び出し（読み込み後にまとめて実行する）
+    private val pendingJs = mutableListOf<String>()
+    // 書き出し先を選んでもらっている間の、書き出す中身。アプリが裏で落とされても残るようファイルに置く
+    private val pendingExportFile get() = File(filesDir, "pending_export.json")
 
     companion object {
         private const val REQ_EXPORT = 21
         private const val REQ_IMPORT = 22
+        private const val MAX_IMPORT = 20 * 1024 * 1024
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -73,6 +82,8 @@ class MainActivity : Activity() {
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView, url: String) {
                     pageReady = true
+                    pendingJs.forEach { view.evaluateJavascript(it, null) }
+                    pendingJs.clear()
                     applyTheme()
                     deliverPendingOpen()
                 }
@@ -94,7 +105,9 @@ class MainActivity : Activity() {
             step = { key, s, detail -> js("App.onStep(${JSONObject.quote(key)},${JSONObject.quote(s)},${JSONObject.quote(detail)})") })
 
         Notifier.ensureChannels(this)
-        readOpenIntent(intent)
+        // 最近使ったアプリから開き直したときは、前に通知から開いたときの内容をもう一度実行しない
+        val fromHistory = intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+        if (savedInstanceState == null && !fromHistory) readOpenIntent(intent)
         // 収集済みの記録は ui.html の localStorage（この端末のアプリ内だけ）に置く
         ui.loadUrl("file:///android_asset/ui.html")
     }
@@ -133,28 +146,56 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
+        // ファイルの読み書きはクラウドのファイルだと時間がかかるので、裏のスレッドで行う
         if (requestCode == REQ_IMPORT) {
             val uri = data?.data
             if (resultCode != RESULT_OK || uri == null) { js("App.onImported(null, '')"); return }
-            try {
-                val text = contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
-                js("App.onImported(${JSONObject.quote(text)}, null)")
-            } catch (e: Exception) {
-                js("App.onImported(null, ${JSONObject.quote(e.message ?: "")})")
+            scope.launch {
+                val script = withContext(Dispatchers.IO) {
+                    try {
+                        val bytes = contentResolver.openInputStream(uri)?.use { s ->
+                            val b = s.readNBytesCompat(MAX_IMPORT + 1)
+                            b
+                        } ?: ByteArray(0)
+                        if (bytes.size > MAX_IMPORT) "App.onImported(null, ${JSONObject.quote("ファイルが大きすぎます")})"
+                        else "App.onImported(${JSONObject.quote(bytes.toString(Charsets.UTF_8).removePrefix("\uFEFF"))}, null)"
+                    } catch (e: Exception) {
+                        "App.onImported(null, ${JSONObject.quote(e.message ?: "")})"
+                    }
+                }
+                js(script)
             }
             return
         }
         if (requestCode != REQ_EXPORT) return
-        val text = pendingExport
-        pendingExport = null
+        val f = pendingExportFile
         val uri = data?.data
-        if (resultCode != RESULT_OK || uri == null || text == null) { js("App.onExported(false, '')"); return }
-        try {
-            contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
-            js("App.onExported(true, '')")
-        } catch (e: Exception) {
-            js("App.onExported(false, ${JSONObject.quote(e.message ?: "")})")
+        if (resultCode != RESULT_OK || uri == null || !f.exists()) { f.delete(); js("App.onExported(false, '')"); return }
+        scope.launch {
+            val script = withContext(Dispatchers.IO) {
+                try {
+                    contentResolver.openOutputStream(uri)?.use { out -> f.inputStream().use { it.copyTo(out) } }
+                    "App.onExported(true, '')"
+                } catch (e: Exception) {
+                    "App.onExported(false, ${JSONObject.quote(e.message ?: "")})"
+                } finally {
+                    f.delete()
+                }
+            }
+            js(script)
         }
+    }
+
+    /** 上限までだけ読む（大きすぎるファイルでメモリを使い切らないように） */
+    private fun java.io.InputStream.readNBytesCompat(limit: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(64 * 1024)
+        while (out.size() < limit) {
+            val n = read(buf, 0, minOf(buf.size, limit - out.size()))
+            if (n < 0) break
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     override fun onDestroy() {
@@ -205,7 +246,10 @@ class MainActivity : Activity() {
 
     /** UI 側の JavaScript を実行する（どのスレッドから呼んでもよい） */
     private fun js(script: String) {
-        runOnUiThread { ui.evaluateJavascript(script, null) }
+        runOnUiThread {
+            if (isDestroyed) return@runOnUiThread
+            if (pageReady) ui.evaluateJavascript(script, null) else pendingJs.add(script)
+        }
     }
 
     private fun setBusy(busy: Boolean) {
@@ -233,6 +277,7 @@ class MainActivity : Activity() {
         fun loadRaceList(date: String, patMonth: String) = runOnUiThread {
             // 前の読み込み・収集が残っていれば止めてから読む（日付を続けて変えたときなど）
             job?.cancel()
+            jobKind = "list"
             job = scope.launch {
                 val list = try { scraper.fetchRaceList(date) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
                 js("App.onRaceList(${list ?: "null"})")
@@ -245,9 +290,13 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun collect(keibajo: String, date: String, raceNo: Int) = runOnUiThread {
-            job?.cancel()
+            val prev = job
+            prev?.cancel()
+            jobKind = "collect"
             job = scope.launch {
                 val me = coroutineContext[Job]
+                // 前の処理が鍵を返すのを待ってから始める（すぐに tryLock すると「実行中」と断られることがある）
+                prev?.cancelAndJoin()
                 // 自動収集の実行中は重ねない（同じサイトへ同時にアクセスしないため）
                 if (!CollectLock.mutex.tryLock()) {
                     js("App.onResult(null, ${JSONObject.quote("自動収集の実行中です。終わってからもう一度試してください。")})")
@@ -295,9 +344,13 @@ class MainActivity : Activity() {
          */
         @JavascriptInterface
         fun fetchResults(idsJson: String) = runOnUiThread {
-            if (job?.isActive == true) { js("App.onResultsDone('busy')"); return@runOnUiThread }
+            // 一覧の読み込み中なら終わるのを待つ（通知から開いた直後など）。収集・結果の取得中は断る
+            val prev = job
+            if (prev?.isActive == true && jobKind != "list") { js("App.onResultsDone('busy')"); return@runOnUiThread }
             val ids = runCatching { org.json.JSONArray(idsJson) }.getOrNull() ?: org.json.JSONArray()
+            jobKind = "results"
             job = scope.launch {
+                prev?.join()
                 if (!CollectLock.mutex.tryLock()) { js("App.onResultsDone('busy')"); return@launch }
                 setBusy(true)
                 try {
@@ -347,7 +400,7 @@ class MainActivity : Activity() {
         /** 記録を JSON のファイルに書き出す（保存先は端末の画面で選んでもらう） */
         @JavascriptInterface
         fun exportRecords(json: String, fileName: String) = runOnUiThread {
-            pendingExport = json
+            pendingExportFile.writeText(json)
             val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
                 type = "application/json"

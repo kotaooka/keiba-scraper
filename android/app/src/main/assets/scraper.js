@@ -77,6 +77,20 @@
 
   // ========== 文字列ユーティリティ ==========
 
+  // Python の f"{x:.{d}f}" と同じ文字列にする。toFixed はちょうど半分（6.25 など）を切り上げるが、
+  // Python は偶数のほうへ丸める（6.2）。2進で正確に半分のときだけ偶数丸めにする
+  function pyFixed(x, d) {
+    const s = Math.abs(x).toFixed(20);
+    const dot = s.indexOf(".");
+    const rest = s.slice(dot + 1 + d);
+    if (/^50*$/.test(rest)) {
+      const kept = s.slice(0, dot + 1 + d).replace(/\.$/, "");
+      const lastDigit = +kept[kept.length - 1];
+      if (lastDigit % 2 === 0) return (x < 0 && +kept !== 0 ? "-" : "") + kept;
+    }
+    return x.toFixed(d);
+  }
+
   // BeautifulSoup の get_text(sep, strip=True) と同じ：テキストノードを前後空白を除いて sep でつなぐ
   function gt(el, sep) {
     if (!el) return "";
@@ -127,8 +141,11 @@
     return [...el.classList].some((c) => re.test(c));
   }
 
+  // 日本時間の「今」（getHours などで日本時間が読めるようにずらした Date。端末が海外の時間帯でもずれない）
+  function jstNow() { return new Date(Date.now() + (540 + new Date().getTimezoneOffset()) * 60000); }
+
   function nowStamp() {
-    const d = new Date();
+    const d = jstNow();
     const z = (n) => String(n).padStart(2, "0");
     return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
   }
@@ -173,7 +190,7 @@
 
   // 発走前で最も早いレースの位置。全レース終了なら最終レース
   function nextRaceIndex(races, raceDate) {
-    const now = new Date();
+    const now = jstNow();
     const z = (n) => String(n).padStart(2, "0");
     const today = `${now.getFullYear()}${z(now.getMonth() + 1)}${z(now.getDate())}`;
     if (raceDate !== today) return 0;
@@ -714,7 +731,7 @@
     const y = Number(last["斤量"]);
     if (h["斤量"] && last["斤量"] && !isNaN(x) && !isNaN(y)) {
       const diff = x - y;
-      h["斤量差"] = (diff >= 0 ? "+" : "-") + Math.abs(diff).toFixed(1);
+      h["斤量差"] = (diff >= 0 ? "+" : "-") + pyFixed(Math.abs(diff), 1);
     }
   }
 
@@ -775,7 +792,7 @@
       const upper = Math.min(...rows.slice(0, i).map((r) => parseFloat(r[2])));
       if (parseFloat(fuku) < upper) {
         notes.push(`${h["馬番"]}番 ${h["馬名"] || ""}: 単勝${tan}倍（${i + 1}番人気）なのに、複勝の下限が${fuku}倍と` +
-          `人気上位${i}頭のどの馬（最も低くて${upper.toFixed(1)}倍）よりも低い。複勝に大口の投票が入っている可能性がある` +
+          `人気上位${i}頭のどの馬（最も低くて${pyFixed(upper, 1)}倍）よりも低い。複勝に大口の投票が入っている可能性がある` +
           "（この馬の複勝・ワイドは実力以上に低く、ほかの馬の複勝は高めに出やすい）");
       }
     });
@@ -795,7 +812,8 @@
       if (h.cancel && !p.cancel) ch.push({ kind: "cancel", text: "取消" });
       if (!h.cancel) {
         const a = parseFloat(p.odds), b = parseFloat(h.odds);
-        if (a > 0 && b > 0 && Math.abs(b - a) / a >= 0.1) ch.push({ kind: "odds", from: p.odds, to: h.odds, down: b < a, text: `単勝 ${p.odds}→${h.odds}${b < a ? "↓" : "↑"}` });
+        // 0.1倍単位のオッズなので10分の1の整数で比べる（3.0→3.3 のちょうど10%も拾う）
+        if (a > 0 && b > 0 && Math.abs(Math.round(b * 10) - Math.round(a * 10)) * 10 >= Math.round(a * 10)) ch.push({ kind: "odds", from: p.odds, to: h.odds, down: b < a, text: `単勝 ${p.odds}→${h.odds}${b < a ? "↓" : "↑"}` });
         if (p.jockey && h.jockey && p.jockey !== h.jockey) ch.push({ kind: "jockey", text: `騎手 ${p.jockey}→${h.jockey}` });
         if ((!p.weight || p.weight === "未発表") && h.weight && h.weight !== "未発表") ch.push({ kind: "weight", text: `馬体重 ${h.weight}` });
       }
@@ -813,7 +831,7 @@
   }
 
   // 期待値の下限の表示（PC版の fmt_ev と同じ：1.2 / 1.25 / 1.0）
-  function fmtEv(v) { const s = Number(v).toFixed(2); return s.endsWith("0") ? s.slice(0, -1) : s; }
+  function fmtEv(v) { const s = pyFixed(Number(v), 2); return s.endsWith("0") ? s.slice(0, -1) : s; }
 
   // AI への指示文（PC版の prompt_text と同じ）
   function promptText(settings) {
@@ -832,7 +850,8 @@
   function num(text) {
     const t = toHalf(text).replace(/[%％円,，\s]/g, "");
     if (t === "" || !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
-    return parseFloat(t);
+    const v = parseFloat(t);
+    return Number.isFinite(v) ? v : null;
   }
 
   // 券種名をそろえる（三連複→3連複 など。PC版の normalize_bet_type）
@@ -856,6 +875,8 @@
     return nums.join("-");
   }
 
+  const EXAMPLE_BLOCK = JSON.stringify({ "予想": { "1": { "勝率": 12.5, "複勝率": 35 } }, "買い目": [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500 }] });
+
   // AI の回答から #PRED と #BET を読む。#PRED が無ければ null（PC版の parse_ai_block）
   function parseAiBlock(text) {
     let lines = String(text).replace(/\r/g, "").split("\n").map((l) => l.trim());
@@ -870,21 +891,31 @@
         if (section === "#BET" && ln.startsWith("```")) break;
         continue;
       }
-      const cells = ln.split(/[,，\t]/).map((c) => c.trim());
-      if (section === "#PRED" && cells.length >= 3 && /^\d+$/.test(toHalf(cells[0]))) {
-        const win = num(cells[1]), place = num(cells[2]);
-        if (win !== null && place !== null) pred[String(parseInt(toHalf(cells[0]), 10))] = { "勝率": win, "複勝率": place };
-      } else if (section === "#BET" && cells.length >= 3) {
+      if (section === "#PRED") {
+        const cells = ln.split(/[,，\t]/).map((c) => c.trim());
+        if (cells.length >= 3 && /^[0-9０-９]+$/.test(cells[0])) {
+          const win = num(cells[1]), place = num(cells[2]);
+          if (win !== null && place !== null) pred[String(parseInt(toHalf(cells[0]), 10))] = { "勝率": win, "複勝率": place };
+        }
+      } else if (section === "#BET") {
+        // 金額の「1,000」の桁区切りで切れないよう、区切りは最初の2つだけで分ける（PC版の maxsplit=2）
+        const m = /^([^,，\t]*)[,，\t]([^,，\t]*)[,，\t]([\s\S]*)$/.exec(ln);
+        if (!m) continue;
+        const cells = [m[1], m[2], m[3]].map((c) => c.trim());
         const betType = normalizeBetType(cells[0]);
-        const nums = toHalf(cells[1]).match(/\d+/g) || [];
+        const nums = toHalf(cells[1]).match(/[0-9]+/g) || [];
         const amount = num(cells[2]);
-        if (betType in BET_SPECS && nums.length && amount) {
+        // 馬番の数が券種と合わない行は読まない
+        if (betType in BET_SPECS && nums.length === BET_SPECS[betType][0] && amount && amount > 0) {
           bets.push({ "券種": betType, "組み合わせ": comboKey(betType, nums), "金額": Math.trunc(amount) });
         }
       }
     }
     if (!Object.keys(pred).length) return null;
-    return { "予想": pred, "買い目": bets };
+    const block = { "予想": pred, "買い目": bets };
+    // 指示文の書式例そのもの（AI の回答に記録用ブロックが無く、指示文ごとコピーしたとき）は記録しない
+    if (JSON.stringify(block) === EXAMPLE_BLOCK) return null;
+    return block;
   }
 
   // netkeiba の race_id（年4桁＋競馬場コード2桁＋月日4桁＋レース番号2桁）
@@ -969,7 +1000,8 @@
     const rows = [];
     for (const b of ai["買い目"]) {
       let ret, status;
-      if (b["組み合わせ"].split("-").some((n) => scratched.has(n))) { ret = b["金額"]; status = "返還"; }
+      // 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
+      if (!b["券種"].startsWith("枠") && b["組み合わせ"].split("-").some((n) => scratched.has(n))) { ret = b["金額"]; status = "返還"; }
       else if (!(b["券種"] in res["払戻"])) return null;
       else {
         const pay = res["払戻"][b["券種"]][b["組み合わせ"]];
@@ -993,6 +1025,7 @@
       rows.push({ "馬番": no, "市場": m / 100, "AI勝率": a["勝率"] / 100, "AI複勝率": a["複勝率"] / 100, "着順": res["着順"][no] });
     }
     const sm = rows.reduce((t, r) => t + r["市場"], 0), sa = rows.reduce((t, r) => t + r["AI勝率"], 0);
+    if (!(sm > 0) || !(sa > 0)) return [];  // AI の推定勝率がすべて0などで、そろえ直せない
     const placeN = runners.length >= 8 ? 3 : 2;
     for (const r of rows) {
       r["市場"] /= sm; r["AI勝率"] /= sa;
@@ -1089,7 +1122,8 @@
     const out = [];
     for (let i = 0; i < edges.length - 1; i++) {
       const lo = edges[i], hi = edges[i + 1];
-      const sel = pairs.filter(([p]) => (lo <= p * 100 && p * 100 < hi) || (hi === 100 && p * 100 === 100));
+      // 100% を超える推定（AI の書き誤り）は最後の区間に入れる
+      const sel = pairs.filter(([p]) => (lo <= p * 100 && p * 100 < hi) || (hi === edges[edges.length - 1] && p * 100 >= hi));
       if (sel.length) {
         out.push([lo, hi, sel.length, sel.reduce((t, [p]) => t + p, 0) / sel.length * 100, sel.reduce((t, [, y]) => t + y, 0) / sel.length * 100]);
       }
@@ -1101,7 +1135,11 @@
 
   // 記録から回収率・精度・キャリブレーションを計算する（PC版の compute_summary と同じ数値）
   function computeSummary(records) {
-    const races = records.filter((r) => r["AI"] && r["結果"]);
+    // 区間（ブートストラップ）は並び順で変わるので、race_id 順にそろえる（PC版と同じ値にするため）
+    const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+    const sortKey = (r) => [String(r.race_id || ""), String(r["日付"] || ""), String(r["競馬場"] || ""), parseInt(r["レース番号"], 10) || 0];
+    const races = records.filter((r) => r["AI"] && r["結果"]).map((r) => [sortKey(r), r])
+      .sort((x, y) => cmp(x[0][0], y[0][0]) || cmp(x[0][1], y[0][1]) || cmp(x[0][2], y[0][2]) || x[0][3] - y[0][3]).map((x) => x[1]);
     const out = {
       n_races: races.length,
       n_no_ai: records.filter((r) => !r["AI"]).length,
@@ -1117,13 +1155,14 @@
       if (rows === null) { unknown++; continue; }
       if (!rows.length) { skipped++; continue; }
       for (const row of rows) betRows.push(Object.assign({ race_id: r.race_id, "日付": r["日付"], "競馬場": r["競馬場"], "レース番号": r["レース番号"] }, row));
-      perRace.push([sumOf(rows.map((x) => x["金額"])), sumOf(rows.map((x) => x["払戻"]))]);
+      perRace.push([sumOf(rows.map((x) => x["金額"])), sumOf(rows.map((x) => x["払戻"])), rows.some((x) => x["判定"] === "的中")]);
     }
     const bets = { bought: perRace.length, skipped, unknown, spent: null, ret: null, ci: null, hit_races: 0, by_type: [] };
     if (perRace.length) {
       bets.spent = sumOf(perRace.map((x) => x[0]));
       bets.ret = sumOf(perRace.map((x) => x[1]));
-      bets.hit_races = perRace.filter((x) => x[1] > 0).length;
+      // 返還だけで戻ったレースは的中に数えない
+      bets.hit_races = perRace.filter((x) => x[2]).length;
       const [lo, hi] = bootstrapCi((idx) => {
         const s = sumOf(idx.map((i) => perRace[i][0]));
         return s ? sumOf(idx.map((i) => perRace[i][1])) / s : null;
@@ -1242,7 +1281,7 @@
       "",
     ];
     if (payoutRate) {
-      lines.push(`単勝の払戻率（オッズから逆算した目安）: ${(payoutRate * 100).toFixed(1)}%` +
+      lines.push(`単勝の払戻率（オッズから逆算した目安）: ${pyFixed(payoutRate * 100, 1)}%` +
         "　※市場勝率は控除分を除いて合計100%にそろえた値", "");
     }
 
@@ -1264,7 +1303,7 @@
       const vals = [h["馬番"], h["馬名"], h["性齢"] || "", h["斤量"] || "",
         h["騎手"] || "", h["調教師"] || "", weightStr,
         h["単勝"] || "--",
-        h["市場勝率"] != null ? `${h["市場勝率"].toFixed(1)}%` : "--",
+        h["市場勝率"] != null ? `${pyFixed(h["市場勝率"], 1)}%` : "--",
         h["人気"] || "", h["複勝"] || "--", h["脚質"] || ""];
       lines.push(vals.map((v, i) => pad(v, cols[i][1], cols[i][2])).join(" "));
     }
@@ -1398,7 +1437,7 @@
     buildWithInfo,
     NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, PROMPT_TEXT, fmtEv, promptText, withSettings,
     parsePatCalendar, parsePatRange,
-    oddsNotes, diffRaces, formatDiff,
+    oddsNotes, diffRaces, formatDiff, pyFixed,
     parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,

@@ -29,6 +29,11 @@ docs/                     説明書と画面例
 - 解析を直すときは、`keiba_scraper.py` と `scraper.js` の両方を同じように直す。指示文（`PROMPT_TEXT`）・予想の条件の既定値（`BUDGET`・`MAX_BETS`・`EV_MIN`）・競馬場コード・アクセス間隔（`REQUEST_INTERVAL`）も両方にある
 - 予想の記録と答え合わせも両方にある（PC版の `parse_ai_block`・`parse_result`・`settle_bets`・`horse_rows`・`compute_summary` ↔ `scraper.js` の `parseAiBlock`・`parseResult`・`settleBets`・`horseRows`・`computeSummary`）。95%区間のブートストラップは、`scraper.js` に Python の `random.Random` と同じ乱数（MT19937）を移植しているので、同じ記録なら同じ値になる。記録の形式も同じなので、Android版の書き出しを PC版の `import` で取り込める
 - オッズの注記（`odds_notes` ↔ `oddsNotes`）も両方にある
+- 小数の結果を両方で同じにするための約束
+  - 足し算は先頭から順に足す（PC版は `_sum`。Python 3.12 以降の `sum` は誤差を補正するので使わない）。馬は馬番の順に並べてから足す
+  - 小数の表示は Python の `f"{x:.1f}"` と同じ丸め（ちょうど半分は偶数へ）。`scraper.js` では `toFixed` ではなく `pyFixed` を使う
+  - 集計（`compute_summary` ↔ `computeSummary`）は、渡された順ではなく race_id の順に並べ直してから計算する
+- 時刻はすべて日本時間で扱う（Android版は端末の時間帯によらない。`ui.html` の `jstNow`、Kotlin の `Jst`）
 - 即PAT・A-PAT の発売カレンダーの解析（`parsePatCalendar`）と、取り直したときのオッズの変化（`diffRaces`・`formatDiff`）は Android版だけにある
 
 ## 取れなくなったとき

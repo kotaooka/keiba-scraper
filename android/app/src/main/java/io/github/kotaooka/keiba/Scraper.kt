@@ -308,7 +308,7 @@ class Scraper(
         // ---- テキスト作成 ----
         step("build", "run", "")
         val now = Date()
-        val collectedAt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.JAPAN).format(now)
+        val collectedAt = Jst.format("yyyy-MM-dd HH:mm:ss", now)
         val parts = """{"keibajo":${q(keibajo)},"race_date":${q(raceDate)},"race_no":$raceNo,""" +
             """"shutuba":$shutuba,"keibago":${safeObj(keibago)},"tan_fuku":${safeObj(tanFuku)},""" +
             """"wide":${safeArr(wide)},"sanren":${safeArr(sanren)},"sanren_note":${q(sanrenNote)},""" +
@@ -320,7 +320,7 @@ class Scraper(
             step("build", "ng", "")
             return Outcome(null, "テキストの作成に失敗しました。詳細ログを確認してください。")
         }
-        obj.put("at", SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.JAPAN).format(now))
+        obj.put("at", Jst.format("yyyy-MM-dd HH:mm", now))
         step("build", "ok", "${obj.getString("text").lines().size}行")
         return Outcome(obj.toString(), null)
     }

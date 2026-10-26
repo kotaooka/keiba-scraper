@@ -41,6 +41,7 @@ object Reservations {
     fun get(ctx: Context, key: String): JSONObject? = list(ctx).firstOrNull { it.optString("key") == key }
 
     /** 予約を保存してアラームを登録し直す。発走から1時間以上たった予約は消す */
+    @Synchronized
     fun set(ctx: Context, r: JSONObject) {
         val key = r.getString("key")
         cancelAlarms(ctx, key)
@@ -49,12 +50,14 @@ object Reservations {
         schedule(ctx, r)
     }
 
+    @Synchronized
     fun remove(ctx: Context, key: String) {
         cancelAlarms(ctx, key)
         save(ctx, prunedList(ctx).filter { it.optString("key") != key })
     }
 
     /** 端末の再起動でアラームは消えるので、起動時に全部登録し直す */
+    @Synchronized
     fun rescheduleAll(ctx: Context) {
         val items = prunedList(ctx)
         save(ctx, items)
@@ -163,6 +166,13 @@ object Notifier {
     }
 }
 
+/** 一時ファイルに書いてから置き換える（書き込みの途中で落ちても前の中身が残る） */
+fun writeAtomic(f: File, text: String) {
+    val tmp = File(f.parentFile, f.name + ".tmp")
+    tmp.writeText(text)
+    if (!tmp.renameTo(f)) { f.delete(); tmp.renameTo(f) }
+}
+
 /** 自動収集の結果の置き場所。アプリを開いたときに ui.html の収集済みの記録へ取り込む */
 object BackgroundResults {
     private fun file(ctx: Context) = File(ctx.filesDir, "background_results.json")
@@ -172,7 +182,7 @@ object BackgroundResults {
         val arr = runCatching { JSONArray(file(ctx).readText()) }.getOrDefault(JSONArray())
         arr.put(JSONObject().put("key", key).put("at", outcome.getString("at"))
             .put("text", outcome.getString("text")).put("info", outcome.getJSONObject("info")))
-        file(ctx).writeText(arr.toString())
+        writeAtomic(file(ctx), arr.toString())
     }
 
     @Synchronized
@@ -212,39 +222,49 @@ object ResultChecks {
         ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_LIST, JSONArray(items).toString()).apply()
     }
 
-    /** 予約する（同じ key は置き換え）。発走から1日たったものは捨てる */
+    /** 予約する（同じ key は置き換え）。発走から1日たったもの（古いレースの記録）は予約しない */
+    @Synchronized
     fun set(ctx: Context, r: JSONObject) {
         val key = r.getString("key")
-        r.put("tries", r.optInt("tries", 0))
-        val keep = pruned(ctx).filter { it.optString("key") != key } + r
-        save(ctx, keep)
-        schedule(ctx, r, r.getLong("start") + FIRST_DELAY)
+        val others = pruned(ctx).filter { it.optString("key") != key }
+        if (r.getLong("start") <= System.currentTimeMillis() - 24 * 3600_000L) { save(ctx, others); return }
+        val at = maxOf(r.getLong("start") + FIRST_DELAY, System.currentTimeMillis() + 60_000L)
+        r.put("tries", 0).put("next_at", at)
+        save(ctx, others + r)
+        schedule(ctx, r, at)
     }
 
+    @Synchronized
     fun remove(ctx: Context, key: String) {
         ctx.getSystemService(AlarmManager::class.java).cancel(intent(ctx, key, null, Reservations.exactAllowed(ctx)))
         ctx.getSystemService(AlarmManager::class.java).cancel(intent(ctx, key, null, !Reservations.exactAllowed(ctx)))
         save(ctx, pruned(ctx).filter { it.optString("key") != key })
     }
 
-    /** 未確定だったので、少しあとにもう一度読む。回数を超えたら false */
-    fun retry(ctx: Context, key: String): Boolean {
+    /**
+     * もう一度読む予約をする。countTry=false は、画面からの収集と重なって読めなかったとき（回数に数えない）。
+     * 回数を超えたら予約を消して false
+     */
+    @Synchronized
+    fun retry(ctx: Context, key: String, countTry: Boolean = true): Boolean {
         val items = pruned(ctx)
         val r = items.firstOrNull { it.optString("key") == key } ?: return false
-        val tries = r.optInt("tries", 0) + 1
+        val tries = r.optInt("tries", 0) + (if (countTry) 1 else 0)
         if (tries >= MAX_TRIES) { remove(ctx, key); return false }
-        r.put("tries", tries)
+        val at = System.currentTimeMillis() + (if (countTry) RETRY_DELAY else 5 * 60_000L)
+        r.put("tries", tries).put("next_at", at)
         save(ctx, items)
-        schedule(ctx, r, System.currentTimeMillis() + RETRY_DELAY)
+        schedule(ctx, r, at)
         return true
     }
 
-    /** 端末の再起動後や、許可を変えて戻ってきたときに登録し直す */
+    /** 端末の再起動後などに登録し直す。予定の時刻は変えない（過ぎていたら1分後） */
+    @Synchronized
     fun rescheduleAll(ctx: Context) {
         val items = pruned(ctx)
         save(ctx, items)
         val now = System.currentTimeMillis()
-        for (r in items) schedule(ctx, r, maxOf(r.getLong("start") + FIRST_DELAY, now + 60_000L))
+        for (r in items) schedule(ctx, r, maxOf(r.optLong("next_at", r.getLong("start") + FIRST_DELAY), now + 60_000L))
     }
 
     private fun pruned(ctx: Context): List<JSONObject> {
@@ -280,7 +300,7 @@ object RaceResults {
     fun add(ctx: Context, raceId: String, result: JSONObject, at: String) {
         val arr = runCatching { JSONArray(file(ctx).readText()) }.getOrDefault(JSONArray())
         arr.put(JSONObject().put("race_id", raceId).put("result", result).put("at", at))
-        file(ctx).writeText(arr.toString())
+        writeAtomic(file(ctx), arr.toString())
     }
 
     @Synchronized
