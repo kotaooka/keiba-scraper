@@ -196,6 +196,32 @@ details.preview pre { margin: 10px -14px -14px; padding: 12px 14px; border-top: 
 .end-actions { display: grid; gap: 8px; margin-top: 16px; }
 .sticky-actions { position: sticky; bottom: 0; background: linear-gradient(to bottom, transparent, var(--bg) 24%); padding: 20px 0 12px; margin-top: 4px; display: grid; gap: 8px; }
 
+/* ===== 更新のお知らせ・このアプリについて ===== */
+.update-bar { display: flex; align-items: center; gap: 10px; width: 100%; margin-top: 10px; padding: 9px 12px; border-radius: 12px;
+  background: var(--accent-weak); color: var(--ink); text-align: left; font-size: 13.5px; }
+.update-bar b { color: var(--accent); }
+.update-bar .go { margin-left: auto; color: var(--accent); font-weight: 700; white-space: nowrap; }
+.about-head { display: flex; align-items: center; gap: 14px; margin: 8px 0 4px; }
+.about-head .logo { width: 56px; height: 56px; border-radius: 14px; background: #1f5f3f; display: grid; place-items: center; flex: none; }
+.about-head h2 { margin: 0; font-size: 19px; }
+.about-head p { margin: 2px 0 0; color: var(--ink2); font-size: 13px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13.5px; margin: 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; }
+.status { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+.status .ic { width: 24px; height: 24px; border-radius: 12px; display: grid; place-items: center; font-size: 14px; flex: none; }
+.status.ok .ic { background: var(--ok); color: var(--surface); }
+.status.new .ic { background: var(--accent); color: var(--accent-ink); }
+.status.ng .ic { background: var(--ng); color: var(--surface); }
+.status.run .ic { border: 2px solid var(--accent); border-right-color: transparent; animation: spin .8s linear infinite; }
+.changes { list-style: none; margin: 10px 0 0; padding: 0; font-size: 13px; }
+.changes li { display: grid; grid-template-columns: 82px 1fr; gap: 8px; padding: 6px 0; border-top: 1px solid var(--grid); }
+.changes li span:first-child { color: var(--muted); font-family: var(--f-num); font-size: 12px; padding-top: 1px; }
+.changes li.newer span:last-child { font-weight: 700; }
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); background: var(--grid); border-radius: 10px; padding: 3px; gap: 3px; }
+.seg button { padding: 8px 0; border-radius: 8px; font-size: 14px; color: var(--ink2); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 700; box-shadow: var(--shadow); }
+
 /* ===== メニュー・通知 ===== */
 .menu { position: fixed; top: 52px; right: 12px; z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.18); min-width: 240px; padding: 6px; }
 .menu button { display: flex; width: 100%; text-align: left; padding: 11px 12px; border-radius: 8px; gap: 10px; align-items: center; }
@@ -213,10 +239,12 @@ details.preview pre { margin: 10px -14px -14px; padding: 12px 14px; border-top: 
   <header class="appbar">
     <div class="appbar-row">
       <h1>地方競馬データ収集<small>出馬表・オッズ・過去5走を集めて AI へ</small></h1>
+      <button class="icon-btn" id="themeBtn" aria-label="表示の切り替え"></button>
       <button class="icon-btn" id="menuBtn" aria-label="メニュー">
         <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
       </button>
     </div>
+    <button class="update-bar hidden" id="updateBar"></button>
     <div class="datebar">
       <button class="step" id="prevDay" aria-label="前の日">‹</button>
       <label class="date">
@@ -246,17 +274,46 @@ details.preview pre { margin: 10px -14px -14px; padding: 12px 14px; border-top: 
 <div class="menu hidden" id="menu">
   <button id="debugToggle">取得中のサイトをプレビュー<span class="check" id="debugCheck"></span></button>
   <button id="clearCache">収集済みの記録を消す</button>
+  <button id="aboutBtn">このアプリについて・更新<span class="check num" id="verText"></span></button>
 </div>
 <div class="toast" id="toast"></div>
 
 <script>
 "use strict";
+// ===== 表示テーマ（自動・ライト・ダーク）=====
+// 保存キーは QC Workbench の各ツールと同じ名前（DESIGN.md 1.5）。アプリ内だけに保存される
+const THEME_KEY = "qc-workbench-theme";
+const THEMES = ["auto", "light", "dark"];
+const THEME_LABEL = { auto: "自動（端末に合わせる）", light: "ライト", dark: "ダーク" };
+const THEME_ICON = {
+  auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/></svg>',
+  light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
+  dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/></svg>',
+};
+let themePref = (() => { try { const t = localStorage.getItem(THEME_KEY); return THEMES.includes(t) ? t : "auto"; } catch (e) { return "auto"; } })();
+let systemDark = window.matchMedia ? matchMedia("(prefers-color-scheme: dark)").matches : false;
+function applyTheme() {
+  const dark = themePref === "auto" ? systemDark : themePref === "dark";
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+  if (window.Android && Android.setBarsDark) Android.setBarsDark(dark);
+  const b = document.getElementById("themeBtn");
+  if (b) { b.innerHTML = THEME_ICON[themePref]; b.setAttribute("aria-label", `表示：${THEME_LABEL[themePref]}`); }
+  document.querySelectorAll("[data-theme-choice]").forEach((x) => x.setAttribute("aria-pressed", String(x.dataset.themeChoice === themePref)));
+}
+function setThemePref(t) {
+  themePref = t;
+  try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* 保存できなくても切り替えは効く */ }
+  applyTheme();
+}
+
 // ===== Kotlin とのやり取り =====
 // JS → Kotlin：window.Android（MainActivity の Bridge）
 // Kotlin → JS：App.onRaceList / onStep / onLog / onResult / back / setTheme
 const Native = window.Android || {
   // ブラウザで開いたとき用のダミー（画面の確認用）
-  loadRaceList() {}, collect() {}, cancel() {}, copy() {}, share() {}, setDebug() {}
+  loadRaceList() {}, collect() {}, cancel() {}, copy() {}, share() {}, setDebug() {},
+  setBarsDark() {}, checkUpdate() {}, installUpdate() {}, openUrl() {},
+  appInfo() { return JSON.stringify({ versionCode: 1005, versionName: "0.4.5", commit: "abc1234", builtAt: "2026-10-26 12:30" }); }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -407,6 +464,7 @@ function raceHead(venue, race) {
 function showScreen(name) {
   state.screen = name;
   $("home").classList.toggle("hidden", name !== "home");
+  $("backBtn").textContent = "‹ レース一覧";
   $("detail").classList.toggle("hidden", name === "home");
   window.scrollTo({ top: 0 });
 }
@@ -579,9 +637,147 @@ const App = {
     if (state.screen === "collect" && state.job) { Native.cancel(); }
     goHome(); return true;
   },
-  setTheme(t) { document.documentElement.dataset.theme = t; },
+  setTheme(t) { App.setSystemDark(t === "dark"); },
+  // 端末のダークモードの状態（Kotlin から起動時と切り替え時に届く）
+  setSystemDark(d) { systemDark = !!d; applyTheme(); },
+  onUpdateInfo(latest, error) { onUpdateInfo(latest, error); },
+  onUpdateState(s, detail) { onUpdateState(s, detail); },
 };
 window.App = App;
+
+// ===== 版情報と更新 =====
+const UPDATE_KEY = "keiba-update";  // 最後に確認した結果（{at, latest}）
+const current = (() => { try { return JSON.parse(Native.appInfo()); } catch (e) { return { versionCode: 0, versionName: "?", commit: "", builtAt: "" }; } })();
+const upd = { checking: false, latest: null, error: null, at: null, state: null, detail: "" };
+(() => { try { const c = JSON.parse(localStorage.getItem(UPDATE_KEY) || "null"); if (c) { upd.latest = c.latest; upd.at = c.at; } } catch (e) {} })();
+const hasUpdate = () => !!(upd.latest && upd.latest.versionCode > current.versionCode);
+
+function checkUpdate() {
+  upd.checking = true; upd.error = null;
+  renderUpdateUi();
+  Native.checkUpdate();
+}
+function onUpdateInfo(latest, error) {
+  upd.checking = false;
+  if (latest) {
+    upd.latest = latest; upd.at = new Date().toISOString(); upd.error = null;
+    try { localStorage.setItem(UPDATE_KEY, JSON.stringify({ at: upd.at, latest })); } catch (e) {}
+  } else {
+    upd.error = error || "確認できませんでした";
+  }
+  renderUpdateUi();
+}
+function onUpdateState(s, detail) { upd.state = s; upd.detail = detail; renderUpdateUi(); }
+
+function renderUpdateUi() {
+  // 一覧の上のお知らせ帯
+  const bar = $("updateBar");
+  if (hasUpdate()) {
+    bar.replaceChildren();
+    bar.append(el("span", null, "新しいバージョン "));
+    bar.append(el("b", "num", `v${upd.latest.versionName}`));
+    bar.append(el("span", null, " があります"));
+    bar.append(el("span", "go", "更新 ›"));
+    bar.classList.remove("hidden");
+  } else bar.classList.add("hidden");
+  $("verText").textContent = `v${current.versionName}` + (hasUpdate() ? " ●" : "");
+  if (state.screen === "about") renderAbout();
+}
+
+function fmtAt(iso) { const d = new Date(iso); return isNaN(d) ? "" : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; }
+
+function showAbout() {
+  closeMenu();
+  showScreen("about");
+  renderAbout();
+  // 開いたら確認する（直前に確認していれば省く）
+  if (!upd.checking && (!upd.at || Date.now() - new Date(upd.at) > 60 * 1000)) checkUpdate();
+}
+
+function renderAbout() {
+  const body = $("detailBody"); body.replaceChildren();
+  const head = el("div", "about-head");
+  const logo = el("div", "logo");
+  logo.innerHTML = '<svg viewBox="0 0 108 108" width="52" height="52"><path fill="none" stroke="#F2E6C9" stroke-width="9" stroke-linecap="round" d="M38,74 L38,52 A16,16 0 0 1 70,52 L70,74"/></svg>';
+  const t = el("div"); t.append(el("h2", null, "地方競馬データ収集"));
+  t.append(el("p", "num", `v${current.versionName}`));
+  head.append(logo, t); body.append(head);
+
+  // 更新の状態
+  const card = el("div", "card");
+  const st = el("div", "status");
+  if (upd.checking) { st.classList.add("run"); st.append(el("span", "ic"), el("span", null, "最新版を確認しています…")); }
+  else if (upd.error && !upd.latest) { st.classList.add("ng"); st.append(el("span", "ic", "×"), el("span", null, "確認できませんでした")); }
+  else if (hasUpdate()) { st.classList.add("new"); st.append(el("span", "ic", "↑"), el("span", null, `新しいバージョン v${upd.latest.versionName} があります`)); }
+  else if (upd.latest) { st.classList.add("ok"); st.append(el("span", "ic", "✓"), el("span", null, "最新版です")); }
+  card.append(st);
+  if (upd.error) card.append(el("p", "note", `理由：${upd.error}。通信状態を確認して、もう一度確認してください`));
+  if (upd.at && !upd.checking) card.append(el("p", "note", `確認 ${fmtAt(upd.at)}`));
+
+  if (hasUpdate()) {
+    const btn = el("button", "btn primary");
+    btn.style.width = "100%"; btn.style.marginTop = "12px";
+    const s = upd.state;
+    if (s === "download") {
+      btn.disabled = true; btn.textContent = `ダウンロード中… ${upd.detail}%`;
+      card.append(btn);
+      const bar = el("div", "bar"); const f = el("i"); f.style.width = `${upd.detail}%`; bar.append(f); card.append(bar);
+    } else {
+      btn.textContent = s === "install" ? "インストール画面をもう一度開く" : "更新する（ダウンロードしてインストール）";
+      btn.onclick = () => Native.installUpdate(upd.latest.versionName);
+      card.append(btn);
+      if (s === "permission") card.append(el("p", "note", "設定画面で「この提供元のアプリを許可」をオンにして戻ったら、もう一度「更新する」を押してください（初回だけ必要です）"));
+      if (s === "install") card.append(el("p", "note", "インストール画面で「更新」を押すと新しい版に置き換わります。収集済みの記録やテーマの設定はそのまま残ります"));
+      if (s === "error") card.append(el("p", "note", `${upd.detail}。「リリースページを開く」から手動でダウンロードすることもできます`));
+    }
+  }
+  const row = el("div", "btn-row"); row.style.marginTop = "12px";
+  const again = el("button", "btn secondary", "もう一度確認"); again.disabled = upd.checking; again.onclick = checkUpdate;
+  const page = el("button", "btn secondary", "リリースページ"); page.onclick = () => Native.openUrl("https://github.com/kotaooka/keiba-scraper/releases/tag/android-latest");
+  row.append(again, page); card.append(row);
+  body.append(card);
+
+  // 最近の変更
+  if (upd.latest && upd.latest.changes && upd.latest.changes.length) {
+    const c = el("div", "card");
+    c.append(el("h3", null, "最近の変更"));
+    const ul = el("ul", "changes");
+    const mine = (current.builtAt || "").slice(0, 10);
+    for (const ch of upd.latest.changes) {
+      const li = el("li", hasUpdate() && ch.date >= mine ? "newer" : null);
+      li.append(el("span", null, ch.date), el("span", null, ch.text));
+      ul.append(li);
+    }
+    c.append(ul);
+    if (hasUpdate()) c.append(el("p", "note", "太字は、このアプリのビルド日以降の変更です"));
+    body.append(c);
+  }
+
+  // 表示
+  const tc = el("div", "card");
+  tc.append(el("h3", null, "表示"));
+  const seg = el("div", "seg");
+  for (const k of THEMES) {
+    const b = el("button", null, { auto: "自動", light: "ライト", dark: "ダーク" }[k]);
+    b.dataset.themeChoice = k; b.setAttribute("aria-pressed", String(k === themePref));
+    b.onclick = () => setThemePref(k);
+    seg.append(b);
+  }
+  tc.append(seg);
+  tc.append(el("p", "note", "「自動」は端末のダークモードに合わせます。右上の丸いボタンでも切り替えられます"));
+  body.append(tc);
+
+  // このビルド
+  const ic = el("div", "card");
+  ic.append(el("h3", null, "このビルド"));
+  const dl = el("dl", "kv");
+  for (const [k, v] of [["バージョン", `v${current.versionName}（${current.versionCode}）`], ["ビルド日時", current.builtAt ? `${current.builtAt} JST` : "—"],
+    ["コミット", current.commit || "—"], ["データの取得元", "netkeiba（出馬表・オッズ）、keiba.go.jp（馬柱・過去5走）"]]) {
+    dl.append(el("dt", null, k), el("dd", k === "コミット" ? "num" : null, v));
+  }
+  ic.append(dl);
+  body.append(ic);
+}
 
 function goHome() { state.job = null; showScreen("home"); renderRaces(); }
 
@@ -602,6 +798,12 @@ function renderPreviewBtn() {
   const b = $("previewBtn"); if (b) b.textContent = state.debug ? "サイトのプレビューを閉じる" : "取得中のサイトをプレビュー";
 }
 $("debugToggle").onclick = () => { togglePreview(); closeMenu(); };
+$("aboutBtn").onclick = showAbout;
+$("updateBar").onclick = showAbout;
+$("themeBtn").onclick = () => {
+  const next = THEMES[(THEMES.indexOf(themePref) + 1) % THEMES.length];
+  setThemePref(next); toast(`表示：${THEME_LABEL[next]}`);
+};
 $("clearCache").onclick = () => { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} closeMenu(); renderRaces(); toast("記録を消しました"); };
 
 // ===== 日付の操作 =====
@@ -615,7 +817,13 @@ $("backBtn").onclick = () => App.back();
 setInterval(() => { if (state.screen === "home" && !state.loading && state.date === todayStr()) renderRaces(); }, 60000);
 
 renderDate();
-if (window.Android) loadRaceList();
+applyTheme();
+renderUpdateUi();
+if (window.Android) {
+  loadRaceList();
+  // 起動時の更新確認は6時間に1回まで（お知らせ帯に出すだけで、勝手には更新しない）
+  if (!upd.at || Date.now() - new Date(upd.at) > 6 * 3600 * 1000) setTimeout(checkUpdate, 1500);
+}
 </script>
 </body>
 </html>

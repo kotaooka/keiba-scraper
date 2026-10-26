@@ -17,6 +17,8 @@ jobs:
       contents: write  # タグとリリースの更新に必要
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 50  # 更新内容（直近のコミット）を version.json に書くため
 
       - uses: actions/setup-java@v4
         with:
@@ -42,14 +44,29 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp android/app/build/outputs/apk/debug/app-debug.apk keiba-collector.apk
+          # アプリの更新確認が読む版情報。versionCode / versionName は app/build.gradle.kts と同じ式
+          git log -10 --date=format:%Y-%m-%d --format='%ad%x09%s' -- android .github/workflows/android.yml > changes.tsv
+          python3 - <<'PY'
+          import json, os, datetime
+          run = int(os.environ["GITHUB_RUN_NUMBER"])
+          changes = []
+          for line in open("changes.tsv", encoding="utf-8"):
+              date, _, subject = line.rstrip("\n").partition("\t")
+              changes.append({"date": date, "text": subject})
+          now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+          info = {"versionCode": 1000 + run, "versionName": f"0.4.{run}", "commit": os.environ["GITHUB_SHA"][:7],
+                  "builtAt": now.strftime("%Y-%m-%d %H:%M"), "changes": changes}
+          json.dump(info, open("version.json", "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+          PY
+          cat version.json
           # タグを今回のコミットに付け替える
           git tag -f android-latest
           git push -f origin refs/tags/android-latest
-          notes="Android版の最新ビルド（コミット ${GITHUB_SHA::7}、$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M') JST）。
+          notes="Android版 v0.4.${GITHUB_RUN_NUMBER}（コミット ${GITHUB_SHA::7}、$(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M') JST）。
           keiba-collector.apk をダウンロードしてインストールしてください。入れ方は android/README.md を参照。"
           if gh release view android-latest > /dev/null 2>&1; then
             gh release edit android-latest --notes "$notes"
           else
             gh release create android-latest --title "Android版（最新）" --notes "$notes" --latest
           fi
-          gh release upload android-latest keiba-collector.apk --clobber
+          gh release upload android-latest keiba-collector.apk version.json --clobber

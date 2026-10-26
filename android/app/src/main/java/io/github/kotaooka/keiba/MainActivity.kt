@@ -38,7 +38,11 @@ class MainActivity : Activity() {
     private lateinit var ui: WebView
     private lateinit var work: WebView
     private lateinit var scraper: Scraper
+    private lateinit var updater: Updater
+    private var updateJob: Job? = null
     private var debug = false
+    // 画面がダーク表示か（UI のテーマ切替で決まる。未設定なら端末の設定に従う）
+    private var uiDark: Boolean? = null
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,6 +68,7 @@ class MainActivity : Activity() {
         }
         setContentView(root)
         applySystemBars()
+        updater = Updater(this)
 
         val ks = assets.open("scraper.js").bufferedReader(Charsets.UTF_8).use { it.readText() }
         scraper = Scraper(work, ks,
@@ -101,12 +106,13 @@ class MainActivity : Activity() {
     private fun isDark(): Boolean =
         (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES
 
-    private fun applyTheme() = js("App.setTheme('${if (isDark()) "dark" else "light"}')")
+    /** 端末のダークモードの状態を UI に伝える（UI 側で「自動」のときに使う） */
+    private fun applyTheme() = js("App.setSystemDark(${isDark()})")
 
     /** ステータスバー・ナビゲーションバーを画面の背景色（DESIGN.md の --bg）に合わせる */
     @Suppress("DEPRECATION")
     private fun applySystemBars() {
-        val dark = isDark()
+        val dark = uiDark ?: isDark()
         val bg = if (dark) Color.parseColor("#12100e") else Color.parseColor("#f2ebdf")
         window.statusBarColor = bg
         window.navigationBarColor = bg
@@ -190,6 +196,59 @@ class MainActivity : Activity() {
                 putExtra(Intent.EXTRA_TEXT, text)
             }
             startActivity(Intent.createChooser(send, "AI アプリへ送る"))
+        }
+
+        /** UI のテーマが決まったら、ステータスバーの色も合わせる */
+        @JavascriptInterface
+        fun setBarsDark(dark: Boolean) = runOnUiThread {
+            uiDark = dark
+            applySystemBars()
+        }
+
+        // ---- 版情報と更新 ----
+
+        @JavascriptInterface
+        fun appInfo(): String = updater.currentInfo().toString()
+
+        @JavascriptInterface
+        fun checkUpdate() = runOnUiThread {
+            scope.launch {
+                try {
+                    val latest = updater.fetchLatest()
+                    js("App.onUpdateInfo($latest, null)")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    js("App.onUpdateInfo(null, ${JSONObject.quote(e.message ?: e.javaClass.simpleName)})")
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun installUpdate(versionName: String) = runOnUiThread {
+            if (updateJob?.isActive == true) return@runOnUiThread
+            if (!updater.canInstall()) {
+                // 初回は「この提供元のアプリを許可」が要る。設定画面から戻ったら、もう一度押してもらう
+                updater.openInstallPermissionSettings()
+                js("App.onUpdateState('permission', '')")
+                return@runOnUiThread
+            }
+            updateJob = scope.launch {
+                try {
+                    js("App.onUpdateState('download', '0')")
+                    updater.downloadAndInstall(versionName) { pct -> js("App.onUpdateState('download', '$pct')") }
+                    js("App.onUpdateState('install', '')")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    js("App.onUpdateState('error', ${JSONObject.quote(e.message ?: e.javaClass.simpleName)})")
+                }
+            }
+        }
+
+        @JavascriptInterface
+        fun openUrl(url: String) = runOnUiThread {
+            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
         }
 
         @JavascriptInterface
