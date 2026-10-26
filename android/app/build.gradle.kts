@@ -1,3 +1,7 @@
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -7,8 +11,8 @@ plugins {
 // versionCode が大きいほど新しい。アプリの更新確認はこの値をリリースの version.json と比べる
 val runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "0").toInt()
 val commitSha = (System.getenv("GITHUB_SHA") ?: "local").take(7)
-val builtAt = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Tokyo"))
-    .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+// （この中では "java" が Gradle の設定名と衝突するので、java.time は import して使う）
+val builtAt: String = ZonedDateTime.now(ZoneId.of("Asia/Tokyo")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
 
 android {
     namespace = "io.github.kotaooka.keiba"
