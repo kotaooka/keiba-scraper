@@ -403,6 +403,9 @@ button.pref-row:active { background: var(--grid); }
 .bet-pay { margin-left: auto; padding-left: 10px; white-space: nowrap; }
 .bet-total { margin: 8px 2px 0; font-weight: 700; }
 .bet-total .note { font-weight: 400; display: block; margin-top: 2px; }
+.bet-total .hit-any { display: block; margin-top: 4px; font-weight: 700; color: var(--accent); }
+.speed-table td.t { font-family: var(--f-num); }
+.speed-table th { white-space: nowrap; }
 .ai-comment { margin: 10px 0 2px; padding: 8px 10px; background: var(--grid); border-radius: 8px; font-size: 14px; }
 .rec-table tr.bought td { font-weight: 700; }
 .ai-card .rec-table th { white-space: nowrap; }
@@ -907,6 +910,12 @@ function renderResult() {
   body.append(cond);
 
   // オッズの動き（取り直したとき）
+  if (res.info.predicted) {
+    const pc = el("div", "card warn-card");
+    pc.append(el("h3", null, "発売前：単勝は予想オッズです"));
+    pc.append(el("p", null, "netkeiba の AI が戦績から出した予想で、実際の投票ではありません。市場勝率・期待値は参考値です。発売が始まったら「オッズを更新」で取り直してください（複勝・ワイド・三連複のオッズも発売後に取れます）"));
+    body.append(pc);
+  }
   if (res.diff) {
     const dc = el("div", "card diff-card");
     dc.append(el("h3", null, `前回（${res.diff.prevAt}）からの変化`));
@@ -979,6 +988,28 @@ function renderResult() {
   lg.append(el("span", null, "市場勝率・単勝"));
   hc.append(lg);
   body.append(hc);
+
+  // 同条件の走破タイム（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速）
+  const sp = res.info.speed;
+  if (sp && sp.rows && sp.rows.length) {
+    const sc = el("div", "card");
+    const sh = el("h3", null, "走破タイム"); sh.append(el("span", "aside", sp["条件"])); sc.append(sh);
+    const tb = el("table", "rec-table speed-table");
+    const hr = el("tr"); for (const [t, cls] of [["馬"], ["タイム", "r"], ["差", "r"], ["馬場"], ["上がり", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+    const top = sp.rows[0].sec;
+    sp.rows.forEach((x, i) => {
+      const tr = el("tr");
+      tr.append(el("td", null, `${x["馬番"]} ${x["馬名"]}`), el("td", "r t", x.time),
+        el("td", "r num", i === 0 ? "最速" : `+${(x.sec - top).toFixed(1)}`), el("td", null, x["馬場"] || "--"),
+        el("td", "r num", x["上がり"] != null ? x["上がり"].toFixed(1) : "--"));
+      tb.append(tr);
+    });
+    sc.append(tb);
+    const nt = [`過去5走のうち、今回と同じ競馬場・同じ距離（${sp["条件"]}）のレースの最速タイム。条件の違うレースのタイムは比べられないので入れていません。馬場状態で速さが変わるので、馬場も見てください`];
+    if (sp.none && sp.none.length) nt.unshift(`同条件の走歴なし：${sp.none.join("・")}番`);
+    for (const t of nt) sc.append(el("p", "note", t));
+    body.append(sc);
+  }
 
   // AI の予想（記録と答え合わせ）
   body.append(aiCard(venue, race));
@@ -1381,6 +1412,7 @@ function pasteAiAnswer() {
   rec["AI"]["オッズ"] = parsed["買い目"].map((b) => { const o = betOddsOf(b, res.info); return o ? o.text : null; });
   rec["AI"]["総評"] = aiComment(text);
   rec["予算"] = betSettings().budget;
+  if (res.info.predicted) rec["予想オッズ"] = true;
   // 貼り直したときも、取得済みの結果は残す
   if (prevResult) rec["結果"] = prevResult;
   recs[key] = rec;
@@ -1570,11 +1602,11 @@ function aiCard(venue, race) {
         d.append(el("span", null, `${label}${o.text}倍`));
         if (p != null) {
           const ev = p * o.low;
-          d.append(el("span", null, `　×　AI ${(p * 100).toFixed(1)}%　＝　`), el("b", ev >= evMin ? "ev-ok" : "ev-ng", `期待値 ${ev.toFixed(2)}`));
+          d.append(el("span", null, `　×　当たる確率 ${(p * 100).toFixed(1)}%　＝　`), el("b", ev >= evMin ? "ev-ok" : "ev-ng", `期待値 ${ev.toFixed(2)}`));
         }
         return d;
       };
-      const odds1 = line(atRec && atRec.low > 0 ? atRec : null, "記録時 ");
+      const odds1 = line(atRec && atRec.low > 0 ? atRec : null, rec["予想オッズ"] && b["券種"] === "単勝" ? "記録時（予想オッズ） " : "記録時 ");
       if (atRec && atRec.low > 0) odds1.append(el("span", "bet-pay", `当たれば ${yen(Math.floor(b["金額"] / 100) * Math.round(atRec.low * 100))}${wide ? "以上" : ""}`));
       row.append(odds1);
       if (now && atRec && now.text !== atRec.text) row.append(line(now, "今 "));
@@ -1583,6 +1615,18 @@ function aiCard(venue, race) {
     c.append(list);
     const sum = el("p", "bet-total");
     sum.append(document.createTextNode(`合計 ${yen(total)}`));
+    // どれかが当たる確率（AI の見積もり）。同じ券種の別の組み合わせ（単勝どうし・三連複どうしなど）は同時に当たらないので足せる。
+    // 複勝・ワイドや券種が混ざると同時に当たることがあるので、幅（いちばん高い確率〜足した確率）で出す
+    const ps = bets.map((b) => betProbOf(b, pred));
+    if (ps.length && ps.every((x) => x != null)) {
+      const exclusive = new Set(bets.map((b) => b["券種"])).size === 1 && !["複勝", "ワイド"].includes(bets[0]["券種"]) &&
+        new Set(bets.map((b) => b["組み合わせ"])).size === bets.length;
+      const total1 = Math.min(1, ps.reduce((t, x) => t + x, 0)), max1 = Math.max(...ps);
+      const pct = (x) => `${(x * 100).toFixed(1)}%`;
+      const range = !(exclusive || total1 - max1 < 0.0005);
+      sum.append(el("span", "hit-any", range ? `どれかが当たる確率 ${pct(max1)}〜${pct(total1)}` : `どれかが当たる確率 ${pct(total1)}`));
+      if (range) sum.append(el("span", "note", "複勝・ワイドや券種の違う買い目は同時に当たることがあるので、幅で出しています（AI の見積もり）"));
+    }
     if (bets.some((b) => betProbOf(b, pred) == null)) sum.append(el("span", "note", "この回答の記録用ブロックには推定的中率の列が無いため、ワイド・3連複の期待値は出せません（指示文を最新にすると出ます）"));
     c.append(sum);
     if (settled) {

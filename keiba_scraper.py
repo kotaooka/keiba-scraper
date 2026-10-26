@@ -627,7 +627,7 @@ def _parse_keibago_horse(rows):
 
     # 今回の騎手とこの馬のコンビ成績（"54.0 0-1-0-4" の後半）
     for td in _cells(r1):
-        m = re.fullmatch(r"\d{2}\.\d\s+(\d+-\d+-\d+-\d+)", td.get_text(" ", strip=True))
+        m = re.fullmatch(r"[^\d\s]*\s*\d{2}\.\d\s+(\d+-\d+-\d+-\d+)", td.get_text(" ", strip=True))
         if m:
             data["コンビ"] = m.group(1)
             break
@@ -756,13 +756,31 @@ def parse_tan_fuku(html):
 
     tan = parse_table(tan_t, False)
     fuku = parse_table(fuku_t, True)
-    return {no: {"単勝": tan.get(no, "--"), "複勝": fuku.get(no, "--")} for no in set(tan) | set(fuku)}
+    # 発売前は単勝の表が netkeiba の「予想オッズ」（実際の投票ではない）になり、複勝の表は無い
+    predicted = _is_predicted(tan_t)
+    out = {no: {"単勝": tan.get(no, "--"), "複勝": fuku.get(no, "--")} for no in set(tan) | set(fuku)}
+    if predicted:
+        for v in out.values():
+            v["予想"] = True
+    return out
+
+
+def _is_predicted(table):
+    """単勝の表が発売前の予想オッズか（表の見出し行に「予想」がある）"""
+    if table is None:
+        return False
+    first = table.find("tr")
+    return bool(first) and "予想" in first.get_text(" ")
 
 
 # 単勝・複勝の両方の表にオッズの数字が入るまで待つ（オッズはページを開いたあとに埋まるため、
 # 単勝の表だけ見ていると、複勝が空のうちに読んでしまう）
 _TANFUKU_READY_JS = """() => {
     const t = [...document.querySelectorAll('table.RaceOdds_HorseList_Table')];
+    // 発売前は予想オッズの表が1つだけ（複勝の表は出てこないので待たない）
+    if (t.length === 1 && t[0].querySelector('tr') && t[0].querySelector('tr').innerText.includes('予想')) {
+        return [...t[0].querySelectorAll('td.Odds')].some(e => /\\d+\\.\\d/.test(e.innerText));
+    }
     if (t.length < 2) return false;
     const n = (x) => [...x.querySelectorAll('td.Odds')].filter(e => /\\d+\\.\\d/.test(e.innerText)).length;
     const a = n(t[0]), b = n(t[1]);
@@ -934,6 +952,7 @@ def merge_data(horses, tan_fuku):
         odds = tan_fuku.get(h["馬番"], {})
         h["単勝"] = odds.get("単勝", "--")
         h["複勝"] = odds.get("複勝", "--")
+        h["単勝_予想"] = bool(odds.get("予想"))
         # オッズページで取れなかった単勝は出馬表の値で埋める
         h["単勝_代用"] = False
         if h["単勝"] in ("", "--") and h.get("単勝_出馬表"):
@@ -942,13 +961,34 @@ def merge_data(horses, tan_fuku):
     return horses
 
 
+# 騎手名の前に付く記号（減量・女性騎手など）と、表記の揺れやすい字
+_JOCKEY_MARKS = "★☆▲△◇◆□■○●▼▽※＊*"
+_KANJI_VARIANTS = str.maketrans({"齋": "斉", "齊": "斉", "斎": "斉", "邊": "辺", "邉": "辺", "髙": "高", "﨑": "崎",
+                                 "濱": "浜", "澤": "沢", "櫻": "桜", "廣": "広", "國": "国", "嶋": "島", "德": "徳",
+                                 "惠": "恵", "眞": "真", "瀨": "瀬", "冨": "富", "槇": "槙", "藪": "薮"})
+
+
+def norm_jockey(name):
+    """騎手名を比べやすくする（記号と空白を除き、異体字をそろえる）"""
+    t = re.sub(r"\s", "", str(name or "")).lstrip(_JOCKEY_MARKS)
+    return t.translate(_KANJI_VARIANTS)
+
+
+def _last_run(past):
+    """実際に走った直近のレース（取止・取消・除外は走っていないので飛ばす）"""
+    for r in past:
+        if str(r.get("着順", "")) not in ("取止", "取消", "除外"):
+            return r
+    return None
+
+
 def add_derived_fields(h, race_date):
     """前走からの間隔・乗り替わり・斤量差をスクリプト側で計算する"""
     past = h.get("過去成績") or []
     h["前走間隔"], h["乗替"], h["斤量差"] = "", "", ""
-    if not past:
+    last = _last_run(past)
+    if not last:
         return
-    last = past[0]
     try:
         days = (datetime.strptime(race_date, "%Y%m%d")
                 - datetime.strptime(last.get("日付", ""), "%Y/%m/%d")).days
@@ -956,11 +996,12 @@ def add_derived_fields(h, race_date):
     except ValueError:
         pass
     # keiba.go.jp の騎手名は略記（例: 菅原辰）なので前方一致で比べる
-    now_j, last_j = h.get("騎手", ""), last.get("騎手", "")
+    # 騎手名は略記（例: 菅原辰）や記号付き（★齋藤友）なので、そろえてから前方一致で比べる
+    now_j, last_j = norm_jockey(h.get("騎手", "")), norm_jockey(last.get("騎手", ""))
     if now_j and last_j:
-        h["乗替"] = "なし" if now_j.startswith(last_j) or last_j.startswith(now_j) else f"あり（前走 {last_j}）"
+        h["乗替"] = "なし" if now_j.startswith(last_j) or last_j.startswith(now_j) else f"あり（前走 {last.get('騎手', '')}）"
     try:
-        diff = float(h.get("斤量", "")) - float(last.get("斤量", ""))
+        diff = float(re.sub(r"[^\d.]", "", str(h.get("斤量", "")))) - float(re.sub(r"[^\d.]", "", str(last.get("斤量", ""))))
         h["斤量差"] = f"{diff:+.1f}"
     except ValueError:
         pass
@@ -1004,6 +1045,9 @@ def check_data(horses):
         nos = [h["馬番"] for h in active if missing(h)]
         if nos:
             warnings.append(f"{label}未取得: 馬番 {', '.join(nos)}")
+    if any(h.get("単勝_予想") for h in active):
+        warnings.append("単勝は発売前の予想オッズ（netkeiba の AI が戦績から出した予想で、実際の投票ではない）。"
+                        "市場勝率・払戻率もこの予想から計算した参考値。発売開始後に取り直すと実際のオッズになる")
     subs = [h["馬番"] for h in active if h.get("単勝_代用")]
     if subs:
         warnings.append(f"単勝はオッズのページで取れず、出馬表の値で代用: 馬番 {', '.join(subs)}"
@@ -1230,6 +1274,8 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
             lines += ["", f"【{label} 人気上位】"]
             for i, c in enumerate(combos[:10], 1):
                 lines.append(f"  {i:2d}位  {pad(c['組み合わせ'], 8)}  {c['オッズ']}倍")
+        else:
+            lines += ["", f"【{label} 人気上位】取得できず（発売前か、取得に失敗）。{label}は選ばないこと"]
 
     st = speed_table(horses, keibajo, ri)
     if st:

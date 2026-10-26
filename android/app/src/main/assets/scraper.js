@@ -448,7 +448,7 @@
     }
 
     for (const td of directChildren(r1, "TD")) {
-      const m = gt(td, " ").match(/^\d{2}\.\d\s+(\d+-\d+-\d+-\d+)$/);
+      const m = gt(td, " ").match(/^[^\d\s]*\s*\d{2}\.\d\s+(\d+-\d+-\d+-\d+)$/);
       if (m) {
         data["コンビ"] = m[1];
         break;
@@ -555,9 +555,13 @@
     };
     const tan = parseTable(tanT, false);
     const fuku = parseTable(fukuT, true);
+    // 発売前は単勝の表が netkeiba の「予想オッズ」（実際の投票ではない）になり、複勝の表は無い（PC版の _is_predicted）
+    const firstRow = tanT && tanT.querySelector("tr");
+    const predicted = !!firstRow && rawSep(firstRow).includes("予想");
     const out = {};
     for (const no of new Set([...Object.keys(tan), ...Object.keys(fuku)])) {
       out[no] = { "単勝": tan[no] || "--", "複勝": fuku[no] || "--" };
+      if (predicted) out[no]["予想"] = true;
     }
     return out;
   }
@@ -607,6 +611,9 @@
   // 単勝・複勝の両方の表にオッズの数字が入ったか（PC版の _TANFUKU_READY_JS と同じ）
   function tanfukuReady(doc) {
     const t = [...doc.querySelectorAll("table.RaceOdds_HorseList_Table")];
+    // 発売前は予想オッズの表が1つだけ（複勝の表は出てこないので待たない）
+    const head = t.length === 1 && t[0].querySelector("tr");
+    if (head && head.innerText.includes("予想")) return [...t[0].querySelectorAll("td.Odds")].some((e) => /\d+\.\d/.test(e.innerText));
     if (t.length < 2) return false;
     const n = (x) => [...x.querySelectorAll("td.Odds")].filter((e) => /\d+\.\d/.test(e.innerText)).length;
     const a = n(t[0]), b = n(t[1]);
@@ -699,6 +706,7 @@
       const odds = tanFuku[h["馬番"]] || {};
       h["単勝"] = odds["単勝"] || "--";
       h["複勝"] = odds["複勝"] || "--";
+      h["単勝_予想"] = !!odds["予想"];
       h["単勝_代用"] = false;
       if (["", "--"].includes(h["単勝"]) && h["単勝_出馬表"]) { h["単勝"] = h["単勝_出馬表"]; h["単勝_代用"] = true; }
     }
@@ -712,24 +720,41 @@
     return Date.UTC(+m[1], +m[2] - 1, +m[3]);
   }
 
+  // 騎手名の前に付く記号と、表記の揺れやすい字（PC版の norm_jockey）
+  const JOCKEY_MARKS = "★☆▲△◇◆□■○●▼▽※＊*";
+  const KANJI_VARIANTS = { "齋": "斉", "齊": "斉", "斎": "斉", "邊": "辺", "邉": "辺", "髙": "高", "﨑": "崎",
+    "濱": "浜", "澤": "沢", "櫻": "桜", "廣": "広", "國": "国", "嶋": "島", "德": "徳",
+    "惠": "恵", "眞": "真", "瀨": "瀬", "冨": "富", "槇": "槙", "藪": "薮" };
+  function normJockey(name) {
+    let t = String(name || "").replace(/\s/g, "");
+    let i = 0;
+    while (i < t.length && JOCKEY_MARKS.includes(t[i])) i++;
+    return [...t.slice(i)].map((c) => KANJI_VARIANTS[c] || c).join("");
+  }
+  // 実際に走った直近のレース（取止・取消・除外は飛ばす。PC版の _last_run）
+  function lastRun(past) {
+    return past.find((r) => !["取止", "取消", "除外"].includes(String(r["着順"] || ""))) || null;
+  }
+
   function addDerivedFields(h, raceDate) {
     const past = h["過去成績"] || [];
     h["前走間隔"] = "";
     h["乗替"] = "";
     h["斤量差"] = "";
-    if (!past.length) return;
-    const last = past[0];
+    const last = lastRun(past);
+    if (!last) return;
     const a = parseYmd(raceDate, "YYYYMMDD");
     const b = parseYmd(last["日付"] || "", "YYYY/MM/DD");
     if (a !== null && b !== null) h["前走間隔"] = `${Math.round((a - b) / 86400000)}日`;
-    const nowJ = h["騎手"] || "";
-    const lastJ = last["騎手"] || "";
+    const nowJ = normJockey(h["騎手"]);
+    const lastJ = normJockey(last["騎手"]);
     if (nowJ && lastJ) {
-      h["乗替"] = nowJ.startsWith(lastJ) || lastJ.startsWith(nowJ) ? "なし" : `あり（前走 ${lastJ}）`;
+      h["乗替"] = nowJ.startsWith(lastJ) || lastJ.startsWith(nowJ) ? "なし" : `あり（前走 ${last["騎手"] || ""}）`;
     }
-    const x = Number(h["斤量"]);
-    const y = Number(last["斤量"]);
-    if (h["斤量"] && last["斤量"] && !isNaN(x) && !isNaN(y)) {
+    const xs = String(h["斤量"] || "").replace(/[^\d.]/g, ""), ys = String(last["斤量"] || "").replace(/[^\d.]/g, "");
+    const x = Number(xs);
+    const y = Number(ys);
+    if (xs && ys && !isNaN(x) && !isNaN(y)) {
       const diff = x - y;
       h["斤量差"] = (diff >= 0 ? "+" : "-") + pyFixed(Math.abs(diff), 1);
     }
@@ -765,6 +790,10 @@
     for (const [label, missing] of items) {
       const nos = active.filter(missing).map((h) => h["馬番"]);
       if (nos.length) warnings.push(`${label}未取得: 馬番 ${nos.join(", ")}`);
+    }
+    if (active.some((h) => h["単勝_予想"])) {
+      warnings.push("単勝は発売前の予想オッズ（netkeiba の AI が戦績から出した予想で、実際の投票ではない）。" +
+        "市場勝率・払戻率もこの予想から計算した参考値。発売開始後に取り直すと実際のオッズになる");
     }
     const subs = active.filter((h) => h["単勝_代用"]).map((h) => h["馬番"]);
     if (subs.length) warnings.push(`単勝はオッズのページで取れず、出馬表の値で代用: 馬番 ${subs.join(", ")}（発売前は予想オッズのことがあり、市場勝率は参考値）`);
@@ -1417,6 +1446,8 @@
         combos.slice(0, 10).forEach((c, i) => {
           lines.push(`  ${String(i + 1).padStart(2)}位  ${pad(c["組み合わせ"], 8)}  ${c["オッズ"]}倍`);
         });
+      } else {
+        lines.push("", `【${label} 人気上位】取得できず（発売前か、取得に失敗）。${label}は選ばないこと`);
       }
     }
 
@@ -1480,6 +1511,8 @@
         odds_notes: oddsNotes(horses),
         wide: (parts.wide || []).length,
         sanren: (parts.sanren || []).length,
+        // 単勝が発売前の予想オッズか（画面に注意を出す）
+        predicted: horses.some((h) => !h["取消"] && h["単勝_予想"]),
         // 同条件の走破タイム（画面の表に使う）
         speed: speedTable(horses, parts.keibajo, (parts.shutuba || {}).race_info),
         // 買い目の期待値の表示に使う組み合わせのオッズ（人気上位10組。キーは comboKey と同じ形）
@@ -1511,7 +1544,7 @@
     buildWithInfo,
     NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, PROMPT_TEXT, fmtEv, promptText, withSettings,
     parsePatCalendar, parsePatRange,
-    oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed,
+    oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
     parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,
