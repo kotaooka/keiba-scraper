@@ -764,6 +764,348 @@
       .split("{EV_MIN}").join(fmtEv(st.ev_min)).trim().split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
   }
 
+  // ========== 予想の記録と答え合わせ（PC版の record / verify と同じ形式・同じ計算） ==========
+
+  // 全角数字を半角に（Python の \d・int() は全角数字も読むので、それに合わせる）
+  const toHalf = (t) => String(t).replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+
+  // '12.5' '12.5%' '1,000円' などを数にする。読めなければ null（PC版の _num）
+  function num(text) {
+    const t = toHalf(text).replace(/[%％円,，\s]/g, "");
+    if (t === "" || !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
+    return parseFloat(t);
+  }
+
+  // 券種名をそろえる（三連複→3連複 など。PC版の normalize_bet_type）
+  function normalizeBetType(name) {
+    const t = String(name).replace(/\s/g, "").replace(/三/g, "3").replace(/３/g, "3");
+    return { "3複": "3連複", "3単": "3連単" }[t] || t;
+  }
+
+  // 券種ごとの [組み合わせの頭数, 着順の順序を区別するか]（PC版の BET_SPECS）
+  const BET_SPECS = {
+    "単勝": [1, false], "複勝": [1, false],
+    "枠連": [2, false], "馬連": [2, false], "ワイド": [2, false],
+    "枠単": [2, true], "馬単": [2, true],
+    "3連複": [3, false], "3連単": [3, true],
+  };
+
+  // 組み合わせを照合用の文字列にする（順序を区別しない券種は昇順。PC版の combo_key）
+  function comboKey(betType, numbers) {
+    let nums = numbers.map((n) => String(parseInt(toHalf(n), 10)));
+    if (!(BET_SPECS[betType] || [0, false])[1]) nums = nums.slice().sort((a, b) => +a - +b);
+    return nums.join("-");
+  }
+
+  // AI の回答から #PRED と #BET を読む。#PRED が無ければ null（PC版の parse_ai_block）
+  function parseAiBlock(text) {
+    let lines = String(text).replace(/\r/g, "").split("\n").map((l) => l.trim());
+    if (!lines.includes("#PRED")) return null;
+    // 指示文の書式例にも #PRED があるので、最後の #PRED から読む
+    lines = lines.slice(lines.lastIndexOf("#PRED"));
+    const pred = {}, bets = [];
+    let section = null;
+    for (const ln of lines) {
+      if (ln === "#PRED" || ln === "#BET") { section = ln; continue; }
+      if (!ln || ln.startsWith("```")) {
+        if (section === "#BET" && ln.startsWith("```")) break;
+        continue;
+      }
+      const cells = ln.split(/[,，\t]/).map((c) => c.trim());
+      if (section === "#PRED" && cells.length >= 3 && /^\d+$/.test(toHalf(cells[0]))) {
+        const win = num(cells[1]), place = num(cells[2]);
+        if (win !== null && place !== null) pred[String(parseInt(toHalf(cells[0]), 10))] = { "勝率": win, "複勝率": place };
+      } else if (section === "#BET" && cells.length >= 3) {
+        const betType = normalizeBetType(cells[0]);
+        const nums = toHalf(cells[1]).match(/\d+/g) || [];
+        const amount = num(cells[2]);
+        if (betType in BET_SPECS && nums.length && amount) {
+          bets.push({ "券種": betType, "組み合わせ": comboKey(betType, nums), "金額": Math.trunc(amount) });
+        }
+      }
+    }
+    if (!Object.keys(pred).length) return null;
+    return { "予想": pred, "買い目": bets };
+  }
+
+  // netkeiba の race_id（年4桁＋競馬場コード2桁＋月日4桁＋レース番号2桁）
+  function raceIdOf(date, venue, no) {
+    const code = KEIBA_CODES[venue];
+    return code ? `${date.slice(0, 4)}${code}${date.slice(4, 8)}${String(no).padStart(2, "0")}` : null;
+  }
+
+  // 収集の結果から記録を作る（PC版の new_record と同じ形。AI の回答と結果はあとで入る）
+  function newRecord(date, venue, no, res) {
+    const info = res.info || {};
+    const horses = {};
+    for (const h of info.horses || []) {
+      horses[String(parseInt(h.no, 10))] = { "馬名": h.name, "単勝": h.odds, "市場勝率": h.prob == null ? null : h.prob, "取消": !!h.cancel };
+    }
+    return {
+      race_id: raceIdOf(date, venue, no), "日付": date, "競馬場": venue, "レース番号": +no,
+      "レース名": info.race_name || "", "クラス": info.cls || "", "収集時刻": res.at || "",
+      "払戻率": info.payout_rate == null ? null : info.payout_rate, "馬": horses, "AI": null, "結果": null,
+    };
+  }
+
+  // 結果ページの着順表と払戻表が描画されたか（PC版の _RESULT_READY_JS と同じ）
+  function resultReady(doc) {
+    const hasOrder = [...doc.querySelectorAll("table")].some(
+      (t) => t.innerText.includes("着順") && t.innerText.includes("馬番") && t.querySelectorAll("td").length > 10);
+    const hasPay = /単勝[\s\S]{0,80}円/.test(doc.body.innerText);
+    return hasOrder && hasPay;
+  }
+
+  // 結果ページから着順と払戻を読む（PC版の parse_result）
+  function parseResult(doc) {
+    const order = {}, notes = [];
+    const cellTexts = (tr) => [...tr.querySelectorAll("th, td")].map((c) => raw(c).replace(/\s+/g, ""));
+    for (const table of doc.querySelectorAll("table")) {
+      const rows = [...table.querySelectorAll("tr")];
+      const head = rows.find((tr) => tr.querySelector("th"));
+      if (!head) continue;
+      const headers = cellTexts(head);
+      if (!headers.includes("着順") || !headers.includes("馬番")) continue;
+      const iRank = headers.indexOf("着順"), iNo = headers.indexOf("馬番");
+      for (const tr of rows) {
+        const tds = tr.querySelectorAll("td");
+        if (tds.length <= Math.max(iRank, iNo)) continue;
+        const no = toHalf(raw(tds[iNo])).replace(/\D/g, "");
+        const rank = raw(tds[iRank]).replace(/\s+/g, "");
+        if (no) order[String(parseInt(no, 10))] = rank;
+      }
+      if (Object.keys(order).length) break;
+    }
+    const payouts = {};
+    for (const tr of doc.querySelectorAll("tr")) {
+      const cells = tr.querySelectorAll("th, td");
+      if (cells.length < 3) continue;
+      const betType = normalizeBetType(raw(cells[0]));
+      if (!(betType in BET_SPECS)) continue;
+      const k = BET_SPECS[betType][0];
+      const nums = toHalf(rawSep(cells[1])).match(/\d+/g) || [];
+      const pays = [...toHalf(rawSep(cells[2])).matchAll(/([\d,]+)\s*円/g)].map((m) => parseInt(m[1].replace(/,/g, ""), 10));
+      if (!pays.length) continue;
+      const combos = [];
+      for (let i = 0; i < nums.length; i += k) combos.push(nums.slice(i, i + k));
+      if (combos.length !== pays.length || combos.some((c) => c.length !== k)) {
+        notes.push(`${betType}の払戻を読めませんでした（組み合わせ ${combos.length} / 払戻 ${pays.length}）`);
+        continue;
+      }
+      const table = payouts[betType] || (payouts[betType] = {});
+      combos.forEach((c, i) => { table[comboKey(betType, c)] = pays[i]; });
+    }
+    return { "着順": order, "払戻": payouts, "注記": notes };
+  }
+
+  // 確定した結果か（1頭でも着順の数字があり、単勝の払戻が読めた）
+  function resultFinished(res) {
+    return !!res && Object.values(res["着順"]).some((v) => /^\d+$/.test(v)) && "単勝" in res["払戻"];
+  }
+
+  // 買い目ごとの払戻（払戻の表に無い券種があれば null。取消馬を含む買い目は返還。PC版の settle_bets）
+  function settleBets(record) {
+    const res = record["結果"], ai = record["AI"];
+    const scratched = new Set(Object.entries(res["着順"]).filter(([, r]) => r === "取消" || r === "除外").map(([n]) => n));
+    const rows = [];
+    for (const b of ai["買い目"]) {
+      let ret, status;
+      if (b["組み合わせ"].split("-").some((n) => scratched.has(n))) { ret = b["金額"]; status = "返還"; }
+      else if (!(b["券種"] in res["払戻"])) return null;
+      else {
+        const pay = res["払戻"][b["券種"]][b["組み合わせ"]];
+        ret = pay ? Math.floor(b["金額"] / 100) * pay : 0;
+        status = pay ? "的中" : "不的中";
+      }
+      rows.push(Object.assign({}, b, { "払戻": ret, "判定": status }));
+    }
+    return rows;
+  }
+
+  // 馬ごとの [市場, AI勝率, AI複勝率, 1着か, 複勝圏か]（取消を除き合計1にそろえ直す。PC版の horse_rows）
+  function horseRows(record) {
+    const res = record["結果"], pred = record["AI"]["予想"];
+    const runners = Object.entries(res["着順"]).filter(([, r]) => r !== "取消" && r !== "除外").map(([n]) => n);
+    const rows = [];
+    for (const no of runners) {
+      const m = (record["馬"][no] || {})["市場勝率"];
+      const a = pred[no];
+      if (m == null || a == null) return [];
+      rows.push({ "馬番": no, "市場": m / 100, "AI勝率": a["勝率"] / 100, "AI複勝率": a["複勝率"] / 100, "着順": res["着順"][no] });
+    }
+    const sm = rows.reduce((t, r) => t + r["市場"], 0), sa = rows.reduce((t, r) => t + r["AI勝率"], 0);
+    const placeN = runners.length >= 8 ? 3 : 2;
+    for (const r of rows) {
+      r["市場"] /= sm; r["AI勝率"] /= sa;
+      r["1着"] = r["着順"] === "1" ? 1 : 0;
+      r["複勝圏"] = /^\d+$/.test(r["着順"]) && +r["着順"] <= placeN ? 1 : 0;
+    }
+    return rows;
+  }
+
+  // Python の random.Random(seed).randrange と同じ乱数（ブートストラップの区間を PC版とそろえるため）
+  // Python の random.Random(seed) と同じ乱数列を出す（MT19937 と randrange）
+  function PyRandom(seed) {
+    const N = 624, M = 397;
+    const mt = new Uint32Array(N); let mti = N + 1;
+    const initGenrand = (s) => {
+      mt[0] = s >>> 0;
+      for (mti = 1; mti < N; mti++) {
+        const prev = mt[mti - 1] ^ (mt[mti - 1] >>> 30);
+        mt[mti] = (Math.imul(1812433253, prev) + mti) >>> 0;
+      }
+    };
+    const initByArray = (key) => {
+      initGenrand(19650218);
+      let i = 1, j = 0;
+      for (let k = Math.max(N, key.length); k; k--) {
+        const prev = mt[i - 1] ^ (mt[i - 1] >>> 30);
+        mt[i] = ((mt[i] ^ Math.imul(prev, 1664525)) + key[j] + j) >>> 0;
+        i++; j++;
+        if (i >= N) { mt[0] = mt[N - 1]; i = 1; }
+        if (j >= key.length) j = 0;
+      }
+      for (let k = N - 1; k; k--) {
+        const prev = mt[i - 1] ^ (mt[i - 1] >>> 30);
+        mt[i] = ((mt[i] ^ Math.imul(prev, 1566083941)) - i) >>> 0;
+        i++;
+        if (i >= N) { mt[0] = mt[N - 1]; i = 1; }
+      }
+      mt[0] = 0x80000000;
+    };
+    const genrand = () => {
+      let y;
+      if (mti >= N) {
+        let kk;
+        for (kk = 0; kk < N - M; kk++) {
+          y = (mt[kk] & 0x80000000) | (mt[kk + 1] & 0x7fffffff);
+          mt[kk] = mt[kk + M] ^ (y >>> 1) ^ (y & 1 ? 0x9908b0df : 0);
+        }
+        for (; kk < N - 1; kk++) {
+          y = (mt[kk] & 0x80000000) | (mt[kk + 1] & 0x7fffffff);
+          mt[kk] = mt[kk + (M - N)] ^ (y >>> 1) ^ (y & 1 ? 0x9908b0df : 0);
+        }
+        y = (mt[N - 1] & 0x80000000) | (mt[0] & 0x7fffffff);
+        mt[N - 1] = mt[M - 1] ^ (y >>> 1) ^ (y & 1 ? 0x9908b0df : 0);
+        mti = 0;
+      }
+      y = mt[mti++];
+      y ^= y >>> 11;
+      y ^= (y << 7) & 0x9d2c5680;
+      y ^= (y << 15) & 0xefc60000;
+      y ^= y >>> 18;
+      return y >>> 0;
+    };
+    // 整数の seed は 32ビットずつに分けて init_by_array に渡す（0 は [0]）
+    let s = Math.abs(seed), key = [];
+    do { key.push(s % 0x100000000); s = Math.floor(s / 0x100000000); } while (s > 0);
+    initByArray(key);
+    const getrandbits = (k) => genrand() >>> (32 - k);
+    return {
+      randrange(n) {
+        const k = Math.floor(Math.log2(n)) + 1;  // n.bit_length()
+        let r = getrandbits(k);
+        while (r >= n) r = getrandbits(k);
+        return r;
+      },
+    };
+  }
+
+  // レース単位で復元抽出して統計量の95%区間を返す（PC版の bootstrap_ci）
+  function bootstrapCi(valuesFn, n, b = 2000, seed = 0) {
+    const rng = PyRandom(seed);
+    const stats = [];
+    for (let t = 0; t < b; t++) {
+      const idx = Array.from({ length: n }, () => rng.randrange(n));
+      const v = valuesFn(idx);
+      if (v != null) stats.push(v);
+    }
+    if (!stats.length) return [null, null];
+    stats.sort((x, y) => x - y);
+    return [stats[Math.floor(0.025 * stats.length)], stats[Math.floor(0.975 * stats.length) - 1]];
+  }
+
+  // (予測確率, 実績0/1) を区間に分け、[下限, 上限, 件数, 予測の平均%, 実績%] を返す（PC版の calibration_table）
+  function calibrationTable(pairs, edges) {
+    const out = [];
+    for (let i = 0; i < edges.length - 1; i++) {
+      const lo = edges[i], hi = edges[i + 1];
+      const sel = pairs.filter(([p]) => (lo <= p * 100 && p * 100 < hi) || (hi === 100 && p * 100 === 100));
+      if (sel.length) {
+        out.push([lo, hi, sel.length, sel.reduce((t, [p]) => t + p, 0) / sel.length * 100, sel.reduce((t, [, y]) => t + y, 0) / sel.length * 100]);
+      }
+    }
+    return out;
+  }
+
+  const sumOf = (arr) => arr.reduce((t, v) => t + v, 0);
+
+  // 記録から回収率・精度・キャリブレーションを計算する（PC版の compute_summary と同じ数値）
+  function computeSummary(records) {
+    const races = records.filter((r) => r["AI"] && r["結果"]);
+    const out = {
+      n_races: races.length,
+      n_no_ai: records.filter((r) => !r["AI"]).length,
+      n_no_result: records.filter((r) => r["AI"] && !r["結果"]).length,
+      bets: null, bet_rows: [], brier: null, calib_win: null, calib_place: null,
+    };
+    if (!races.length) return out;
+
+    const betRows = [], perRace = [];
+    let skipped = 0, unknown = 0;
+    for (const r of races) {
+      const rows = settleBets(r);
+      if (rows === null) { unknown++; continue; }
+      if (!rows.length) { skipped++; continue; }
+      for (const row of rows) betRows.push(Object.assign({ race_id: r.race_id, "日付": r["日付"], "競馬場": r["競馬場"], "レース番号": r["レース番号"] }, row));
+      perRace.push([sumOf(rows.map((x) => x["金額"])), sumOf(rows.map((x) => x["払戻"]))]);
+    }
+    const bets = { bought: perRace.length, skipped, unknown, spent: null, ret: null, ci: null, hit_races: 0, by_type: [] };
+    if (perRace.length) {
+      bets.spent = sumOf(perRace.map((x) => x[0]));
+      bets.ret = sumOf(perRace.map((x) => x[1]));
+      bets.hit_races = perRace.filter((x) => x[1] > 0).length;
+      const [lo, hi] = bootstrapCi((idx) => {
+        const s = sumOf(idx.map((i) => perRace[i][0]));
+        return s ? sumOf(idx.map((i) => perRace[i][1])) / s : null;
+      }, perRace.length);
+      bets.ci = lo !== null ? [lo, hi] : null;
+      const byType = new Map();
+      for (const x of betRows) {
+        const t = byType.get(x["券種"]) || [0, 0, 0, 0];
+        t[0] += 1; t[1] += x["判定"] === "的中" ? 1 : 0; t[2] += x["金額"]; t[3] += x["払戻"];
+        byType.set(x["券種"], t);
+      }
+      bets.by_type = [...byType.entries()].map(([k, v]) => [k, ...v]);
+    }
+    out.bets = bets;
+    out.bet_rows = betRows;
+
+    const raceRows = races.map(horseRows).filter((rows) => rows.length);
+    if (raceRows.length) {
+      const brier = (rows, key) => sumOf(rows.map((x) => (x[key] - x["1着"]) ** 2));
+      const bm = raceRows.map((rows) => brier(rows, "市場"));
+      const ba = raceRows.map((rows) => brier(rows, "AI勝率"));
+      const n = raceRows.length;
+      const diff = ba.map((a, i) => a - bm[i]);
+      const [lo, hi] = bootstrapCi((idx) => sumOf(idx.map((i) => diff[i])) / idx.length, n);
+      out.brier = { n, market: sumOf(bm) / n, ai: sumOf(ba) / n, diff: sumOf(diff) / n, ci: [lo, hi] };
+      const all = raceRows.flat();
+      const edges = [0, 5, 10, 20, 35, 100];
+      out.calib_win = {
+        edges,
+        ai: calibrationTable(all.map((x) => [x["AI勝率"], x["1着"]]), edges),
+        market: calibrationTable(all.map((x) => [x["市場"], x["1着"]]), edges),
+      };
+      const place = all.map((x) => [x["AI複勝率"], x["複勝圏"]]);
+      out.calib_place = {
+        brier: sumOf(place.map(([p, y]) => (p - y) ** 2)) / place.length,
+        rows: calibrationTable(place, [0, 10, 20, 35, 50, 70, 100]),
+      };
+    }
+    return out;
+  }
+
   // ========== 即PAT・A-PAT の発売カレンダー（keiba.go.jp/jranet/calendar/YYYYMM.html） ==========
 
   // カレンダーの競馬場名を netkeiba の名前（KEIBA_CODES のキー）にそろえる
@@ -993,6 +1335,7 @@
     buildWithInfo,
     NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, fmtEv, promptText, withSettings,
     parsePatCalendar, parsePatRange,
+    parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,
     parseShutuba, parseRaceInfo, parseKyakuType,

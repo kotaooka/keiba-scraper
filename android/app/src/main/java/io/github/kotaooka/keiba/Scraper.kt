@@ -170,6 +170,17 @@ class Scraper(
         return if (raw.startsWith("{") && !raw.contains("\"__error\"")) raw else null
     }
 
+    // ========== レース結果（答え合わせ用） ==========
+
+    /** 結果ページの着順・払戻を JSON の文字列で返す。開けなければ null（未確定でも読めた分を返す） */
+    suspend fun fetchResult(raceId: String): String? {
+        if (!load("$NETKEIBA/race/result.html?race_id=$raceId")) return null
+        // 着順表と払戻表が描画されるまで待つ（未確定のときは出ないので、待ちきれずに読めた分で判定する）
+        waitFor("KS.resultReady(document)")
+        val raw = call("KS.parseResult(document)")
+        return if (raw.startsWith("{") && !raw.contains("\"__error\"")) raw else null
+    }
+
     // ========== 1レース分の収集 ==========
 
     /** 収集の結果。成功なら json（{text, info, at}）、失敗なら error に理由 */

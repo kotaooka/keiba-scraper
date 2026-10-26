@@ -27,7 +27,8 @@ docs/                     説明書と画面例
 | — | `Reservations.kt`・`Receivers.kt`・`CollectService.kt`（通知・自動収集）、`Updater.kt`（更新） |
 
 - 解析を直すときは、`keiba_scraper.py` と `scraper.js` の両方を同じように直す。指示文（`PROMPT_TEXT`）・予想の条件の既定値（`BUDGET`・`MAX_BETS`・`EV_MIN`）・競馬場コード・アクセス間隔（`REQUEST_INTERVAL`）も両方にある
-- 即PAT・A-PAT の発売カレンダーの解析（`parsePatCalendar`）は Android版だけ、予想の記録と答え合わせ（`record`・`verify`）は PC版だけにある
+- 予想の記録と答え合わせも両方にある（PC版の `parse_ai_block`・`parse_result`・`settle_bets`・`horse_rows`・`compute_summary` ↔ `scraper.js` の `parseAiBlock`・`parseResult`・`settleBets`・`horseRows`・`computeSummary`）。95%区間のブートストラップは、`scraper.js` に Python の `random.Random` と同じ乱数（MT19937）を移植しているので、同じ記録なら同じ値になる。記録の形式も同じなので、Android版の書き出しを PC版の `import` で取り込める
+- 即PAT・A-PAT の発売カレンダーの解析（`parsePatCalendar`）は Android版だけにある
 
 ## 取れなくなったとき
 

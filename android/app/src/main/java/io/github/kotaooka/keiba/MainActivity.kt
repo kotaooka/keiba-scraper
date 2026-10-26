@@ -49,7 +49,13 @@ class MainActivity : Activity() {
     private var uiDark: Boolean? = null
     // 通知から開いたときに、画面の読み込み後に UI へ渡す内容
     private var pendingOpen: String? = null
+    // 書き出し先を選んでもらっている間の、書き出す中身
+    private var pendingExport: String? = null
     private var pageReady = false
+
+    companion object {
+        private const val REQ_EXPORT = 21
+    }
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -119,6 +125,23 @@ class MainActivity : Activity() {
         if (!pageReady) return
         pendingOpen = null
         js("App.onResume(); App.openFromNotification($p)")
+    }
+
+    @Deprecated("書き出し先の選択（保存先の画面）から戻ったとき")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_EXPORT) return
+        val text = pendingExport
+        pendingExport = null
+        val uri = data?.data
+        if (resultCode != RESULT_OK || uri == null || text == null) { js("App.onExported(false, '')"); return }
+        try {
+            contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+            js("App.onExported(true, '')")
+        } catch (e: Exception) {
+            js("App.onExported(false, ${JSONObject.quote(e.message ?: "")})")
+        }
     }
 
     override fun onDestroy() {
@@ -241,6 +264,58 @@ class MainActivity : Activity() {
 
         @JavascriptInterface
         fun cancel() = runOnUiThread { job?.cancel() }
+
+        // ---- 予想の記録と答え合わせ ----
+
+        /** クリップボードの文字（AI の回答を貼り戻すため） */
+        @JavascriptInterface
+        fun readClipboard(): String {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip ?: return ""
+            if (clip.itemCount == 0) return ""
+            return clip.getItemAt(0).coerceToText(this@MainActivity)?.toString() ?: ""
+        }
+
+        /**
+         * 結果ページを順に読む（race_id の JSON 配列）。1件ごとに App.onRaceResult、最後に App.onResultsDone。
+         * 開催一覧の読み込みや収集の最中は重ねない
+         */
+        @JavascriptInterface
+        fun fetchResults(idsJson: String) = runOnUiThread {
+            if (job?.isActive == true) { js("App.onResultsDone('busy')"); return@runOnUiThread }
+            val ids = runCatching { org.json.JSONArray(idsJson) }.getOrNull() ?: org.json.JSONArray()
+            job = scope.launch {
+                if (!CollectLock.mutex.tryLock()) { js("App.onResultsDone('busy')"); return@launch }
+                setBusy(true)
+                try {
+                    for (i in 0 until ids.length()) {
+                        val id = ids.getString(i)
+                        val res = try { scraper.fetchResult(id) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+                        js("App.onRaceResult(${JSONObject.quote(id)}, ${res ?: "null"})")
+                    }
+                    js("App.onResultsDone(null)")
+                } catch (e: CancellationException) {
+                    js("App.onResultsDone('cancel')")
+                    throw e
+                } finally {
+                    CollectLock.mutex.unlock()
+                    setBusy(false)
+                }
+            }
+        }
+
+        /** 記録を JSON のファイルに書き出す（保存先は端末の画面で選んでもらう） */
+        @JavascriptInterface
+        fun exportRecords(json: String, fileName: String) = runOnUiThread {
+            pendingExport = json
+            val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "application/json"
+                putExtra(Intent.EXTRA_TITLE, fileName)
+            }
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQ_EXPORT)
+        }
 
         @JavascriptInterface
         fun copy(text: String) = runOnUiThread { copyText(text) }

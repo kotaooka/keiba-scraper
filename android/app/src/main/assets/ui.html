@@ -299,6 +299,25 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .pat-line.none { color: var(--muted); }
 .chip.pat { border-color: var(--accent); color: var(--accent); font-weight: 700; }
 
+/* 予想の記録と答え合わせ */
+.rec-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.rec-table th { font-weight: 400; color: var(--muted); font-size: 11.5px; text-align: left; padding: 3px 4px; border-bottom: 1px solid var(--line); }
+.rec-table td { padding: 6px 4px; border-bottom: 1px solid var(--grid); }
+.rec-table td.r, .rec-table th.r { text-align: right; font-family: var(--f-num); }
+.rec-table .hit { color: var(--ok); font-weight: 700; }
+.rec-table .miss { color: var(--muted); }
+.rec-table .back { color: var(--warn); }
+.up { color: var(--ok); } .down { color: var(--ng); }
+.big-num { font-family: var(--f-num); font-size: 26px; font-weight: 500; }
+.big-num small { font-family: var(--f-ui); font-size: 13px; color: var(--ink2); margin-left: 6px; }
+.verdict { margin: 6px 0 0; font-size: 13px; padding: 8px 10px; border-radius: 10px; background: var(--bg); }
+.rec-list { display: grid; gap: 6px; }
+.rec-item { display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; text-align: left; width: 100%; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+.rec-item .t { font-weight: 700; font-size: 14px; }
+.rec-item .s { color: var(--ink2); font-size: 12.5px; grid-column: 1; }
+.rec-item .st { grid-row: 1 / span 2; grid-column: 2; align-self: center; text-align: right; font-size: 13px; font-weight: 700; font-family: var(--f-num); }
+.st.wait { color: var(--muted); font-weight: 400; font-family: var(--f-ui); }
+
 /* 予想の条件 */
 .cond-line { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; margin: 10px 0 0; padding: 9px 12px;
   border-radius: 12px; border: 1px dashed var(--line); font-size: 13px; color: var(--ink2); }
@@ -378,8 +397,9 @@ body.previewing .send-bar { bottom: 52px; }
 <div class="scrim hidden" id="scrim"></div>
 <div class="menu hidden" id="menu">
   <button id="debugToggle">取得中のサイトをプレビュー<span class="check" id="debugCheck"></span></button>
+  <button id="recordsBtn">予想の記録と答え合わせ<span class="check num" id="recBadge"></span></button>
   <button id="settingsBtn">予想の条件（予算・点数・期待値）</button>
-  <button id="clearCache">収集済みの記録を消す</button>
+  <button id="clearCache">収集済みのレースを消す</button>
   <button id="aboutBtn">このアプリについて・更新<span class="check num" id="verText"></span></button>
 </div>
 <div class="sheet-scrim hidden" id="sheetScrim"></div>
@@ -427,7 +447,8 @@ const Native = window.Android || {
   shareTarget() { return "Claude"; }, getReservations() { return "[]"; },
   setReservation(j) { return JSON.stringify({ ok: true, exact: false, notif: true }); }, removeReservation() {},
   takeBackgroundResults() { return "[]"; }, exactAlarmAllowed() { return false; }, openExactAlarmSettings() {},
-  notificationsAllowed() { return true; }, requestNotifications() {}
+  notificationsAllowed() { return true; }, requestNotifications() {},
+  readClipboard() { return ""; }, fetchResults() {}, exportRecords() {}
 };
 
 const $ = (id) => document.getElementById(id);
@@ -860,6 +881,9 @@ function renderResult() {
   hc.append(lg);
   body.append(hc);
 
+  // AI の予想（記録と答え合わせ）
+  body.append(aiCard(venue, race));
+
   // テキスト
   const pc = el("details", "card preview");
   const sendText = textFor(res);
@@ -980,6 +1004,7 @@ const App = {
     if (state.debug) { setPreview(false); return true; }
     if (state.screen === "home") return false;
     if (state.screen === "settings" && state.back === "result" && state.result) { state.back = null; showScreen("result"); renderResult(); return true; }
+    if (state.screen === "result" && state.fromRecords) { state.fromRecords = false; showRecords(); return true; }
     if (state.screen === "collect" && state.job) { Native.cancel(); }
     goHome(); return true;
   },
@@ -989,9 +1014,12 @@ const App = {
   onUpdateInfo(latest, error) { onUpdateInfo(latest, error); },
   openFromNotification(p) { openFromNotification(p); },
   onPatCalendar(month, data) { onPatCalendar(month, data); },
+  onRaceResult(raceId, res) { onRaceResult(raceId, res); },
+  onResultsDone(err) { onResultsDone(err); },
+  onExported(ok, err) { toast(ok ? "書き出しました" : err ? `書き出せませんでした（${err}）` : "書き出しを取りやめました"); },
   // アプリに戻ってきたとき：自動収集の結果・予約・送り先を読み直す
   onResume() {
-    mergeBackgroundResults(); loadReservations();
+    mergeBackgroundResults(); loadReservations(); updateRecBadge();
     if (state.screen === "home" && !state.loading) renderRaces();
     if (state.screen === "result" && state.result) renderResult();
   },
@@ -1131,6 +1159,256 @@ function renderAbout() {
   }
   ic.append(dl);
   body.append(ic);
+}
+
+// ===== 予想の記録と答え合わせ =====
+// 形式は PC版の output/records/<race_id>.json と同じ（書き出して PC版の verify にもかけられる）。キーは cacheKey
+const REC_KEY = "keiba-records", AI_TEXT_KEY = "keiba-ai-texts";
+const readRecords = () => store.get(REC_KEY, {});
+function writeRecords(recs) {
+  // 新しい順に 500件まで残す
+  const keys = Object.keys(recs).sort((a, b) => (recs[b]["収集時刻"] || "").localeCompare(recs[a]["収集時刻"] || "")).slice(0, 500);
+  const out = {}; for (const k of keys) out[k] = recs[k];
+  store.set(REC_KEY, out);
+}
+function saveAiText(key, text) {
+  // AI の回答の全文は大きいので、新しい30件だけ残す
+  const t = store.get(AI_TEXT_KEY, {}); t[key] = { at: Date.now(), text };
+  const keys = Object.keys(t).sort((a, b) => t[b].at - t[a].at).slice(0, 30);
+  store.set(AI_TEXT_KEY, Object.fromEntries(keys.map((k) => [k, t[k]])));
+}
+// 発走から何分たったか（記録の日付と発走時刻から）
+function sinceStart(rec) { const u = untilMin(rec["日付"], rec["発走"]); return u == null ? null : -u; }
+// 結果を取りに行ってよい記録（AI の回答があり、結果がまだで、発走から15分たった）
+function pendingResults() {
+  return Object.entries(readRecords()).filter(([, r]) => r["AI"] && !r["結果"] && r.race_id && (sinceStart(r) ?? 0) >= 15);
+}
+
+// 結果画面の「AI の回答を貼り付けて記録」
+function pasteAiAnswer() {
+  const { venue, race, res } = state.result;
+  let text = "";
+  try { text = Native.readClipboard() || ""; } catch (e) {}
+  if (!text.trim()) { toast("クリップボードが空です。AI の回答をコピーしてから押してください"); return; }
+  if (text.trim() === textFor(res).trim()) { toast("クリップボードは送ったテキストのままです。AI の回答をコピーしてください"); return; }
+  const parsed = KS.parseAiBlock(text);
+  if (!parsed) { toast("記録用ブロック（#PRED）が見つかりません。回答の全文をコピーしてください"); return; }
+  const key = cacheKey(state.date, venue, race.no);
+  const recs = readRecords();
+  const rec = Object.assign(KS.newRecord(state.date, venue, race.no, res), { "発走": res.info.start || race.time || "", "EV_MIN": betSettings().ev_min });
+  rec["AI"] = Object.assign(parsed, { "記録時刻": new Date().toISOString().slice(0, 19).replace("T", " ") });
+  recs[key] = rec;
+  writeRecords(recs); saveAiText(key, text);
+  const total = parsed["予想"] ? Object.values(parsed["予想"]).reduce((t, v) => t + v["勝率"], 0) : 100;
+  toast(Math.abs(total - 100) > 5 ? `記録しました（推定勝率の合計が ${total.toFixed(1)}% です）` : "記録しました");
+  renderResult(); updateRecBadge();
+}
+
+// 結果を取りに行く（race_id の配列）。1件ずつ App.onRaceResult で返ってくる
+function fetchResults(keys) {
+  const recs = readRecords();
+  const ids = keys.map((k) => recs[k] && recs[k].race_id).filter(Boolean);
+  if (!ids.length) return;
+  state.fetching = { total: ids.length, done: 0, got: 0 };
+  toast(`結果を取得しています（${ids.length}件）`);
+  if (state.screen === "records") renderRecords();
+  Native.fetchResults(JSON.stringify(ids));
+}
+function onRaceResult(raceId, res) {
+  if (state.fetching) state.fetching.done++;
+  const recs = readRecords();
+  const key = Object.keys(recs).find((k) => recs[k].race_id === raceId);
+  if (key && res && KS.resultFinished(res)) {
+    recs[key]["結果"] = Object.assign(res, { "取得時刻": new Date().toISOString().slice(0, 19).replace("T", " ") });
+    writeRecords(recs);
+    if (state.fetching) state.fetching.got++;
+  }
+  if (state.screen === "records") renderRecords();
+}
+function onResultsDone(err) {
+  const f = state.fetching; state.fetching = null;
+  if (err === "busy") toast("ほかの読み込み中です。終わってからもう一度押してください");
+  else if (f) toast(f.got === f.total ? `結果を取得しました（${f.got}件）` : `結果を取得しました（${f.got}件。未確定 ${f.total - f.got}件はあとでもう一度）`);
+  updateRecBadge();
+  if (state.screen === "records") renderRecords();
+  if (state.screen === "result" && state.result) renderResult();
+}
+function updateRecBadge() { const n = pendingResults().length; $("recBadge").textContent = n ? `結果待ち ${n}` : ""; }
+
+// 結果画面の「AI の予想」欄
+function aiCard(venue, race) {
+  const key = cacheKey(state.date, venue, race.no);
+  const rec = readRecords()[key];
+  const c = el("div", "card");
+  const h = el("h3", null, "AI の予想");
+  c.append(h);
+  if (!rec || !rec["AI"]) {
+    c.append(el("p", "note", "AI の回答（全文）をコピーしてから押すと、最後の記録用ブロック（#PRED・#BET）を読んで記録します。結果が出たら答え合わせできます"));
+    const b = el("button", "btn secondary preview-btn", "AI の回答を貼り付けて記録"); b.onclick = pasteAiAnswer; c.append(b);
+    return c;
+  }
+  h.append(el("span", "aside", `記録 ${rec["AI"]["記録時刻"].slice(5, 16)}`));
+  const bets = rec["AI"]["買い目"];
+  const settled = rec["結果"] ? KS.settleBets(rec) : null;
+  if (!bets.length) c.append(el("p", null, "見送り（期待値が下限以上の買い目なし）"));
+  else {
+    const tb = el("table", "rec-table");
+    const hr = el("tr"); for (const [t, cls] of [["券種"], ["組み合わせ"], ["金額", "r"], ["結果", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+    bets.forEach((b, i) => {
+      const s = settled && settled[i];
+      const tr = el("tr");
+      tr.append(el("td", null, b["券種"]), el("td", "num", b["組み合わせ"]), el("td", "r", yen(b["金額"])));
+      tr.append(el("td", "r " + (s ? (s["判定"] === "的中" ? "hit" : s["判定"] === "返還" ? "back" : "miss") : "miss"),
+        s ? (s["判定"] === "的中" ? `的中 ${yen(s["払戻"])}` : s["判定"] === "返還" ? `返還 ${yen(s["払戻"])}` : "不的中") : rec["結果"] ? "払戻不明" : "—"));
+      tb.append(tr);
+    });
+    c.append(tb);
+    if (settled) {
+      const spent = settled.reduce((t, x) => t + x["金額"], 0), ret = settled.reduce((t, x) => t + x["払戻"], 0);
+      const p = el("p", "verdict"); p.append(document.createTextNode("収支 "), el("b", ret - spent >= 0 ? "up" : "down", `${ret - spent >= 0 ? "+" : ""}${yen(ret - spent)}`), document.createTextNode(`（購入 ${yen(spent)} → 払戻 ${yen(ret)}）`));
+      c.append(p);
+    }
+  }
+  if (rec["結果"]) {
+    const top = Object.entries(rec["結果"]["着順"]).filter(([, r]) => /^[123]$/.test(r)).sort((a, b) => +a[1] - +b[1]).map(([n, r]) => `${r}着 ${n}番`).join("・");
+    c.append(el("p", "note", `結果：${top}`));
+  } else {
+    const ss = sinceStart(rec);
+    if (ss != null && ss >= 15 && rec.race_id) {
+      const b = el("button", "btn secondary preview-btn", "結果を取得して答え合わせ"); b.onclick = () => fetchResults([key]); c.append(b);
+    } else c.append(el("p", "note", "確定から約10分後（発走の15分後以降）に、結果を取得して答え合わせできます"));
+  }
+  // 市場と AI の比較（AI の推定勝率の高い順）
+  const horses = (state.result.res.info.horses || []).filter((x) => !x.cancel);
+  const rows = horses.map((x) => ({ x, ai: rec["AI"]["予想"][String(parseInt(x.no, 10))] })).filter((r) => r.ai)
+    .sort((a, b) => b.ai["勝率"] - a.ai["勝率"]).slice(0, 6);
+  if (rows.length) {
+    const tb = el("table", "rec-table"); tb.style.marginTop = "10px";
+    const hr = el("tr"); for (const [t, cls] of [["馬"], ["市場", "r"], ["AI", "r"], ["差", "r"], ["AI複勝", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+    for (const { x, ai } of rows) {
+      const d = ai["勝率"] - (x.prob || 0);
+      const tr = el("tr");
+      const res = rec["結果"] && rec["結果"]["着順"][String(parseInt(x.no, 10))];
+      tr.append(el("td", null, `${x.no} ${x.name}${res && /^\d+$/.test(res) ? `（${res}着）` : ""}`), el("td", "r", x.prob != null ? `${x.prob.toFixed(1)}%` : "--"),
+        el("td", "r", `${ai["勝率"].toFixed(1)}%`), el("td", "r " + (d >= 0 ? "up" : "down"), `${d >= 0 ? "+" : ""}${d.toFixed(1)}`), el("td", "r", `${ai["複勝率"].toFixed(0)}%`));
+      tb.append(tr);
+    }
+    c.append(tb);
+    c.append(el("p", "note", "AI の推定勝率の高い順に6頭。差は AI − 市場（ポイント）"));
+  }
+  const row = el("div", "btn-row"); row.style.marginTop = "10px";
+  const again = el("button", "btn quiet", "貼り直す"); again.onclick = pasteAiAnswer;
+  const del = el("button", "btn quiet", "記録を消す");
+  del.onclick = () => { if (del.dataset.armed) { const r = readRecords(); delete r[key]; writeRecords(r); renderResult(); updateRecBadge(); toast("記録を消しました"); } else { del.dataset.armed = "1"; del.textContent = "もう一度押すと消します"; } };
+  row.append(again, del); c.append(row);
+  return c;
+}
+
+// ===== 記録と答え合わせの画面 =====
+function showRecords() { closeMenu(); state.back = null; showScreen("records"); renderRecords(); }
+function renderRecords() {
+  const body = $("detailBody"); body.replaceChildren();
+  body.append(el("h2", "race-title", "予想の記録と答え合わせ"));
+  const recs = readRecords();
+  const all = Object.values(recs);
+  body.append(el("p", "race-sub", `記録 ${all.length}件・結果まで ${all.filter((r) => r["AI"] && r["結果"]).length}件`));
+
+  const pend = pendingResults();
+  if (state.fetching) {
+    const c = el("div", "card"); c.append(el("h3", null, `結果を取得中… ${state.fetching.done} / ${state.fetching.total}`));
+    const bar = el("div", "bar"); const f = el("i"); f.style.width = `${state.fetching.done / state.fetching.total * 100}%`; bar.append(f); c.append(bar);
+    body.append(c);
+  } else if (pend.length) {
+    const b = el("button", "update-bar");
+    b.append(el("span", null, "結果待ち "), el("b", "num", `${pend.length}件`), el("span", "go", "結果を取得 ›"));
+    b.onclick = () => fetchResults(pend.map(([k]) => k));
+    body.append(b);
+    body.append(el("p", "note", "結果ページを1レースにつき1回、2秒おきに読みます"));
+  }
+
+  const sm = KS.computeSummary(all);
+  // 回収率
+  const c1 = el("div", "card");
+  c1.append(el("h3", null, "回収率"));
+  const b = sm.bets;
+  if (!b || !b.bought) c1.append(el("p", "note", sm.n_races ? `買ったレースがまだありません（見送り ${b ? b.skipped : 0}件）` : "結果まで記録したレースがまだありません"));
+  else {
+    const roi = b.ret / b.spent * 100;
+    const big = el("div", "big-num " + (roi >= 100 ? "up" : "down"), `${roi.toFixed(1)}%`);
+    if (b.ci) big.append(el("small", null, `95%区間 ${(b.ci[0] * 100).toFixed(0)}〜${(b.ci[1] * 100).toFixed(0)}%`));
+    c1.append(big);
+    c1.append(el("p", "note", `購入 ${yen(b.spent)} → 払戻 ${yen(b.ret)}（収支 ${b.ret - b.spent >= 0 ? "+" : ""}${yen(b.ret - b.spent)}）・的中したレース ${b.hit_races}/${b.bought}・見送り ${b.skipped}件${b.unknown ? `・払戻を読めず除外 ${b.unknown}件` : ""}`));
+    const tb = el("table", "rec-table");
+    const hr = el("tr"); for (const [t, cls] of [["券種"], ["点数", "r"], ["的中", "r"], ["購入", "r"], ["払戻", "r"], ["回収率", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+    for (const [k, n, hit, a, r] of b.by_type) {
+      const tr = el("tr"); tr.append(el("td", null, k), el("td", "r", n), el("td", "r", hit), el("td", "r", a.toLocaleString("ja-JP")), el("td", "r", r.toLocaleString("ja-JP")), el("td", "r " + (r >= a ? "up" : "down"), `${(r / a * 100).toFixed(0)}%`));
+      tb.append(tr);
+    }
+    c1.append(tb);
+  }
+  body.append(c1);
+
+  // AI と市場の精度
+  const c2 = el("div", "card");
+  c2.append(el("h3", null, "推定勝率の精度（ブライアスコア、小さいほど良い）"));
+  if (!sm.brier) c2.append(el("p", "note", "市場勝率と AI の推定がそろったレースがまだありません"));
+  else {
+    const br = sm.brier;
+    c2.append(el("p", null, `市場 ${br.market.toFixed(4)} ／ AI ${br.ai.toFixed(4)}（${br.n}レース）`));
+    c2.append(el("p", "note", `AI − 市場 = ${br.diff >= 0 ? "+" : ""}${br.diff.toFixed(4)}（95%区間 ${br.ci[0] >= 0 ? "+" : ""}${br.ci[0].toFixed(4)}〜${br.ci[1] >= 0 ? "+" : ""}${br.ci[1].toFixed(4)}）`));
+    c2.append(el("p", "verdict", br.ci[1] < 0 ? "✓ AI の推定勝率は、市場（単勝オッズ）より当たっています" : br.ci[0] > 0 ? "! AI の推定勝率は、市場（単勝オッズ）より外れています" : "AI と市場の差は、このレース数では区別できません"));
+    const tb = el("table", "rec-table"); tb.style.marginTop = "10px";
+    const hr = el("tr"); for (const [t, cls] of [["推定勝率"], ["件数", "r"], ["AI推定", "r"], ["実際", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+    for (const [lo, hi, cnt, mp, act] of sm.calib_win.ai) {
+      const tr = el("tr"); tr.append(el("td", null, `${lo}〜${hi}%`), el("td", "r", cnt), el("td", "r", `${mp.toFixed(1)}%`), el("td", "r", `${act.toFixed(1)}%`)); tb.append(tr);
+    }
+    c2.append(tb);
+    c2.append(el("p", "note", `推定○%の馬が実際に何%勝ったか。推定複勝率のブライアスコア ${sm.calib_place.brier.toFixed(4)}`));
+  }
+  if (sm.n_races && sm.n_races < 30) c2.append(el("p", "note", `※レース数が ${sm.n_races}件と少ないため、区間が広く結論は出せません。50レース以上たまってから判断してください`));
+  body.append(c2);
+
+  // 一覧（新しい順）
+  const list = el("div", "rec-list"); list.style.marginTop = "12px";
+  const cache = readCache();
+  const entries = Object.entries(recs).sort((a, b) => (b[1]["収集時刻"] || "").localeCompare(a[1]["収集時刻"] || ""));
+  for (const [key, r] of entries.slice(0, 100)) {
+    const it = el("button", "rec-item");
+    it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
+    const bets = r["AI"] ? r["AI"]["買い目"] : [];
+    it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : bets.length ? bets.map((x) => `${x["券種"]} ${x["組み合わせ"]} ${x["金額"]}円`).join("・") : "見送り"));
+    let st;
+    if (!r["AI"]) st = el("span", "st wait", "—");
+    else if (!r["結果"]) st = el("span", "st wait", "結果待ち");
+    else {
+      const rows = KS.settleBets(r);
+      if (!rows) st = el("span", "st wait", "払戻不明");
+      else if (!rows.length) st = el("span", "st wait", "見送り");
+      else { const d = rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); st = el("span", "st " + (d >= 0 ? "up" : "down"), `${d >= 0 ? "+" : ""}${d.toLocaleString("ja-JP")}`); }
+    }
+    it.append(st);
+    it.onclick = () => {
+      const c = cache[key];
+      if (!c) { toast("このレースの収集データは残っていません（記録だけ残っています）"); return; }
+      state.date = r["日付"]; renderDate();
+      showResult(r["競馬場"], { no: r["レース番号"], title: r["レース名"], time: r["発走"] }, c);
+      state.fromRecords = true; $("backBtn").textContent = "‹ 記録に戻る";
+    };
+    list.append(it);
+  }
+  if (!entries.length) list.append(el("p", "note", "結果画面の「AI の回答を貼り付けて記録」で記録すると、ここに並びます"));
+  body.append(list);
+
+  // 書き出し
+  const act = el("div", "end-actions");
+  const ex = el("button", "btn secondary", "書き出す（PC版の verify にかける）");
+  ex.onclick = () => {
+    const d = new Date(); const z = (n) => String(n).padStart(2, "0");
+    Native.exportRecords(JSON.stringify(Object.values(readRecords()), null, 1), `keiba-records-${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}.json`);
+  };
+  act.append(ex);
+  act.append(el("p", "note", "書き出したファイルを PC へ移し、run.bat import <ファイル> で取り込むと verify.bat で集計できます"));
+  body.append(act);
 }
 
 // ===== 予想の条件（予算・点数・期待値の下限） =====
@@ -1334,7 +1612,7 @@ function mergeBackgroundResults() {
   writeCache(c);
 }
 
-function goHome() { state.job = null; state.result = null; showScreen("home"); renderRaces(); }
+function goHome() { state.job = null; state.result = null; state.fromRecords = false; showScreen("home"); renderRaces(); }
 
 function toast(msg) {
   const t = $("toast"); t.textContent = msg; t.classList.add("show");
@@ -1362,12 +1640,13 @@ $("debugToggle").onclick = () => { togglePreview(); closeMenu(); };
 $("previewClose").onclick = () => setPreview(false);
 $("aboutBtn").onclick = showAbout;
 $("settingsBtn").onclick = () => { state.back = null; showSettings(); };
+$("recordsBtn").onclick = showRecords;
 $("updateBar").onclick = showAbout;
 $("themeBtn").onclick = () => {
   const next = THEMES[(THEMES.indexOf(themePref) + 1) % THEMES.length];
   setThemePref(next); toast(`表示：${THEME_LABEL[next]}`);
 };
-$("clearCache").onclick = () => { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} closeMenu(); renderRaces(); toast("記録を消しました"); };
+$("clearCache").onclick = () => { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} closeMenu(); renderRaces(); toast("収集済みのレースを消しました（予想の記録は残ります）"); };
 
 // ===== 日付の操作 =====
 $("prevDay").onclick = () => shiftDate(-1);
@@ -1413,6 +1692,7 @@ applyTheme();
 mergeBackgroundResults();
 loadReservations();
 renderUpdateUi();
+updateRecBadge();
 if (window.Android) {
   loadRaceList();
   // 起動時の更新確認は6時間に1回まで（お知らせ帯に出すだけで、勝手には更新しない）

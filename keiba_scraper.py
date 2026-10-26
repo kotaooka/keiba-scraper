@@ -1542,15 +1542,17 @@ def calibration_table(pairs, edges):
     return out
 
 
-def summarize(records):
-    """記録済みのレースから回収率・キャリブレーションを集計してテキストを返す"""
-    lines = ["=" * 60, "  検証結果", "=" * 60]
+def compute_summary(records):
+    """記録済みのレースから回収率・精度・キャリブレーションを計算する（数値だけ。Android版の computeSummary と同じ）"""
     races = [r for r in records if r.get("AI") and r.get("結果")]
-    lines.append(f"対象: 結果まで記録済みのレース {len(races)}件"
-                 f"（AI 回答なし {sum(1 for r in records if not r.get('AI'))}件・"
-                 f"結果未取得 {sum(1 for r in records if r.get('AI') and not r.get('結果'))}件は除外）")
+    out = {
+        "n_races": len(races),
+        "n_no_ai": sum(1 for r in records if not r.get("AI")),
+        "n_no_result": sum(1 for r in records if r.get("AI") and not r.get("結果")),
+        "bets": None, "bet_rows": [], "brier": None, "calib_win": None, "calib_place": None,
+    }
     if not races:
-        return "\n".join(lines)
+        return out
 
     # ---- 回収率 ----
     bet_rows, per_race, skipped, unknown = [], [], 0, 0
@@ -1566,19 +1568,16 @@ def summarize(records):
             bet_rows.append({"race_id": r["race_id"], "日付": r["日付"], "競馬場": r["競馬場"],
                              "レース番号": r["レース番号"], **row})
         per_race.append((sum(x["金額"] for x in rows), sum(x["払戻"] for x in rows)))
-    lines += ["", "【回収率】",
-              f"  買ったレース {len(per_race)}件 / 見送り {skipped}件"
-              + (f" / 払戻を読めず除外 {unknown}件" if unknown else "")]
+    bets = {"bought": len(per_race), "skipped": skipped, "unknown": unknown,
+            "spent": None, "ret": None, "ci": None, "hit_races": 0, "by_type": []}
     if per_race:
-        spent = sum(a for a, _ in per_race)
-        ret = sum(b for _, b in per_race)
-        hit_races = sum(1 for a, b in per_race if b > 0)
+        bets["spent"] = sum(a for a, _ in per_race)
+        bets["ret"] = sum(b for _, b in per_race)
+        bets["hit_races"] = sum(1 for a, b in per_race if b > 0)
         lo, hi = bootstrap_ci(
             lambda idx: (sum(per_race[i][1] for i in idx) / s if (s := sum(per_race[i][0] for i in idx)) else None),
             len(per_race))
-        lines.append(f"  購入 {spent:,}円 → 払戻 {ret:,}円　回収率 {ret / spent * 100:.1f}%"
-                     + (f"（95%区間 {lo * 100:.0f}〜{hi * 100:.0f}%）" if lo is not None else ""))
-        lines.append(f"  的中したレース {hit_races}/{len(per_race)}件")
+        bets["ci"] = [lo, hi] if lo is not None else None
         by_type = {}
         for x in bet_rows:
             t = by_type.setdefault(x["券種"], [0, 0, 0, 0])
@@ -1586,12 +1585,12 @@ def summarize(records):
             t[1] += x["判定"] == "的中"
             t[2] += x["金額"]
             t[3] += x["払戻"]
-        for k, (n, hit, a, b) in by_type.items():
-            lines.append(f"  {pad(k, 6)} {n:3d}点 的中{hit:3d}点　購入 {a:,}円 → {b:,}円（{b / a * 100:.0f}%）")
+        bets["by_type"] = [[k, *v] for k, v in by_type.items()]
+    out["bets"] = bets
+    out["bet_rows"] = bet_rows
 
     # ---- 推定確率の精度 ----
     race_rows = [rows for r in races if (rows := horse_rows(r))]
-    lines += ["", "【推定勝率の精度（ブライアスコア、小さいほど良い）】"]
     if race_rows:
         def brier(rows, key):
             return sum((x[key] - x["1着"]) ** 2 for x in rows)
@@ -1600,8 +1599,49 @@ def summarize(records):
         n = len(race_rows)
         diff = [a - m for a, m in zip(ba, bm)]
         lo, hi = bootstrap_ci(lambda idx: sum(diff[i] for i in idx) / len(idx), n)
-        lines.append(f"  対象 {n}レース　市場 {sum(bm) / n:.4f} / AI {sum(ba) / n:.4f}")
-        lines.append(f"  AI − 市場 = {sum(diff) / n:+.4f}（95%区間 {lo:+.4f}〜{hi:+.4f}）")
+        out["brier"] = {"n": n, "market": sum(bm) / n, "ai": sum(ba) / n, "diff": sum(diff) / n, "ci": [lo, hi]}
+
+        all_rows = [x for rows in race_rows for x in rows]
+        edges = [0, 5, 10, 20, 35, 100]
+        out["calib_win"] = {
+            "edges": edges,
+            "ai": [list(x) for x in calibration_table([(x["AI勝率"], x["1着"]) for x in all_rows], edges)],
+            "market": [list(x) for x in calibration_table([(x["市場"], x["1着"]) for x in all_rows], edges)],
+        }
+        place_pairs = [(x["AI複勝率"], x["複勝圏"]) for x in all_rows]
+        out["calib_place"] = {
+            "brier": sum((p - y) ** 2 for p, y in place_pairs) / len(place_pairs),
+            "rows": [list(x) for x in calibration_table(place_pairs, [0, 10, 20, 35, 50, 70, 100])],
+        }
+    return out
+
+
+def format_summary(sm):
+    """compute_summary の結果を文章にする"""
+    lines = ["=" * 60, "  検証結果", "=" * 60]
+    lines.append(f"対象: 結果まで記録済みのレース {sm['n_races']}件"
+                 f"（AI 回答なし {sm['n_no_ai']}件・結果未取得 {sm['n_no_result']}件は除外）")
+    if not sm["n_races"]:
+        return "\n".join(lines)
+
+    b = sm["bets"]
+    lines += ["", "【回収率】",
+              f"  買ったレース {b['bought']}件 / 見送り {b['skipped']}件"
+              + (f" / 払戻を読めず除外 {b['unknown']}件" if b["unknown"] else "")]
+    if b["bought"]:
+        lo, hi = b["ci"] or (None, None)
+        lines.append(f"  購入 {b['spent']:,}円 → 払戻 {b['ret']:,}円　回収率 {b['ret'] / b['spent'] * 100:.1f}%"
+                     + (f"（95%区間 {lo * 100:.0f}〜{hi * 100:.0f}%）" if lo is not None else ""))
+        lines.append(f"  的中したレース {b['hit_races']}/{b['bought']}件")
+        for k, n, hit, a, r in b["by_type"]:
+            lines.append(f"  {pad(k, 6)} {n:3d}点 的中{hit:3d}点　購入 {a:,}円 → {r:,}円（{r / a * 100:.0f}%）")
+
+    lines += ["", "【推定勝率の精度（ブライアスコア、小さいほど良い）】"]
+    br = sm["brier"]
+    if br:
+        lo, hi = br["ci"]
+        lines.append(f"  対象 {br['n']}レース　市場 {br['market']:.4f} / AI {br['ai']:.4f}")
+        lines.append(f"  AI − 市場 = {br['diff']:+.4f}（95%区間 {lo:+.4f}〜{hi:+.4f}）")
         if hi < 0:
             lines.append("  → AI の推定勝率は市場（単勝オッズ）より当たっている")
         elif lo > 0:
@@ -1609,12 +1649,12 @@ def summarize(records):
         else:
             lines.append("  → AI と市場の差は、このレース数では区別できない")
 
-        all_rows = [x for rows in race_rows for x in rows]
-        edges = [0, 5, 10, 20, 35, 100]
+        cw = sm["calib_win"]
+        edges = cw["edges"]
         lines += ["", "【キャリブレーション：推定勝率】（推定○%の馬が実際に何%勝ったか）",
                   "  区間        件数  AI推定  実際    |  件数  市場推定  実際"]
-        ai_tab = {(lo, hi): v for lo, hi, *v in calibration_table([(x["AI勝率"], x["1着"]) for x in all_rows], edges)}
-        mk_tab = {(lo, hi): v for lo, hi, *v in calibration_table([(x["市場"], x["1着"]) for x in all_rows], edges)}
+        ai_tab = {(lo_, hi_): v for lo_, hi_, *v in cw["ai"]}
+        mk_tab = {(lo_, hi_): v for lo_, hi_, *v in cw["market"]}
         for lo_, hi_ in zip(edges[:-1], edges[1:]):
             a = ai_tab.get((lo_, hi_))
             m = mk_tab.get((lo_, hi_))
@@ -1622,14 +1662,25 @@ def summarize(records):
             fm = f"{m[0]:5d}  {m[1]:6.1f}%  {m[2]:5.1f}%" if m else ""
             lines.append(f"  {lo_:3d}〜{hi_:3d}%  {fa}  |  {fm}")
 
-        place_pairs = [(x["AI複勝率"], x["複勝圏"]) for x in all_rows]
-        bp = sum((p - y) ** 2 for p, y in place_pairs) / len(place_pairs)
-        lines += ["", f"【キャリブレーション：推定複勝率】（ブライアスコア {bp:.4f}）",
+        cp = sm["calib_place"]
+        lines += ["", f"【キャリブレーション：推定複勝率】（ブライアスコア {cp['brier']:.4f}）",
                   "  区間        件数  AI推定  実際"]
-        for lo_, hi_, cnt, mp, act in calibration_table(place_pairs, [0, 10, 20, 35, 50, 70, 100]):
+        for lo_, hi_, cnt, mp, act in cp["rows"]:
             lines.append(f"  {lo_:3d}〜{hi_:3d}%  {cnt:5d}  {mp:5.1f}% {act:5.1f}%")
+    else:
+        lines.append("  市場勝率と AI 推定がそろったレースがありません。")
 
-        # Excel で見る用の明細
+    if sm["n_races"] < 30:
+        lines += ["", f"※レース数が {sm['n_races']}件と少ないため、区間が広く結論は出せません。"
+                      "目安として50レース以上たまってから判断してください。"]
+    return "\n".join(lines)
+
+
+def summarize(records):
+    """記録済みのレースから集計してテキストを返し、Excel で見る用の明細（CSV）を書く"""
+    sm = compute_summary(records)
+    races = [r for r in records if r.get("AI") and r.get("結果")]
+    if sm["brier"]:
         OUTPUT_DIR.mkdir(exist_ok=True)
         with open(OUTPUT_DIR / "verify_horses.csv", "w", encoding="utf-8-sig", newline="") as f:
             f.write("race_id,日付,競馬場,R,馬番,市場勝率,AI勝率,AI複勝率,着順\n")
@@ -1637,20 +1688,46 @@ def summarize(records):
                 for x in rows:
                     f.write(f"{r['race_id']},{r['日付']},{r['競馬場']},{r['レース番号']},{x['馬番']},"
                             f"{x['市場'] * 100:.2f},{x['AI勝率'] * 100:.2f},{x['AI複勝率'] * 100:.2f},{x['着順']}\n")
-    else:
-        lines.append("  市場勝率と AI 推定がそろったレースがありません。")
-
-    if bet_rows:
+    if sm["bet_rows"]:
+        OUTPUT_DIR.mkdir(exist_ok=True)
         with open(OUTPUT_DIR / "verify_bets.csv", "w", encoding="utf-8-sig", newline="") as f:
             f.write("race_id,日付,競馬場,R,券種,組み合わせ,金額,払戻,判定\n")
-            for x in bet_rows:
+            for x in sm["bet_rows"]:
                 f.write(f"{x['race_id']},{x['日付']},{x['競馬場']},{x['レース番号']},{x['券種']},"
                         f"{x['組み合わせ']},{x['金額']},{x['払戻']},{x['判定']}\n")
+    return format_summary(sm)
 
-    if len(races) < 30:
-        lines += ["", f"※レース数が {len(races)}件と少ないため、区間が広く結論は出せません。"
-                      "目安として50レース以上たまってから判断してください。"]
-    return "\n".join(lines)
+
+def run_import(path):
+    """Android版で書き出した記録（JSON の配列）を output/records/ に取り込む。
+    同じ race_id の記録が既にあれば、AI の回答・結果のうち手元に無いほうだけを足す"""
+    try:
+        items = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print(f"読めませんでした: {path}（{e}）")
+        return
+    if isinstance(items, dict):
+        items = items.get("records", [])
+    added = merged = 0
+    for r in items:
+        if not isinstance(r, dict) or not r.get("race_id"):
+            continue
+        p = record_path(r["race_id"])
+        if p.exists():
+            cur = json.loads(p.read_text(encoding="utf-8"))
+            changed = False
+            for k in ("AI", "結果"):
+                if not cur.get(k) and r.get(k):
+                    cur[k] = r[k]
+                    changed = True
+            if changed:
+                save_record(cur)
+                merged += 1
+        else:
+            save_record(r)
+            added += 1
+    print(f"取り込みました: 新しい記録 {added}件・足した記録 {merged}件（{RECORD_DIR}）")
+    print("続けて verify.bat で集計できます。")
 
 
 def run_verify():
@@ -1721,6 +1798,12 @@ def main():
         return
     if cmd in ("record", "記録"):
         run_record()
+        return
+    if cmd in ("import", "取り込み"):
+        if len(sys.argv) < 3:
+            print("使い方: run.bat import <Android版で書き出したファイル.json>")
+            return
+        run_import(sys.argv[2])
         return
 
     direct = parse_args(sys.argv[1:])
