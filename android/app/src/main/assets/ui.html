@@ -329,6 +329,8 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .note-card ul { margin: 0; padding-left: 1.2em; }
 .day-pnl { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; margin: 0 2px 10px; font-size: 13px; color: var(--ink2); }
 .day-pnl b { font-family: var(--f-num); font-size: 15px; }
+.rec-item .st.multi { text-align: right; font-size: 12px; line-height: 1.5; }
+.rec-item .st.multi .up { color: var(--ok); } .rec-item .st.multi .down { color: var(--ng); } .rec-item .st.multi .wait { color: var(--muted); }
 .day-pnl .go { margin-left: auto; color: var(--accent); font-weight: 700; }
 textarea.prompt-edit { width: 100%; min-height: 50vh; font-family: var(--f-num); font-size: 12px; line-height: 1.5; color: var(--ink); background: var(--bg);
   border: 1px solid var(--line); border-radius: 10px; padding: 10px; resize: vertical; }
@@ -379,6 +381,7 @@ button.pref-row:active { background: var(--grid); }
 .pref-row.danger b { color: var(--ng); }
 .seg3 { display: flex; background: var(--grid); border-radius: 10px; padding: 3px; gap: 3px; }
 .seg3 button { padding: 7px 10px; border-radius: 8px; font-size: 13px; color: var(--ink2); }
+.seg3.wide { display: flex; } .seg3.wide button { flex: 1; }
 .seg3 button.on { background: var(--surface); color: var(--ink); font-weight: 700; box-shadow: var(--shadow); }
 .switch { width: 46px; height: 28px; border-radius: 14px; background: var(--line); position: relative; flex: none; }
 .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px; border-radius: 50%; background: var(--surface); transition: left .15s; box-shadow: var(--shadow); }
@@ -388,6 +391,9 @@ button.pref-row:active { background: var(--grid); }
 .ai-cond { font-size: 13px; color: var(--ink2); margin: 2px 0 8px; }
 .ai-skip { font-weight: 700; margin: 6px 0; }
 .bet-list { display: grid; gap: 8px; }
+.bet-section + .bet-section { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); }
+.bet-head { margin: 0 0 8px; font-size: 15px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.bet-head .aside { font-weight: 400; font-size: 12.5px; color: var(--ink2); }
 .bet { border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; }
 .bet-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
 .bet-what { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
@@ -723,7 +729,11 @@ function renderRaces() {
   if (pnl) {
     const b = el("button", "day-pnl");
     b.append(el("span", null, state.date === todayStr() ? "今日" : "この日"), el("span", null, `記録 ${pnl.n}件・結果 ${pnl.settled}件`));
-    if (pnl.settled) b.append(el("b", pnl.d >= 0 ? "up" : "down", `${pnl.d >= 0 ? "+" : ""}${yen(pnl.d)}`));
+    const sign = (x) => `${x >= 0 ? "+" : ""}${yen(x)}`;
+    if (pnl.evSettled && pnl.hSettled) {
+      b.append(el("b", pnl.d >= 0 ? "up" : "down", `期待値 ${sign(pnl.d)}`), el("b", pnl.hd >= 0 ? "up" : "down", `的中 ${sign(pnl.hd)}`));
+    } else if (pnl.evSettled) b.append(el("b", pnl.d >= 0 ? "up" : "down", sign(pnl.d)));
+    else if (pnl.hSettled) b.append(el("b", pnl.hd >= 0 ? "up" : "down", `的中 ${sign(pnl.hd)}`));
     b.append(el("span", "go", "記録 ›"));
     b.onclick = showRecords;
     area.append(b);
@@ -1363,7 +1373,9 @@ function validRecord(r) {
   if (r["AI"] != null) {
     const a = r["AI"];
     if (!isObj(a) || !isObj(a["予想"]) || !Array.isArray(a["買い目"])) return false;
-    if (!a["買い目"].every((b) => isObj(b) && typeof b["券種"] === "string" && typeof b["組み合わせ"] === "string" && Number.isFinite(b["金額"]))) return false;
+    const okBets = (xs) => xs.every((b) => isObj(b) && typeof b["券種"] === "string" && typeof b["組み合わせ"] === "string" && Number.isFinite(b["金額"]));
+    if (!okBets(a["買い目"])) return false;
+    if (a["的中買い目"] != null && !(Array.isArray(a["的中買い目"]) && okBets(a["的中買い目"]))) return false;
     if (typeof a["記録時刻"] !== "string") a["記録時刻"] = "";
   }
   if (r["結果"] != null && (!isObj(r["結果"]) || !isObj(r["結果"]["着順"]) || !isObj(r["結果"]["払戻"]))) return false;
@@ -1410,6 +1422,8 @@ function pasteAiAnswer() {
   rec["AI"] = Object.assign(parsed, { "記録時刻": localStamp() });
   // 画面に期待値を出すため、記録したときのオッズ（買い目ごと）・予算・総評も残す（PC版はこれらを使わない）
   rec["AI"]["オッズ"] = parsed["買い目"].map((b) => { const o = betOddsOf(b, res.info); return o ? o.text : null; });
+  if (parsed["的中買い目"]) rec["AI"]["的中オッズ"] = parsed["的中買い目"].map((b) => { const o = betOddsOf(b, res.info); return o ? o.text : null; });
+  { const bs = betSettings(); rec["買い方"] = parsed["的中買い目"] ? (parsed["買い目"].length || bs.mode === "both" ? "both" : "hit") : "ev"; rec["HIT_MIN"] = bs.hit_min; rec["HIT_EV_MIN"] = bs.hit_ev_min; }
   rec["AI"]["総評"] = aiComment(text);
   rec["予算"] = betSettings().budget;
   if (res.info.predicted) rec["予想オッズ"] = true;
@@ -1429,7 +1443,8 @@ function scheduleResultCheck(key, rec, race) {
   if (um == null || !rec.race_id) return;
   try {
     Native.scheduleResultCheck(JSON.stringify({ key, race_id: rec.race_id, date: rec["日付"], venue: rec["競馬場"], no: rec["レース番号"],
-      title: rec["レース名"] || race.title || "", time: rec["発走"], start: Math.round(Date.now() + um * 60000), bets: rec["AI"]["買い目"] }));
+      title: rec["レース名"] || race.title || "", time: rec["発走"], start: Math.round(Date.now() + um * 60000), bets: rec["AI"]["買い目"],
+      hit_bets: Array.isArray(rec["AI"]["的中買い目"]) ? rec["AI"]["的中買い目"] : null, mode: rec["買い方"] || "ev" }));
   } catch (e) { /* 予約できなくても記録は残る */ }
 }
 // アプリを閉じている間に自動で取った結果を、記録へ入れる
@@ -1484,16 +1499,17 @@ function onResultsDone(err) {
 function dayPnl(date) {
   const rs = Object.values(readRecords()).filter((r) => r["日付"] === date && r["AI"]);
   if (!rs.length) return null;
-  let d = 0, settled = 0;
+  // 期待値重視（買い目）と的中重視（的中買い目）を別々に足す
+  let d = 0, settled = 0, hd = 0, hSettled = 0;
   for (const r of rs) {
     if (!r["結果"]) continue;
-    let rows = null;
-    try { rows = KS.settleBets(r); } catch (e) { /* 形の崩れた記録は数えない */ }
-    if (!rows) continue;
-    settled++;
-    d += rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0);
+    let rows = null, hrows = null;
+    try { rows = r["買い方"] === "hit" ? null : KS.settleBets(r, "買い目"); } catch (e) { /* 形の崩れた記録は数えない */ }
+    try { hrows = Array.isArray(r["AI"]["的中買い目"]) ? KS.settleBets(r, "的中買い目") : null; } catch (e) {}
+    if (rows) { settled++; d += rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
+    if (hrows) { hSettled++; hd += hrows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
   }
-  return { n: rs.length, settled, d };
+  return { n: rs.length, settled: Math.max(settled, hSettled), d, evSettled: settled, hd, hSettled };
 }
 function updateRecBadge() { const n = pendingResults().length; $("recDot").classList.toggle("hidden", !n); }
 
@@ -1557,18 +1573,27 @@ function aiCard(venue, race) {
   }
   const ai = rec["AI"], pred = ai["予想"] || {};
   h.append(el("span", "aside", `記録 ${(ai["記録時刻"] || "").slice(5, 16)}`));
-  const bets = ai["買い目"];
-  const settled = rec["結果"] ? KS.settleBets(rec) : null;
-  const evMin = rec["EV_MIN"] != null ? rec["EV_MIN"] : betSettings().ev_min;
-  const cond = [`期待値 ${KS.fmtEv(evMin)} 以上`];
-  if (rec["予算"]) cond.push(`予算 ${yen(rec["予算"])}`);
-  c.append(el("p", "ai-cond", cond.join("・")));
-
-  // 記録したときのオッズと、今のオッズ（記録のあとに取り直していれば）
   const info = state.result.res.info;
-  const recOdds = ai["オッズ"] || [];
   const updated = state.result.res.at && rec["収集時刻"] && state.result.res.at !== rec["収集時刻"];
-  if (!bets.length) c.append(el("p", "ai-skip", "見送り（期待値が下限以上の買い目なし）"));
+  const hasHit = Array.isArray(ai["的中買い目"]);
+  const evMin0 = rec["EV_MIN"] != null ? rec["EV_MIN"] : betSettings().ev_min;
+  const hitEv0 = rec["HIT_EV_MIN"] != null ? rec["HIT_EV_MIN"] : betSettings().hit_ev_min;
+  const hitMin0 = rec["HIT_MIN"] != null ? rec["HIT_MIN"] : betSettings().hit_min;
+  if (rec["予算"]) c.append(el("p", "ai-cond", `予算 ${yen(rec["予算"])}` + (hasHit && rec["買い方"] !== "hit" ? "（期待値重視・的中重視それぞれ）" : "")));
+  // 期待値重視（#BET）を出す。的中重視（#HIT）を記録していれば続けて出す（的中重視だけのときは期待値重視を省く）
+  if (!(hasHit && rec["買い方"] === "hit")) c.append(betSection("買い目", "オッズ", hasHit ? "期待値重視" : "", `期待値 ${KS.fmtEv(evMin0)} 以上`, evMin0));
+  if (hasHit) c.append(betSection("的中買い目", "的中オッズ", "的中重視", `的中率 ${hitMin0}%以上・期待値 ${KS.fmtEv(hitEv0)} 以上`, hitEv0));
+
+  // 買い目の一覧（key: "買い目" か "的中買い目"）
+  function betSection(key, oddsKey, title, condText, evMin) {
+  const c = el("div", "bet-section");
+  if (title) { const hh = el("h4", "bet-head", title); hh.append(el("span", "aside", condText)); c.append(hh); }
+  else c.append(el("p", "ai-cond", condText));
+  const bets = ai[key] || [];
+  const settled = rec["結果"] ? KS.settleBets(rec, key) : null;
+  // 記録したときのオッズと、今のオッズ（記録のあとに取り直していれば）
+  const recOdds = ai[oddsKey] || [];
+  if (!bets.length) c.append(el("p", "ai-skip", "見送り（条件を満たす買い目なし）"));
   else {
     const list = el("div", "bet-list");
     let total = 0;
@@ -1598,7 +1623,7 @@ function aiCard(venue, race) {
       const wide = /\d\s*-\s*\d/.test(atRec ? atRec.text : "");
       const line = (o, label) => {
         const d = el("div", "bet-ev");
-        if (!o || !(o.low > 0)) { d.append(el("span", null, `${label}オッズ不明`)); return d; }
+        if (!o || !(o.low > 0)) { d.append(el("span", null, `${label}オッズ不明` + (p != null ? `　当たる確率 ${(p * 100).toFixed(1)}%` : ""))); return d; }
         d.append(el("span", null, `${label}${o.text}倍`));
         if (p != null) {
           const ev = p * o.low;
@@ -1609,7 +1634,7 @@ function aiCard(venue, race) {
       const odds1 = line(atRec && atRec.low > 0 ? atRec : null, rec["予想オッズ"] && b["券種"] === "単勝" ? "記録時（予想オッズ） " : "記録時 ");
       if (atRec && atRec.low > 0) odds1.append(el("span", "bet-pay", `当たれば ${yen(Math.floor(b["金額"] / 100) * Math.round(atRec.low * 100))}${wide ? "以上" : ""}`));
       row.append(odds1);
-      if (now && atRec && now.text !== atRec.text) row.append(line(now, "今 "));
+      if (now && (!atRec || !(atRec.low > 0) || now.text !== atRec.text)) row.append(line(now, "今 "));
       list.append(row);
     });
     c.append(list);
@@ -1635,6 +1660,9 @@ function aiCard(venue, race) {
       c.append(v);
     }
   }
+  return c;
+  }
+
   if (ai["総評"]) c.append(el("p", "ai-comment", `「${ai["総評"]}」`));
 
   if (rec["結果"]) {
@@ -1655,7 +1683,7 @@ function aiCard(venue, race) {
 
   // 市場と AI の比較（AI の推定勝率の高い順に6頭。買った馬は必ず入れる）
   const boughtNos = new Set();
-  for (const b of bets) if (!b["券種"].startsWith("枠")) b["組み合わせ"].split("-").forEach((n) => boughtNos.add(n));
+  for (const b of [...(ai["買い目"] || []), ...(ai["的中買い目"] || [])]) if (!b["券種"].startsWith("枠")) b["組み合わせ"].split("-").forEach((n) => boughtNos.add(n));
   const horses = (info.horses || []).filter((x) => !x.cancel);
   const all = horses.map((x) => ({ x, no: String(parseInt(x.no, 10)), ai: pred[String(parseInt(x.no, 10))] })).filter((r) => r.ai)
     .sort((a, b) => b.ai["勝率"] - a.ai["勝率"]);
@@ -1712,17 +1740,19 @@ function renderRecords() {
   }
 
   const sm = KS.computeSummary(all);
-  // 回収率
+  // 回収率（期待値重視と的中重視は別々に）
+  for (const [bb, title] of [[sm.bets, sm.hit_bets ? "回収率：期待値重視" : "回収率"], [sm.hit_bets, "回収率：的中重視"]]) {
+  if (!bb) continue;
   const c1 = el("div", "card");
-  c1.append(el("h3", null, "回収率"));
-  const b = sm.bets;
+  c1.append(el("h3", null, title));
+  const b = bb;
   if (!b || !b.bought) c1.append(el("p", "note", sm.n_races ? `買ったレースがまだありません（見送り ${b ? b.skipped : 0}件）` : "結果まで記録したレースがまだありません"));
   else {
     const roi = b.ret / b.spent * 100;
     const big = el("div", "big-num " + (roi >= 100 ? "up" : "down"), `${roi.toFixed(1)}%`);
     if (b.ci) big.append(el("small", null, `95%区間 ${(b.ci[0] * 100).toFixed(0)}〜${(b.ci[1] * 100).toFixed(0)}%`));
     c1.append(big);
-    c1.append(el("p", "note", `購入 ${yen(b.spent)} → 払戻 ${yen(b.ret)}（収支 ${b.ret - b.spent >= 0 ? "+" : ""}${yen(b.ret - b.spent)}）・的中したレース ${b.hit_races}/${b.bought}・見送り ${b.skipped}件${b.unknown ? `・払戻を読めず除外 ${b.unknown}件` : ""}`));
+    c1.append(el("p", "note", `購入 ${yen(b.spent)} → 払戻 ${yen(b.ret)}（収支 ${b.ret - b.spent >= 0 ? "+" : ""}${yen(b.ret - b.spent)}）・的中したレース ${b.hit_races}/${b.bought}（${(b.hit_races / b.bought * 100).toFixed(0)}%）・見送り ${b.skipped}件${b.unknown ? `・払戻を読めず除外 ${b.unknown}件` : ""}`));
     const tb = el("table", "rec-table");
     const hr = el("tr"); for (const [t, cls] of [["券種"], ["点数", "r"], ["的中", "r"], ["購入", "r"], ["払戻", "r"], ["回収率", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
     for (const [k, n, hit, a, r] of b.by_type) {
@@ -1732,6 +1762,7 @@ function renderRecords() {
     c1.append(tb);
   }
   body.append(c1);
+  }
 
   // AI と市場の精度
   const c2 = el("div", "card");
@@ -1741,7 +1772,8 @@ function renderRecords() {
     const br = sm.brier;
     c2.append(el("p", null, `市場 ${br.market.toFixed(4)} ／ AI ${br.ai.toFixed(4)}（${br.n}レース）`));
     c2.append(el("p", "note", `AI − 市場 = ${br.diff >= 0 ? "+" : ""}${br.diff.toFixed(4)}（95%区間 ${br.ci[0] >= 0 ? "+" : ""}${br.ci[0].toFixed(4)}〜${br.ci[1] >= 0 ? "+" : ""}${br.ci[1].toFixed(4)}）`));
-    c2.append(el("p", "verdict", br.ci[1] < 0 ? "✓ AI の推定勝率は、市場（単勝オッズ）より当たっています" : br.ci[0] > 0 ? "! AI の推定勝率は、市場（単勝オッズ）より外れています" : "AI と市場の差は、このレース数では区別できません"));
+    if (br.n < 30) c2.append(el("p", "verdict", "まだ判断できません（30レース未満）"));
+    else c2.append(el("p", "verdict", br.ci[1] < 0 ? "✓ AI の推定勝率は、市場（単勝オッズ）より当たっています" : br.ci[0] > 0 ? "! AI の推定勝率は、市場（単勝オッズ）より外れています" : "AI と市場の差は、このレース数では区別できません"));
     const tb = el("table", "rec-table"); tb.style.marginTop = "10px";
     const hr = el("tr"); for (const [t, cls] of [["推定勝率"], ["件数", "r"], ["AI推定", "r"], ["実際", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
     for (const [lo, hi, cnt, mp, act] of sm.calib_win.ai) {
@@ -1760,16 +1792,23 @@ function renderRecords() {
   for (const [key, r] of entries.slice(0, 100)) {
     const it = el("button", "rec-item");
     it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
-    const bets = r["AI"] ? r["AI"]["買い目"] : [];
-    it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : bets.length ? bets.map((x) => `${x["券種"]} ${x["組み合わせ"]}：${yen(x["金額"])}`).join("　") : "見送り"));
+    const desc = (xs) => xs.length ? xs.map((x) => `${x["券種"]} ${x["組み合わせ"]}：${yen(x["金額"])}`).join("　") : "見送り";
+    const hasHit = r["AI"] && Array.isArray(r["AI"]["的中買い目"]);
+    const keys = !r["AI"] ? [] : hasHit ? (r["買い方"] === "hit" ? [["的中買い目", ""]] : [["買い目", "期待値 "], ["的中買い目", "的中 "]]) : [["買い目", ""]];
+    it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(r["AI"][k])).join(" ／ ")));
     let st;
     if (!r["AI"]) st = el("span", "st wait", "—");
     else if (!r["結果"]) st = el("span", "st wait", "結果待ち");
     else {
-      const rows = KS.settleBets(r);
-      if (!rows) st = el("span", "st wait", "払戻不明");
-      else if (!rows.length) st = el("span", "st wait", "見送り");
-      else { const d = rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); st = el("span", "st " + (d >= 0 ? "up" : "down"), `${d >= 0 ? "+" : ""}${d.toLocaleString("ja-JP")}`); }
+      const parts = keys.map(([k, lb]) => {
+        const rows = KS.settleBets(r, k);
+        if (!rows) return [lb + "払戻不明", "wait"];
+        if (!rows.length) return [lb + "見送り", "wait"];
+        const d = rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0);
+        return [`${lb}${d >= 0 ? "+" : ""}${d.toLocaleString("ja-JP")}`, d >= 0 ? "up" : "down"];
+      });
+      st = el("span", "st " + (parts.length === 1 ? parts[0][1] : "multi"));
+      parts.forEach(([t, cls], i) => { if (i) st.append(el("br")); st.append(el("span", cls, t)); });
     }
     it.append(st);
     it.onclick = () => {
@@ -1802,13 +1841,15 @@ function renderRecords() {
 // ===== 予想の条件（予算・点数・期待値の下限） =====
 // AI への指示文に入れる。送る・コピーするときの値で指示文を書き直すので、収集済みのレースにもそのまま効く
 const BET_KEY = "keiba-bet-settings";
-const BET_LIMITS = { budget: [100, 100000, 100], max_bets: [1, 10, 1], ev_min: [1.0, 3.0, 0.05] };
+const BET_LIMITS = { budget: [100, 100000, 100], max_bets: [1, 10, 1], ev_min: [1.0, 3.0, 0.05], hit_min: [10, 80, 5], hit_ev_min: [0.5, 1.5, 0.05] };
 function betSettings() {
-  const d = (window.KS && KS.DEFAULT_SETTINGS) || { budget: 1000, max_bets: 3, ev_min: 1.2 };
+  const d = (window.KS && KS.DEFAULT_SETTINGS) || { budget: 1000, max_bets: 3, ev_min: 1.2, mode: "both", hit_min: 30, hit_ev_min: 0.9 };
   const v = Object.assign({}, d, store.get(BET_KEY, {}));
   const clamp = (k) => { const [lo, hi] = BET_LIMITS[k]; v[k] = Math.min(hi, Math.max(lo, Number(v[k]) || d[k])); };
-  ["budget", "max_bets", "ev_min"].forEach(clamp);
+  ["budget", "max_bets", "ev_min", "hit_min", "hit_ev_min"].forEach(clamp);
   v.ev_min = Math.round(v.ev_min * 100) / 100;
+  v.hit_ev_min = Math.round(v.hit_ev_min * 100) / 100;
+  if (!["ev", "hit", "both"].includes(v.mode)) v.mode = d.mode;
   // 1点100円なので、点数は予算で買える数まで
   v.max_bets = Math.min(v.max_bets, Math.floor(v.budget / 100));
   return v;
@@ -1818,7 +1859,11 @@ const PROMPT_KEY = "keiba-prompt";
 function promptTemplate() { const t = store.get(PROMPT_KEY, null); return t && t.trim() ? t : null; }
 const fmtEv = (v) => (window.KS ? KS.fmtEv(v) : String(v));
 const yen = (n) => `${Number(n).toLocaleString("ja-JP")}円`;
-function betSummary(b) { return `予算 ${yen(b.budget)}・最大${b.max_bets}点・期待値 ${fmtEv(b.ev_min)} 以上`; }
+function betSummary(b) {
+  const ev = `期待値 ${fmtEv(b.ev_min)} 以上`, hit = `的中率 ${b.hit_min}%以上・期待値 ${fmtEv(b.hit_ev_min)} 以上`;
+  const cond = b.mode === "ev" ? `期待値重視（${ev}）` : b.mode === "hit" ? `的中重視（${hit}）` : `期待値重視と的中重視の両方`;
+  return `予算 ${yen(b.budget)}・最大${b.max_bets}点・${cond}`;
+}
 // 送る・コピー・表示するテキスト（指示文を今の条件で書き直したもの）
 function textFor(res) {
   if (!window.KS) return res.text;
@@ -1846,6 +1891,16 @@ function renderSettings() {
 
   const card = el("div", "card");
   const save = (k, v) => { const cur = store.get(BET_KEY, {}); cur[k] = v; store.set(BET_KEY, cur); renderSettings(); };
+
+  // 買い方
+  const f0 = el("div", "field");
+  f0.append(el("label", null, "買い方"), el("p", "hint", "両方にすると、1回の回答で2通りの買い目を出させ、別々に記録・答え合わせします"));
+  const seg = el("div", "seg3 wide");
+  for (const [m, label] of [["ev", "期待値重視"], ["hit", "的中重視"], ["both", "両方"]]) {
+    const x = el("button", b.mode === m ? "on" : null, label); x.onclick = () => save("mode", m); seg.append(x);
+  }
+  f0.append(seg);
+  card.append(f0);
 
   // 予算
   const f1 = el("div", "field");
@@ -1879,13 +1934,24 @@ function renderSettings() {
   }
   f3.append(picks3);
   f3.append(el("p", "note", "1.0 は「賭けた額が平均で戻る」水準です。単勝・複勝の控除率はおよそ20〜25%なので、市場より大きく高い確率を見積もらないと 1.0 を超えません。推定の上振れを拾いやすいため、既定は 1.2 にしています"));
-  card.append(f3);
+  if (b.mode !== "hit") card.append(f3);
+  if (b.mode !== "ev") {
+    const f4 = el("div", "field");
+    f4.append(el("label", null, "的中重視：推定的中率の下限"), el("p", "hint", "これ以上当たりそうな買い目だけから選びます"));
+    f4.append(stepper(`${b.hit_min}%`, b.hit_min <= 10, b.hit_min >= 80, () => save("hit_min", b.hit_min - 5), () => save("hit_min", b.hit_min + 5)));
+    card.append(f4);
+    const f5 = el("div", "field");
+    f5.append(el("label", null, "的中重視：期待値の下限"), el("p", "hint", "1.0 未満にすると、平均では損をすると分かっていて買うことになります"));
+    f5.append(stepper(fmtEv(b.hit_ev_min), b.hit_ev_min <= 0.5, b.hit_ev_min >= 1.5,
+      () => save("hit_ev_min", Math.round((b.hit_ev_min - 0.05) * 100) / 100), () => save("hit_ev_min", Math.round((b.hit_ev_min + 0.05) * 100) / 100)));
+    card.append(f5);
+  }
   body.append(card);
 
   // 指示文のうち条件が入る行
   const pc = el("div", "card");
   pc.append(el("h3", null, "指示文に入る文"));
-  const lines = (window.KS ? KS.promptText(Object.assign({}, b, { template: promptTemplate() })) : "").split("\n").filter((l) => /\d+円|期待値/.test(l)).slice(0, 4);
+  const lines = (window.KS ? KS.promptText(Object.assign({}, b, { template: promptTemplate() })) : "").split("\n").filter((l) => /\d+円|期待値|的中重視/.test(l)).slice(0, 6);
   pc.append(el("pre", "prompt-preview", lines.join("\n")));
   body.append(pc);
 
@@ -1894,7 +1960,7 @@ function renderSettings() {
   const th = el("h3", null, "指示文");
   if (promptTemplate()) th.append(el("span", "badge mod", "書き換え中"));
   tc.append(th);
-  tc.append(el("p", "note", "AI への指示文を書き換えられます。{BUDGET}・{MAX_BETS}・{EV_MIN} は上の条件に置き換わります。記録と答え合わせを使うなら、最後の「#PRED」「#BET」の書式の指示は残してください"));
+  tc.append(el("p", "note", "AI への指示文を書き換えられます。{GOAL}・{BET_STEP}・{BET_OUTPUT}・{BLOCK_NOTE}・{BET_BLOCK} は上の買い方の文に、{BUDGET}・{MAX_BETS}・{EV_MIN}・{HIT_MIN}・{HIT_EV_MIN} は上の条件に置き換わります。記録と答え合わせを使うなら、最後の記録用ブロック（{BET_BLOCK}）の指示は残してください"));
   const ta = el("textarea", "prompt-edit");
   ta.value = (promptTemplate() || KS.PROMPT_TEXT).trim();
   ta.spellcheck = false;

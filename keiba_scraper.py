@@ -76,15 +76,21 @@ EV_MIN = 1.2
 BUDGET = 1000
 MAX_BETS = 3
 
+# 買い目の出し方: "ev"=期待値重視 / "hit"=的中重視 / "both"=両方を別々に出す（Android版は設定画面で変えられる）
+BET_MODE = "both"
+# 的中重視の条件：推定的中率の下限（%）と期待値の下限
+HIT_MIN = 30
+HIT_EV_MIN = 0.9
+
 # AI への指示文（出力テキストの末尾に付ける）。文言を変えるときはここだけ直す
-# {BUDGET}・{MAX_BETS}・{EV_MIN} は実行時に上の値に置き換わる（Android版は設定画面で変えられる）
+# {GOAL}・{BET_STEP}・{BET_OUTPUT}・{BLOCK_NOTE}・{BET_BLOCK} は買い目の出し方（BET_MODE）ごとの文（MODE_TEXT）に、
+# {BUDGET}・{MAX_BETS}・{EV_MIN}・{HIT_MIN}・{HIT_EV_MIN} は上の値に置き換わる（Android版は設定画面で変えられる）
 PROMPT_TEXT = """
 【AIへの指示】
 上記データだけを使って、このレースの買い目を決めてください。
 
 ■ 目的と制約
-・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。
-・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
+{GOAL}
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
@@ -103,21 +109,19 @@ PROMPT_TEXT = """
    ・騎手：乗り替わりの有無と騎手コンビ成績
    ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
 4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
-5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。
+{BET_STEP}
 
 ■ 出力フォーマット（この順で出力）
 1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬
 2. 【展開予想】逃げ・先行候補とペースを2〜3行で
 3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
-4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）
+{BET_OUTPUT}
 5. 【総評】50字以内
-6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、{BLOCK_NOTE}金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
 #PRED
 馬番,推定勝率,推定複勝率
 1,12.5,35.0
-#BET
-券種,組み合わせ,金額,推定的中率
-ワイド,3-7,500,18.5
+{BET_BLOCK}
 """
 
 TIMEOUT_PAGE     = 20000  # ページロード待機 (ms)
@@ -1115,10 +1119,57 @@ def fmt_ev(v):
     return s[:-1] if s.endswith("0") else s
 
 
-def prompt_text(budget=None, max_bets=None, ev_min=None):
+# 買い目の出し方ごとの指示文の部品（Android版の MODE_TEXT と同じ文面）
+_BET_BLOCK_EV = "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5"
+_BET_BLOCK_HIT = "#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
+MODE_TEXT = {
+    "ev": {
+        "GOAL": "・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。\n"
+                "・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
+        "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。"
+                    "期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+        "BET_OUTPUT": "4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+        "BLOCK_NOTE": "#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。",
+        "BET_BLOCK": _BET_BLOCK_EV,
+    },
+    "hit": {
+        "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上の買い目から選び、その中で期待値の高いものを優先してください。\n"
+                "・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
+        "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。"
+                    "推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+        "BET_OUTPUT": "4. 【買い目（的中重視）】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+        "BLOCK_NOTE": "#HIT は見出し行だけにする。#HIT の推定的中率は【買い目（的中重視）】の表の推定的中率と同じ値。",
+        "BET_BLOCK": _BET_BLOCK_HIT,
+    },
+    "both": {
+        "GOAL": "・期待値重視と的中重視の2通りの買い目を、別々に出してください。予算はそれぞれ{BUDGET}円、最大{MAX_BETS}点、各100円単位。\n"
+                "・期待値重視：目的は回収率（期待値）の最大化。期待値が{EV_MIN}以上の買い目がなければ「見送り」。\n"
+                "・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目から選ぶ。なければ「見送り」。",
+        "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。\n"
+                    "   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。\n"
+                    "   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+        "BET_OUTPUT": "4. 【買い目（期待値重視）】と【買い目（的中重視）】：それぞれ表形式で 券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+        "BLOCK_NOTE": "見送りの買い目のブロックは見出し行だけにする。#BET は期待値重視、#HIT は的中重視の買い目で、推定的中率はそれぞれの表の推定的中率と同じ値。",
+        "BET_BLOCK": _BET_BLOCK_EV + "\n" + _BET_BLOCK_HIT,
+    },
+}
+BET_MODES = {"ev": "期待値重視", "hit": "的中重視", "both": "両方"}
+
+
+def fmt_pct(v):
+    """的中率の下限の表示（整数ならそのまま、小数は1桁）"""
+    return str(int(v)) if float(v).is_integer() else f"{v:.1f}"
+
+
+def prompt_text(budget=None, max_bets=None, ev_min=None, mode=None, hit_min=None, hit_ev_min=None):
     """AI への指示文（各行の末尾の空白を除いて改行でつなぐ）"""
-    t = (PROMPT_TEXT.replace("{BUDGET}", str(budget or BUDGET)).replace("{MAX_BETS}", str(max_bets or MAX_BETS))
-         .replace("{EV_MIN}", fmt_ev(ev_min or EV_MIN)))
+    parts = MODE_TEXT.get(mode or BET_MODE, MODE_TEXT["ev"])
+    t = PROMPT_TEXT
+    for k in ("GOAL", "BET_STEP", "BET_OUTPUT", "BLOCK_NOTE", "BET_BLOCK"):
+        t = t.replace("{" + k + "}", parts[k])
+    t = (t.replace("{BUDGET}", str(budget or BUDGET)).replace("{MAX_BETS}", str(max_bets or MAX_BETS))
+         .replace("{EV_MIN}", fmt_ev(ev_min or EV_MIN))
+         .replace("{HIT_MIN}", fmt_pct(hit_min or HIT_MIN)).replace("{HIT_EV_MIN}", fmt_ev(hit_ev_min or HIT_EV_MIN)))
     return "\n".join(line.rstrip() for line in t.strip().split("\n"))
 
 
@@ -1494,13 +1545,15 @@ def parse_ai_block(text):
         return None
     # 指示文の書式例にも #PRED があるので、最後に出てくる #PRED から読む
     lines = lines[len(lines) - 1 - lines[::-1].index("#PRED"):]
-    pred, bets, section = {}, [], None
+    pred, bets, hit_bets, section = {}, [], [], None
+    has_hit = False
     for ln in lines:
-        if ln in ("#PRED", "#BET"):
+        if ln in ("#PRED", "#BET", "#HIT"):
             section = ln
+            has_hit = has_hit or ln == "#HIT"
             continue
         if not ln or ln.startswith("```"):
-            if section == "#BET" and ln.startswith("```"):
+            if section in ("#BET", "#HIT") and ln.startswith("```"):
                 break
             continue
         if section == "#PRED":
@@ -1509,7 +1562,7 @@ def parse_ai_block(text):
                 win, place = _num(cells[1]), _num(cells[2])
                 if win is not None and place is not None:
                     pred[str(int(cells[0].translate(_ZEN_DIGITS)))] = {"勝率": win, "複勝率": place}
-        elif section == "#BET":
+        elif section in ("#BET", "#HIT"):
             # 金額の「1,000」の桁区切りで切れないよう、区切りは最初の2つだけで分ける
             cells = [c.strip() for c in re.split(r"[,，\t]", ln, maxsplit=2)]
             if len(cells) < 3:
@@ -1522,10 +1575,13 @@ def parse_ai_block(text):
                 bet = {"券種": bet_type, "組み合わせ": combo_key(bet_type, nums), "金額": int(amount)}
                 if prob is not None:
                     bet["的中率"] = prob
-                bets.append(bet)
+                (hit_bets if section == "#HIT" else bets).append(bet)
     if not pred:
         return None
+    # 買い目は期待値重視（#BET）、的中買い目は的中重視（#HIT。ブロックがあるときだけ）
     block = {"予想": pred, "買い目": bets}
+    if has_hit:
+        block["的中買い目"] = hit_bets
     # 指示文の書式例そのもの（AI の回答に記録用ブロックが無く、指示文ごとコピーしたとき）は記録しない
     if block in _EXAMPLE_BLOCKS:
         return None
@@ -1533,7 +1589,12 @@ def parse_ai_block(text):
 
 
 # 指示文の書式例の記録用ブロック（これと同じなら AI の回答ではない。推定的中率の列が無かった頃の例も）
+_EX_PRED = {"1": {"勝率": 12.5, "複勝率": 35.0}}
+_EX_EV = [{"券種": "ワイド", "組み合わせ": "3-7", "金額": 500, "的中率": 18.5}]
+_EX_HIT = [{"券種": "複勝", "組み合わせ": "3", "金額": 500, "的中率": 62.0}]
 _EXAMPLE_BLOCKS = [
+    {"予想": _EX_PRED, "買い目": _EX_EV, "的中買い目": _EX_HIT},
+    {"予想": _EX_PRED, "買い目": [], "的中買い目": _EX_HIT},
     {"予想": {"1": {"勝率": 12.5, "複勝率": 35.0}}, "買い目": [{"券種": "ワイド", "組み合わせ": "3-7", "金額": 500, "的中率": 18.5}]},
     {"予想": {"1": {"勝率": 12.5, "複勝率": 35.0}}, "買い目": [{"券種": "ワイド", "組み合わせ": "3-7", "金額": 500}]},
 ]
@@ -1561,9 +1622,12 @@ def ask_ai_answer(record, ai_text_path, scraped_text=None):
         record["AI"] = {**parsed, "記録時刻": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
         save_record(record)
         ai_text_path.write_text(text, encoding="utf-8")
-        bets = parsed["買い目"]
-        desc = " / ".join(f"{b['券種']} {b['組み合わせ']} {b['金額']}円" for b in bets) or "見送り"
-        print(f"  記録しました: {len(parsed['予想'])}頭の予想、買い目 {desc}")
+        def desc(bets):
+            return " / ".join(f"{b['券種']} {b['組み合わせ']}：{b['金額']}円" for b in bets) or "見送り"
+        msg = f"  記録しました: {len(parsed['予想'])}頭の予想、期待値重視 {desc(parsed['買い目'])}"
+        if "的中買い目" in parsed:
+            msg += f"、的中重視 {desc(parsed['的中買い目'])}"
+        print(msg)
         return True
 
 
@@ -1671,13 +1735,13 @@ def scrape_result(page, race_id):
 
 # ========== 検証 ==========
 
-def settle_bets(record):
+def settle_bets(record, key="買い目"):
     """買い目ごとの払戻を計算する。払戻が読めていない券種があれば None を返す
-    （出走取消を含む買い目は返還として購入額をそのまま戻す）"""
+    （出走取消を含む買い目は返還として購入額をそのまま戻す）。key="的中買い目" で的中重視の買い目"""
     res, ai = record["結果"], record["AI"]
     scratched = {no for no, rank in res["着順"].items() if rank in ("取消", "除外")}
     rows = []
-    for b in ai["買い目"]:
+    for b in ai.get(key) or []:
         # 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
         if not b["券種"].startswith("枠") and set(b["組み合わせ"].split("-")) & scratched:
             ret, status = b["金額"], "返還"
@@ -1754,15 +1818,27 @@ def compute_summary(records):
         "n_races": len(races),
         "n_no_ai": sum(1 for r in records if not r.get("AI")),
         "n_no_result": sum(1 for r in records if r.get("AI") and not r.get("結果")),
-        "bets": None, "bet_rows": [], "brier": None, "calib_win": None, "calib_place": None,
+        "bets": None, "bet_rows": [], "hit_bets": None, "hit_bet_rows": [],
+        "brier": None, "calib_win": None, "calib_place": None,
     }
     if not races:
         return out
 
-    # ---- 回収率 ----
+    # ---- 回収率（期待値重視の買い目。的中重視の買い目は、それを記録したレースだけで別に） ----
+    out["bets"], out["bet_rows"] = _bet_summary(races, "買い目")
+    hit_races = [r for r in races if "的中買い目" in r["AI"]]
+    if hit_races:
+        out["hit_bets"], out["hit_bet_rows"] = _bet_summary(hit_races, "的中買い目")
+
+    _accuracy_summary(races, out)
+    return out
+
+
+def _bet_summary(races, key):
+    """買い目（key）の回収率・的中したレース・券種別の成績"""
     bet_rows, per_race, skipped, unknown = [], [], 0, 0
     for r in races:
-        rows = settle_bets(r)
+        rows = settle_bets(r, key)
         if rows is None:
             unknown += 1
             continue
@@ -1793,9 +1869,11 @@ def compute_summary(records):
             t[2] += x["金額"]
             t[3] += x["払戻"]
         bets["by_type"] = [[k, *v] for k, v in by_type.items()]
-    out["bets"] = bets
-    out["bet_rows"] = bet_rows
+    return bets, bet_rows
 
+
+def _accuracy_summary(races, out):
+    """推定確率の精度とキャリブレーション"""
     # ---- 推定確率の精度 ----
     race_rows = [rows for r in races if (rows := horse_rows(r))]
     if race_rows:
@@ -1831,17 +1909,19 @@ def format_summary(sm):
     if not sm["n_races"]:
         return "\n".join(lines)
 
-    b = sm["bets"]
-    lines += ["", "【回収率】",
-              f"  買ったレース {b['bought']}件 / 見送り {b['skipped']}件"
-              + (f" / 払戻を読めず除外 {b['unknown']}件" if b["unknown"] else "")]
-    if b["bought"]:
-        lo, hi = b["ci"] or (None, None)
-        lines.append(f"  購入 {b['spent']:,}円 → 払戻 {b['ret']:,}円　回収率 {b['ret'] / b['spent'] * 100:.1f}%"
-                     + (f"（95%区間 {lo * 100:.0f}〜{hi * 100:.0f}%）" if lo is not None else ""))
-        lines.append(f"  的中したレース {b['hit_races']}/{b['bought']}件")
-        for k, n, hit, a, r in b["by_type"]:
-            lines.append(f"  {pad(k, 6)} {n:3d}点 的中{hit:3d}点　購入 {a:,}円 → {r:,}円（{r / a * 100:.0f}%）")
+    for title, b in (("【回収率：期待値重視の買い目】", sm["bets"]), ("【回収率：的中重視の買い目】", sm.get("hit_bets"))):
+        if not b:
+            continue
+        lines += ["", title,
+                  f"  買ったレース {b['bought']}件 / 見送り {b['skipped']}件"
+                  + (f" / 払戻を読めず除外 {b['unknown']}件" if b["unknown"] else "")]
+        if b["bought"]:
+            lo, hi = b["ci"] or (None, None)
+            lines.append(f"  購入 {b['spent']:,}円 → 払戻 {b['ret']:,}円　回収率 {b['ret'] / b['spent'] * 100:.1f}%"
+                         + (f"（95%区間 {lo * 100:.0f}〜{hi * 100:.0f}%）" if lo is not None else ""))
+            lines.append(f"  的中したレース {b['hit_races']}/{b['bought']}件（{b['hit_races'] / b['bought'] * 100:.0f}%）")
+            for k, n, hit, a, r in b["by_type"]:
+                lines.append(f"  {pad(k, 6)} {n:3d}点 的中{hit:3d}点　購入 {a:,}円 → {r:,}円（{r / a * 100:.0f}%）")
 
     lines += ["", "【推定勝率の精度（ブライアスコア、小さいほど良い）】"]
     br = sm["brier"]
@@ -1895,13 +1975,14 @@ def summarize(records):
                 for x in rows:
                     f.write(f"{r['race_id']},{r['日付']},{r['競馬場']},{r['レース番号']},{x['馬番']},"
                             f"{x['市場'] * 100:.2f},{x['AI勝率'] * 100:.2f},{x['AI複勝率'] * 100:.2f},{x['着順']}\n")
-    if sm["bet_rows"]:
+    if sm["bet_rows"] or sm.get("hit_bet_rows"):
         OUTPUT_DIR.mkdir(exist_ok=True)
         with open(OUTPUT_DIR / "verify_bets.csv", "w", encoding="utf-8-sig", newline="") as f:
-            f.write("race_id,日付,競馬場,R,券種,組み合わせ,金額,推定的中率,払戻,判定\n")
-            for x in sm["bet_rows"]:
-                f.write(f"{x['race_id']},{x['日付']},{x['競馬場']},{x['レース番号']},{x['券種']},"
-                        f"{x['組み合わせ']},{x['金額']},{x.get('的中率', '')},{x['払戻']},{x['判定']}\n")
+            f.write("race_id,日付,競馬場,R,買い方,券種,組み合わせ,金額,推定的中率,払戻,判定\n")
+            for mode, rows in (("期待値重視", sm["bet_rows"]), ("的中重視", sm.get("hit_bet_rows") or [])):
+                for x in rows:
+                    f.write(f"{x['race_id']},{x['日付']},{x['競馬場']},{x['レース番号']},{mode},{x['券種']},"
+                            f"{x['組み合わせ']},{x['金額']},{x.get('的中率', '')},{x['払戻']},{x['判定']}\n")
     return format_summary(sm)
 
 

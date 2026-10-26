@@ -30,7 +30,9 @@
 
   // 買い目の条件の既定値（PC版の BUDGET・MAX_BETS・EV_MIN と同じ）。アプリでは設定画面で変えられる
   const EV_MIN = 1.2;
-  const DEFAULT_SETTINGS = { budget: 1000, max_bets: 3, ev_min: EV_MIN };
+  // mode: "ev"=期待値重視 / "hit"=的中重視 / "both"=両方。hit_min（%）・hit_ev_min は的中重視の条件（PC版の BET_MODE・HIT_MIN・HIT_EV_MIN）
+  const DEFAULT_SETTINGS = { budget: 1000, max_bets: 3, ev_min: EV_MIN, mode: "both", hit_min: 30, hit_ev_min: 0.9 };
+  const BET_MODES = { ev: "期待値重視", hit: "的中重視", both: "両方" };
 
   // AI への指示文（PC版の PROMPT_TEXT と同じ文面にそろえる）
   const PROMPT_TEXT = `
@@ -38,8 +40,7 @@
 上記データだけを使って、このレースの買い目を決めてください。
 
 ■ 目的と制約
-・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。
-・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
+{GOAL}
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
@@ -58,21 +59,19 @@
    ・騎手：乗り替わりの有無と騎手コンビ成績
    ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
 4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
-5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。
+{BET_STEP}
 
 ■ 出力フォーマット（この順で出力）
 1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬
 2. 【展開予想】逃げ・先行候補とペースを2〜3行で
 3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
-4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）
+{BET_OUTPUT}
 5. 【総評】50字以内
-6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、{BLOCK_NOTE}金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
 #PRED
 馬番,推定勝率,推定複勝率
 1,12.5,35.0
-#BET
-券種,組み合わせ,金額,推定的中率
-ワイド,3-7,500,18.5
+{BET_BLOCK}
 `;
 
   // ========== 文字列ユーティリティ ==========
@@ -863,11 +862,43 @@
   function fmtEv(v) { const s = pyFixed(Number(v), 2); return s.endsWith("0") ? s.slice(0, -1) : s; }
 
   // AI への指示文（PC版の prompt_text と同じ）
+  // 買い目の出し方ごとの指示文の部品（PC版の MODE_TEXT と同じ文面）
+  const MODE_TEXT = {
+    "ev": {
+      "GOAL": "・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+      "BET_OUTPUT": "4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+      "BLOCK_NOTE": "#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。",
+      "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5"
+    },
+    "hit": {
+      "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上の買い目から選び、その中で期待値の高いものを優先してください。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+      "BET_OUTPUT": "4. 【買い目（的中重視）】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+      "BLOCK_NOTE": "#HIT は見出し行だけにする。#HIT の推定的中率は【買い目（的中重視）】の表の推定的中率と同じ値。",
+      "BET_BLOCK": "#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
+    },
+    "both": {
+      "GOAL": "・期待値重視と的中重視の2通りの買い目を、別々に出してください。予算はそれぞれ{BUDGET}円、最大{MAX_BETS}点、各100円単位。\n・期待値重視：目的は回収率（期待値）の最大化。期待値が{EV_MIN}以上の買い目がなければ「見送り」。\n・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目から選ぶ。なければ「見送り」。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。\n   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。\n   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+      "BET_OUTPUT": "4. 【買い目（期待値重視）】と【買い目（的中重視）】：それぞれ表形式で 券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+      "BLOCK_NOTE": "見送りの買い目のブロックは見出し行だけにする。#BET は期待値重視、#HIT は的中重視の買い目で、推定的中率はそれぞれの表の推定的中率と同じ値。",
+      "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5\n#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
+    }
+  };
+
+  // 的中率の下限の表示（PC版の fmt_pct）
+  function fmtPct(v) { return Number.isInteger(+v) ? String(+v) : pyFixed(+v, 1); }
+
   function promptText(settings) {
     const st = Object.assign({}, DEFAULT_SETTINGS, settings || {});
-    // アプリの設定画面で書き換えた指示文があれば、それを使う（{BUDGET}・{MAX_BETS}・{EV_MIN} は同じく置き換える）
-    return (st.template || PROMPT_TEXT).split("{BUDGET}").join(String(st.budget)).split("{MAX_BETS}").join(String(st.max_bets))
-      .split("{EV_MIN}").join(fmtEv(st.ev_min)).trim().split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
+    const parts = MODE_TEXT[st.mode] || MODE_TEXT.ev;
+    // アプリの設定画面で書き換えた指示文があれば、それを使う（{GOAL} などの部品と {BUDGET} などの値は同じく置き換える）
+    let t = st.template || PROMPT_TEXT;
+    for (const k of ["GOAL", "BET_STEP", "BET_OUTPUT", "BLOCK_NOTE", "BET_BLOCK"]) t = t.split("{" + k + "}").join(parts[k]);
+    return t.split("{BUDGET}").join(String(st.budget)).split("{MAX_BETS}").join(String(st.max_bets))
+      .split("{EV_MIN}").join(fmtEv(st.ev_min)).split("{HIT_MIN}").join(fmtPct(st.hit_min)).split("{HIT_EV_MIN}").join(fmtEv(st.hit_ev_min))
+      .trim().split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
   }
 
   // ========== 予想の記録と答え合わせ（PC版の record / verify と同じ形式・同じ計算） ==========
@@ -906,7 +937,12 @@
   }
 
   // 指示文の書式例の記録用ブロック（推定的中率の列が無かった頃の例も。PC版の _EXAMPLE_BLOCKS）
+  const EX_PRED = { "1": { "勝率": 12.5, "複勝率": 35 } };
+  const EX_EV = [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500, "的中率": 18.5 }];
+  const EX_HIT = [{ "券種": "複勝", "組み合わせ": "3", "金額": 500, "的中率": 62 }];
   const EXAMPLE_BLOCKS = [
+    JSON.stringify({ "予想": EX_PRED, "買い目": EX_EV, "的中買い目": EX_HIT }),
+    JSON.stringify({ "予想": EX_PRED, "買い目": [], "的中買い目": EX_HIT }),
     JSON.stringify({ "予想": { "1": { "勝率": 12.5, "複勝率": 35 } }, "買い目": [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500, "的中率": 18.5 }] }),
     JSON.stringify({ "予想": { "1": { "勝率": 12.5, "複勝率": 35 } }, "買い目": [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500 }] }),
   ];
@@ -927,12 +963,12 @@
     if (!lines.includes("#PRED")) return null;
     // 指示文の書式例にも #PRED があるので、最後の #PRED から読む
     lines = lines.slice(lines.lastIndexOf("#PRED"));
-    const pred = {}, bets = [];
-    let section = null;
+    const pred = {}, bets = [], hitBets = [];
+    let section = null, hasHit = false;
     for (const ln of lines) {
-      if (ln === "#PRED" || ln === "#BET") { section = ln; continue; }
+      if (ln === "#PRED" || ln === "#BET" || ln === "#HIT") { section = ln; hasHit = hasHit || ln === "#HIT"; continue; }
       if (!ln || ln.startsWith("```")) {
-        if (section === "#BET" && ln.startsWith("```")) break;
+        if ((section === "#BET" || section === "#HIT") && ln.startsWith("```")) break;
         continue;
       }
       if (section === "#PRED") {
@@ -941,7 +977,7 @@
           const win = num(cells[1]), place = num(cells[2]);
           if (win !== null && place !== null) pred[String(parseInt(toHalf(cells[0]), 10))] = { "勝率": win, "複勝率": place };
         }
-      } else if (section === "#BET") {
+      } else if (section === "#BET" || section === "#HIT") {
         // 金額の「1,000」の桁区切りで切れないよう、区切りは最初の2つだけで分ける（PC版の maxsplit=2）
         const m = /^([^,，\t]*)[,，\t]([^,，\t]*)[,，\t]([\s\S]*)$/.exec(ln);
         if (!m) continue;
@@ -953,12 +989,14 @@
         if (betType in BET_SPECS && nums.length === BET_SPECS[betType][0] && amount && amount > 0) {
           const bet = { "券種": betType, "組み合わせ": comboKey(betType, nums), "金額": Math.trunc(amount) };
           if (prob !== null) bet["的中率"] = prob;
-          bets.push(bet);
+          (section === "#HIT" ? hitBets : bets).push(bet);
         }
       }
     }
     if (!Object.keys(pred).length) return null;
+    // 買い目は期待値重視（#BET）、的中買い目は的中重視（#HIT。ブロックがあるときだけ）
     const block = { "予想": pred, "買い目": bets };
+    if (hasHit) block["的中買い目"] = hitBets;
     // 指示文の書式例そのもの（AI の回答に記録用ブロックが無く、指示文ごとコピーしたとき）は記録しない
     if (EXAMPLE_BLOCKS.includes(JSON.stringify(block))) return null;
     return block;
@@ -1040,11 +1078,11 @@
   }
 
   // 買い目ごとの払戻（払戻の表に無い券種があれば null。取消馬を含む買い目は返還。PC版の settle_bets）
-  function settleBets(record) {
+  function settleBets(record, key) {
     const res = record["結果"], ai = record["AI"];
     const scratched = new Set(Object.entries(res["着順"]).filter(([, r]) => r === "取消" || r === "除外").map(([n]) => n));
     const rows = [];
-    for (const b of ai["買い目"]) {
+    for (const b of ai[key || "買い目"] || []) {
       let ret, status;
       // 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
       if (!b["券種"].startsWith("枠") && b["組み合わせ"].split("-").some((n) => scratched.has(n))) { ret = b["金額"]; status = "返還"; }
@@ -1190,14 +1228,24 @@
       n_races: races.length,
       n_no_ai: records.filter((r) => !r["AI"]).length,
       n_no_result: records.filter((r) => r["AI"] && !r["結果"]).length,
-      bets: null, bet_rows: [], brier: null, calib_win: null, calib_place: null,
+      bets: null, bet_rows: [], hit_bets: null, hit_bet_rows: [],
+      brier: null, calib_win: null, calib_place: null,
     };
     if (!races.length) return out;
 
+    // 回収率（期待値重視の買い目。的中重視の買い目は、それを記録したレースだけで別に。PC版の _bet_summary）
+    [out.bets, out.bet_rows] = betSummary(races, "買い目");
+    const hitRaces = races.filter((r) => "的中買い目" in r["AI"]);
+    if (hitRaces.length) [out.hit_bets, out.hit_bet_rows] = betSummary(hitRaces, "的中買い目");
+    accuracySummary(races, out);
+    return out;
+  }
+
+  function betSummary(races, key) {
     const betRows = [], perRace = [];
     let skipped = 0, unknown = 0;
     for (const r of races) {
-      const rows = settleBets(r);
+      const rows = settleBets(r, key);
       if (rows === null) { unknown++; continue; }
       if (!rows.length) { skipped++; continue; }
       for (const row of rows) betRows.push(Object.assign({ race_id: r.race_id, "日付": r["日付"], "競馬場": r["競馬場"], "レース番号": r["レース番号"] }, row));
@@ -1222,9 +1270,10 @@
       }
       bets.by_type = [...byType.entries()].map(([k, v]) => [k, ...v]);
     }
-    out.bets = bets;
-    out.bet_rows = betRows;
+    return [bets, betRows];
+  }
 
+  function accuracySummary(races, out) {
     const raceRows = races.map(horseRows).filter((rows) => rows.length);
     if (raceRows.length) {
       const brier = (rows, key) => sumOf(rows.map((x) => (x[key] - x["1着"]) ** 2));
@@ -1542,7 +1591,7 @@
 
   global.KS = {
     buildWithInfo,
-    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, PROMPT_TEXT, fmtEv, promptText, withSettings,
+    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, BET_MODES, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
     parsePatCalendar, parsePatRange,
     oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
     parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,

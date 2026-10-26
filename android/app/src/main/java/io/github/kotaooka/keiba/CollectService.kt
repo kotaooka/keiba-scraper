@@ -122,15 +122,25 @@ class CollectService : Service() {
             message = withScraper { scraper ->
                 val res = withTimeoutOrNull(2 * 60_000L) { scraper.fetchResult(raceId) } ?: return@withScraper null
                 val bets = r.optJSONArray("bets") ?: JSONArray()
+                val hitBets = r.optJSONArray("hit_bets")  // 的中重視の買い目（記録していなければ null）
                 // 答え合わせは scraper.js の settleBets（PC版と同じ計算）で行う
                 val judged = JSONObject(scraper.evalKs(
                     "(function(){const res=$res;if(!KS.resultFinished(res))return {finished:false};" +
-                        "const rows=KS.settleBets({'結果':res,'AI':{'買い目':$bets}});" +
+                        "const rec={'結果':res,'AI':{'買い目':$bets,'的中買い目':${hitBets ?: "[]"}}};" +
+                        "const rows=KS.settleBets(rec,'買い目');const hit=KS.settleBets(rec,'的中買い目');" +
                         "const top=Object.entries(res['着順']).filter(([,x])=>/^[123]$/.test(x)).sort((a,b)=>a[1]-b[1]).map(([n,x])=>x+'着 '+n+'番').join('・');" +
-                        "return {finished:true,rows:rows,top:top};})()"))
+                        "return {finished:true,rows:rows,hit:hit,top:top};})()"))
                 if (!judged.optBoolean("finished")) return@withScraper null
                 RaceResults.add(this, raceId, JSONObject(res), Jst.stamp())
-                summarize(judged.optJSONArray("rows"), judged.optString("top"))
+                val top = judged.optString("top")
+                // 期待値重視と的中重視の両方を記録していれば、両方の収支を並べる
+                val evText = summarize(judged.optJSONArray("rows"))
+                val hitText = if (hitBets != null) summarize(judged.optJSONArray("hit")) else null
+                when {
+                    hitText == null -> "$evText。結果：$top"
+                    bets.length() == 0 && r.optString("mode") == "hit" -> "$hitText。結果：$top"
+                    else -> "期待値重視 $evText／的中重視 $hitText。結果：$top"
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -150,10 +160,10 @@ class CollectService : Service() {
         }
     }
 
-    /** 通知の文：「的中 +1,440円」「不的中 −1,000円」「見送り」と1〜3着 */
-    private fun summarize(rows: JSONArray?, top: String): String = when {
-        rows == null -> "結果：$top（払戻を読めない券種がありました）"
-        rows.length() == 0 -> "見送り。結果：$top"
+    /** 通知の文：「的中 +1,440円」「不的中 −1,000円」「見送り」 */
+    private fun summarize(rows: JSONArray?): String = when {
+        rows == null -> "払戻を読めない券種あり"
+        rows.length() == 0 -> "見送り"
         else -> {
             var spent = 0; var ret = 0; var hit = 0
             for (i in 0 until rows.length()) {
@@ -163,7 +173,7 @@ class CollectService : Service() {
             }
             val d = ret - spent
             val sign = if (d >= 0) "+" else "−"
-            (if (hit > 0) "的中 $sign${"%,d".format(kotlin.math.abs(d))}円" else "不的中 −${"%,d".format(spent)}円") + "。結果：$top"
+            if (hit > 0) "的中 $sign${"%,d".format(kotlin.math.abs(d))}円" else "不的中 −${"%,d".format(spent)}円"
         }
     }
 
