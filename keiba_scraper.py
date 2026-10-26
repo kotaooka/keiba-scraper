@@ -699,7 +699,7 @@ def _row_horse_no(tr):
     選択チェックボックスの value（"..._c0_9"）を優先する"""
     chk = tr.select_one("input.HorseCheck_Select, input[type=checkbox]")
     if chk:
-        m = re.search(r"_c0_(\d+)$", chk.get("value", ""))
+        m = re.search(r"_c\d+_(\d+)$", chk.get("value", ""))
         if m:
             return m.group(1)
     tds = tr.find_all("td")
@@ -708,29 +708,63 @@ def _row_horse_no(tr):
     return None
 
 
+def fmt_odds(text, place=False):
+    """オッズのセルの文字を整える。単勝は "16.2"、複勝は "2.0 - 4.8"（下限 - 上限）。数字が無ければ "--"
+    （"---.-" などの未発表、"取消" を含む）"""
+    nums = re.findall(r"\d+\.\d+", text.replace(",", ""))
+    if not nums:
+        return "--"
+    return f"{nums[0]} - {nums[1]}" if place and len(nums) >= 2 else nums[0]
+
+
 def parse_tan_fuku(html):
-    """単勝・複勝ページの HTML から {馬番: {"単勝","複勝"}} を作る"""
+    """単勝・複勝ページの HTML から {馬番: {"単勝","複勝"}} を作る。
+    表は見出し（単勝・複勝）で見分け、見分けられなければ1つ目を単勝・2つ目を複勝とする"""
     soup = BeautifulSoup(html, "html.parser")
     tables = soup.select("table.RaceOdds_HorseList_Table")
+    kinds = [_table_kind(t) for t in tables]
+    if "単勝" in kinds and "複勝" in kinds:
+        tan_t, fuku_t = tables[kinds.index("単勝")], tables[kinds.index("複勝")]
+    else:
+        tan_t = tables[0] if tables else None
+        fuku_t = tables[1] if len(tables) >= 2 else None
 
-    def parse_table(table):
+    def parse_table(table, place):
         result = {}
+        if table is None:
+            return result
         for tr in table.select("tr"):
             no = _row_horse_no(tr)
             odds_el = tr.select_one("td.Odds")
             if no and odds_el:
-                result[no] = odds_el.get_text(" ", strip=True) or "--"
+                result[no] = fmt_odds(odds_el.get_text(" ", strip=True), place)
         return result
 
-    tan = parse_table(tables[0]) if tables else {}
-    fuku = parse_table(tables[1]) if len(tables) >= 2 else {}
+    tan = parse_table(tan_t, False)
+    fuku = parse_table(fuku_t, True)
     return {no: {"単勝": tan.get(no, "--"), "複勝": fuku.get(no, "--")} for no in set(tan) | set(fuku)}
+
+
+# 単勝・複勝の両方の表にオッズの数字が入るまで待つ（オッズはページを開いたあとに埋まるため、
+# 単勝の表だけ見ていると、複勝が空のうちに読んでしまう）
+_TANFUKU_READY_JS = """() => {
+    const t = [...document.querySelectorAll('table.RaceOdds_HorseList_Table')];
+    if (t.length < 2) return false;
+    const n = (x) => [...x.querySelectorAll('td.Odds')].filter(e => /\\d+\\.\\d/.test(e.innerText)).length;
+    const a = n(t[0]), b = n(t[1]);
+    return a > 0 && b >= a;
+}"""
 
 
 def scrape_tan_fuku(page, url):
     html = fetch_page(page, url, "table.RaceOdds_HorseList_Table td.Odds")
     if not html:
         return {}
+    try:
+        page.wait_for_function(_TANFUKU_READY_JS, timeout=TIMEOUT_SELECTOR)
+        html = page.content()
+    except PlaywrightTimeout:
+        print("  複勝オッズの表示待ちがタイムアウト（取得できた分で続行）")
     odds = parse_tan_fuku(html)
     print(f"  単複オッズ: {len(odds)}頭取得")
     return odds
@@ -786,7 +820,7 @@ def axis_values(soup):
 
 # 人気順の表を見分けるための券種名（表の直前の見出しや表の1行目に出る）
 _BET_LABELS = {"3連複": "3連複", "三連複": "3連複", "3連単": "3連単", "三連単": "3連単",
-               "馬単": "馬単", "馬連": "馬連", "ワイド": "ワイド", "単勝": "単勝", "枠連": "枠連", "枠単": "枠単"}
+               "馬単": "馬単", "馬連": "馬連", "ワイド": "ワイド", "単勝": "単勝", "複勝": "複勝", "枠連": "枠連", "枠単": "枠単"}
 
 
 def _table_kind(table):

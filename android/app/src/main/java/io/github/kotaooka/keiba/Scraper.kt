@@ -215,7 +215,8 @@ class Scraper(
         step("tanfuku", "run", "")
         var tanFuku = "{}"
         if (load(oddsUrl + "b1")) {
-            waitFor("document.querySelector('table.RaceOdds_HorseList_Table td.Odds')")
+            // 単勝・複勝の両方にオッズの数字が入るまで待つ（複勝が空のうちに読まないため）
+            if (!waitFor("KS.tanfukuReady(document)")) log("  複勝オッズの表示待ちがタイムアウト（取得できた分で続行）")
             tanFuku = call("KS.parseTanFuku(document)")
             val n = count(tanFuku)
             log("  単複オッズ: ${n}頭取得")

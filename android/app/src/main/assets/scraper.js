@@ -505,7 +505,7 @@
   function rowHorseNo(tr) {
     const chk = tr.querySelector("input.HorseCheck_Select, input[type=checkbox]");
     if (chk) {
-      const m = (chk.getAttribute("value") || "").match(/_c0_(\d+)$/);
+      const m = (chk.getAttribute("value") || "").match(/_c\d+_(\d+)$/);
       if (m) return m[1];
     }
     const tds = tr.querySelectorAll("td");
@@ -513,19 +513,31 @@
     return null;
   }
 
+  // オッズのセルの文字を整える（PC版の fmt_odds と同じ）。単勝 "16.2"、複勝 "2.0 - 4.8"、数字が無ければ "--"
+  function fmtOdds(text, place) {
+    const nums = String(text).replace(/,/g, "").match(/\d+\.\d+/g);
+    if (!nums) return "--";
+    return place && nums.length >= 2 ? `${nums[0]} - ${nums[1]}` : nums[0];
+  }
+
+  // 表は見出しで見分け、見分けられなければ1つ目を単勝・2つ目を複勝とする（PC版の parse_tan_fuku と同じ）
   function parseTanFuku(doc) {
-    const tables = doc.querySelectorAll("table.RaceOdds_HorseList_Table");
-    const parseTable = (table) => {
+    const tables = [...doc.querySelectorAll("table.RaceOdds_HorseList_Table")];
+    const kinds = tables.map((t) => tableKind(doc, t));
+    let tanT = tables[0] || null, fukuT = tables[1] || null;
+    if (kinds.includes("単勝") && kinds.includes("複勝")) { tanT = tables[kinds.indexOf("単勝")]; fukuT = tables[kinds.indexOf("複勝")]; }
+    const parseTable = (table, place) => {
       const result = {};
+      if (!table) return result;
       for (const tr of table.querySelectorAll("tr")) {
         const no = rowHorseNo(tr);
         const oddsEl = tr.querySelector("td.Odds");
-        if (no && oddsEl) result[no] = gt(oddsEl, " ") || "--";
+        if (no && oddsEl) result[no] = fmtOdds(gt(oddsEl, " "), place);
       }
       return result;
     };
-    const tan = tables.length ? parseTable(tables[0]) : {};
-    const fuku = tables.length >= 2 ? parseTable(tables[1]) : {};
+    const tan = parseTable(tanT, false);
+    const fuku = parseTable(fukuT, true);
     const out = {};
     for (const no of new Set([...Object.keys(tan), ...Object.keys(fuku)])) {
       out[no] = { "単勝": tan[no] || "--", "複勝": fuku[no] || "--" };
@@ -573,7 +585,16 @@
 
   // 人気順の表を見分けるための券種名（PC版の _BET_LABELS と同じ）
   const BET_LABELS = { "3連複": "3連複", "三連複": "3連複", "3連単": "3連単", "三連単": "3連単",
-    "馬単": "馬単", "馬連": "馬連", "ワイド": "ワイド", "単勝": "単勝", "枠連": "枠連", "枠単": "枠単" };
+    "馬単": "馬単", "馬連": "馬連", "ワイド": "ワイド", "単勝": "単勝", "複勝": "複勝", "枠連": "枠連", "枠単": "枠単" };
+
+  // 単勝・複勝の両方の表にオッズの数字が入ったか（PC版の _TANFUKU_READY_JS と同じ）
+  function tanfukuReady(doc) {
+    const t = [...doc.querySelectorAll("table.RaceOdds_HorseList_Table")];
+    if (t.length < 2) return false;
+    const n = (x) => [...x.querySelectorAll("td.Odds")].filter((e) => /\d+\.\d/.test(e.innerText)).length;
+    const a = n(t[0]), b = n(t[1]);
+    return a > 0 && b >= a;
+  }
 
   // 表の直前の文字（最大40個の文字列）と表の1行目から、どの券種の表かを決める（PC版の _table_kind と同じ）
   function tableKind(doc, table) {
@@ -919,7 +940,7 @@
     parseRaceList, nextRaceIndex,
     parseShutuba, parseRaceInfo, parseKyakuType,
     keibagoUrl, parseKeibago,
-    parseTanFuku, extractCombos, topCombos, axisValues, parseNinkiSanren, comboSignature, comboChanged, selectAxis,
+    parseTanFuku, fmtOdds, tanfukuReady, extractCombos, topCombos, axisValues, parseNinkiSanren, comboSignature, comboChanged, selectAxis,
     mergeData, addDerivedFields, addMarketProb, checkData, formatForAi, build,
   };
 })(typeof window !== "undefined" ? window : globalThis);
