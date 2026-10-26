@@ -83,7 +83,8 @@ object Reservations {
             val kind = notify.getString(i)
             val before = NOTIFY_BEFORE[kind] ?: continue
             val at = start - before * 60_000L
-            if (at > now) setAlarm(ctx, r, kind, at, exact = false)
+            // 「発走5分前」が発走後に届かないよう、許可があれば正確な時刻で起こす
+            if (at > now) setAlarm(ctx, r, kind, at, exact = exactAllowed(ctx))
         }
         val auto = r.optInt("auto", 0)
         if (auto > 0) {
@@ -202,7 +203,7 @@ object CollectLock {
 
 /**
  * 結果の自動取得の予約。AI の回答を記録したレースについて、発走の15分後に結果ページを1回読み、
- * 的中・不的中を通知する。未確定なら15分おきに最大3回まで読み直す。
+ * 的中・不的中を通知する。未確定なら15分おきに読み直す（最初の1回を含めて最大3回読む）。
  * 1件は {key, race_id, date, venue, no, title, time, start(ミリ秒), bets:[{券種,組み合わせ,金額}], tries}
  */
 object ResultChecks {
@@ -233,6 +234,10 @@ object ResultChecks {
         save(ctx, others + r)
         schedule(ctx, r, at)
     }
+
+    /** まだ予約が残っているか */
+    @Synchronized
+    fun has(ctx: Context, key: String): Boolean = pruned(ctx).any { it.optString("key") == key }
 
     @Synchronized
     fun remove(ctx: Context, key: String) {

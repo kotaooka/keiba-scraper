@@ -2,6 +2,8 @@
 rem Run keiba_scraper.py inside the virtual environment.
 rem Usage: run.bat                 (interactive)
 rem        run.bat [venue] [race no] [date]   e.g. run.bat 35 5 1025
+rem        run.bat import <file.json>     (or drag the exported .json onto run.bat)
+set "KEIBA_CWD=%CD%"
 cd /d "%~dp0"
 chcp 65001 > nul
 

@@ -81,6 +81,12 @@ class Scraper(
             override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
                 if (request.isForMainFrame) pageLoaded?.complete(error.description?.toString() ?: "読み込みエラー")
             }
+
+            // ページを描く部分（レンダラー）が落ちても、アプリごと落ちないようにする
+            override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                pageLoaded?.complete("ページの表示が止まりました")
+                return true
+            }
         }
     }
 

@@ -9,6 +9,7 @@
 
 import json
 import math
+import os
 import random
 import re
 import subprocess
@@ -94,6 +95,8 @@ PROMPT_TEXT = """
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
+・オッズが「--」の馬の単勝・複勝と、オッズを取得できなかった券種は選ばないでください。
+・単勝が発売前の予想オッズ（「データの欠損」に書いてあります）のときは、期待値は参考値として計算し、その旨を【前提】に書いてください。
 
 ■ 手順
 1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
@@ -117,7 +120,7 @@ PROMPT_TEXT = """
 3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
 {BET_OUTPUT}
 5. 【総評】50字以内
-6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、{BLOCK_NOTE}金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+6. 【記録用】最後に次の形式のブロックを1つのコードブロックにまとめて出力する（ブロックを分けない）。#PRED は見送りのときも全頭分出す。{BLOCK_NOTE}買い目の列はこの4列だけ（使用オッズ・期待値は入れない）。金額は100円単位で、桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
 #PRED
 馬番,推定勝率,推定複勝率
 1,12.5,35.0
@@ -761,7 +764,7 @@ def parse_tan_fuku(html):
     tan = parse_table(tan_t, False)
     fuku = parse_table(fuku_t, True)
     # 発売前は単勝の表が netkeiba の「予想オッズ」（実際の投票ではない）になり、複勝の表は無い
-    predicted = _is_predicted(tan_t)
+    predicted = len(tables) == 1 and _is_predicted(tan_t)
     out = {no: {"単勝": tan.get(no, "--"), "複勝": fuku.get(no, "--")} for no in set(tan) | set(fuku)}
     if predicted:
         for v in out.values():
@@ -1122,34 +1125,34 @@ def fmt_ev(v):
 # 買い目の出し方ごとの指示文の部品（Android版の MODE_TEXT と同じ文面）
 _BET_BLOCK_EV = "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5"
 _BET_BLOCK_HIT = "#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
+_STEP_HEAD = ("5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、"
+              "ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。")
 MODE_TEXT = {
     "ev": {
         "GOAL": "・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。\n"
                 "・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
-        "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。"
-                    "期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+        "BET_STEP": _STEP_HEAD + "期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
         "BET_OUTPUT": "4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-        "BLOCK_NOTE": "#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。",
+        "BLOCK_NOTE": "#BET は、見送りのときも「#BET」と列名の2行は必ず出す。#BET の推定的中率は【買い目】の表と同じ値。",
         "BET_BLOCK": _BET_BLOCK_EV,
     },
     "hit": {
-        "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上の買い目から選び、その中で期待値の高いものを優先してください。\n"
-                "・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
-        "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。"
-                    "推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+        "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選んでください。\n"
+                "・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。条件を満たす買い目がなければ「見送り」と答えてください。",
+        "BET_STEP": _STEP_HEAD + "推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
         "BET_OUTPUT": "4. 【買い目（的中重視）】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-        "BLOCK_NOTE": "#HIT は見出し行だけにする。#HIT の推定的中率は【買い目（的中重視）】の表の推定的中率と同じ値。",
+        "BLOCK_NOTE": "#HIT は、見送りのときも「#HIT」と列名の2行は必ず出す。#HIT の推定的中率は【買い目（的中重視）】の表と同じ値。",
         "BET_BLOCK": _BET_BLOCK_HIT,
     },
     "both": {
         "GOAL": "・期待値重視と的中重視の2通りの買い目を、別々に出してください。予算はそれぞれ{BUDGET}円、最大{MAX_BETS}点、各100円単位。\n"
                 "・期待値重視：目的は回収率（期待値）の最大化。期待値が{EV_MIN}以上の買い目がなければ「見送り」。\n"
-                "・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目から選ぶ。なければ「見送り」。",
-        "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。\n"
-                    "   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。\n"
-                    "   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+                "・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選ぶ。なければ「見送り」。",
+        "BET_STEP": _STEP_HEAD + "\n"
+                    "   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。\n"
+                    "   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
         "BET_OUTPUT": "4. 【買い目（期待値重視）】と【買い目（的中重視）】：それぞれ表形式で 券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-        "BLOCK_NOTE": "見送りの買い目のブロックは見出し行だけにする。#BET は期待値重視、#HIT は的中重視の買い目で、推定的中率はそれぞれの表の推定的中率と同じ値。",
+        "BLOCK_NOTE": "#BET（期待値重視）と #HIT（的中重視）は、見送りのときも「#BET」「#HIT」の行と列名の行は必ず出す。推定的中率はそれぞれの表と同じ値。",
         "BET_BLOCK": _BET_BLOCK_EV + "\n" + _BET_BLOCK_HIT,
     },
 }
@@ -1222,7 +1225,7 @@ def speed_table(horses, keibajo, race_info):
 
 def format_speed(st):
     """speed_table の結果を AI へ送るテキストの一節にする"""
-    lines = ["", f"【同条件の走破タイム】{st['条件']}（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速。速い順）"]
+    lines = ["", f"【同条件の走破タイム】{st['条件']}（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速。速い順。馬場状態は混ざっているので馬場欄も見て比べる）"]
     top = st["rows"][0]["sec"]
     for i, x in enumerate(st["rows"], 1):
         diff = "最速" if i == 1 else f"+{x['sec'] - top:.1f}秒"
@@ -1320,6 +1323,14 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
             lines.append(" ".join(pad(r.get(c, ""), w, a) for c, w, a in pcols))
         lines.append("")
 
+    st = speed_table(horses, keibajo, ri)
+    if st:
+        lines += format_speed(st)
+
+    running = [h for h in horses if not h.get("取消")]
+    if running and all(h.get("複勝") in ("", "--", None) for h in running):
+        lines += ["", "【複勝】オッズを取得できず（発売前か、取得に失敗）。複勝は選ばないこと"]
+
     for label, combos in (("ワイド", wide_top), ("三連複", sanren_top)):
         if combos:
             lines += ["", f"【{label} 人気上位】"]
@@ -1327,10 +1338,6 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
                 lines.append(f"  {i:2d}位  {pad(c['組み合わせ'], 8)}  {c['オッズ']}倍")
         else:
             lines += ["", f"【{label} 人気上位】取得できず（発売前か、取得に失敗）。{label}は選ばないこと"]
-
-    st = speed_table(horses, keibajo, ri)
-    if st:
-        lines += format_speed(st)
 
     notes = odds_notes(horses)
     if notes:
@@ -1415,7 +1422,21 @@ def collect_race(page, keibajo_name, race_date, race_no):
         print("\nクリップボードへのコピーに失敗しました。上のファイルを開いてコピーしてください。")
 
     record = new_record(race_id, keibajo_name, race_date, race_no, race_info, merged, payout_rate)
-    save_record(record)
+    if any(h.get("単勝_予想") for h in merged if not h.get("取消")):
+        record["予想オッズ"] = True
+    old = None
+    if record_path(race_id).exists():
+        try:
+            old = json.loads(record_path(race_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            old = None
+    if old and (old.get("AI") or old.get("結果")):
+        # 記録済みのレースを取り直したときは、新しい AI の回答を記録したときだけ置き換える（取得済みの結果は残す）
+        print("  このレースは記録済みです。新しい AI の回答を記録したときだけ、今回のオッズで記録し直します。")
+        if old.get("結果"):
+            record["結果"] = old["結果"]
+    else:
+        save_record(record)
     ask_ai_answer(record, path.with_name(path.stem + "_ai.txt"), text)
 
 
@@ -1525,57 +1546,90 @@ def combo_key(bet_type, numbers):
     return "-".join(nums)
 
 
+def _trim(t):
+    """前後の空白（BOM などを含む）を除く。Android版の trimAll と同じ文字を除く"""
+    return re.sub(r"^[\s\ufeff]+|[\s\ufeff]+$", "", t)
+
+
+def _amount_ok(v):
+    return v is not None and v >= 100 and v % 100 == 0
+
+
+def _grouped(parts):
+    """「1」「000」のように桁区切りで分かれた金額を1つの数にする（区切りが正しくなければ None）"""
+    if len(parts) == 1:
+        return _num(parts[0])
+    if re.fullmatch(r"\d{1,3}", parts[0]) and all(re.fullmatch(r"\d{3}", x) for x in parts[1:]):
+        return _num("".join(parts))
+    return None
+
+
 def _amount_and_prob(rest):
     """#BET の3列目以降（「500」「500,18.5」「1,000,18.5」「1,000」）を (金額, 推定的中率%) にする。
-    最後の列を的中率とみて、残りが100円単位の金額として読めて的中率が0〜100なら採る。
-    そうでなければ全体を金額として読む（推定的中率の列が無い回答・桁区切りの付いた金額）"""
-    parts = [c.strip() for c in re.split(r"[,，\t]", rest)]
+    1. 最後の列が 0〜100 の的中率で、残りが100円単位の金額として読めれば、それを採る
+    2. 全体が桁区切りの金額（「1,000」など）なら、それを金額にする（的中率なし）
+    3. どちらでもなければ、最初の列を金額、次の列が 0〜100 なら的中率とし、余分な列は使わない"""
+    parts = [_trim(c) for c in re.split(r"[,，\t]", rest.translate(_ZEN_DIGITS))]
+    prob_ok = lambda v: v is not None and 0 < v <= 100
     if len(parts) >= 2:
-        amount, prob = _num("".join(parts[:-1])), _num(parts[-1])
-        if amount is not None and amount >= 100 and amount % 100 == 0 and prob is not None and 0 < prob <= 100:
+        amount, prob = _grouped(parts[:-1]), _num(parts[-1])
+        if _amount_ok(amount) and prob_ok(prob):
             return amount, prob
-    return _num("".join(parts)), None
+        g = _grouped(parts)
+        if _amount_ok(g) and (not _amount_ok(_num(parts[0])) or all(x == "000" for x in parts[1:])):
+            return g, None
+        prob = _num(parts[1])
+        return _num(parts[0]), prob if prob_ok(prob) else None
+    return _num(parts[0]), None
+
+
+def _block_header(ln):
+    """記録用ブロックの見出し行なら "PRED"・"BET"・"HIT" を返す（「#bet」「#BET:」「#BET（期待値重視）」も読む）"""
+    m = re.match(r"#(PRED|BET|HIT)(?![A-Za-z0-9_])", ln, re.IGNORECASE)
+    return m.group(1).upper() if m else None
 
 
 def parse_ai_block(text):
-    """AI の回答から #PRED と #BET のブロックを読む。#PRED がなければ None を返す。
-    返り値: {"予想": {馬番: {"勝率": %, "複勝率": %}}, "買い目": [{"券種","組み合わせ","金額"}]}"""
-    lines = [ln.strip().lstrip("\ufeff").strip() for ln in text.replace("\r", "").split("\n")]
-    if "#PRED" not in lines:
+    """AI の回答から #PRED・#BET・#HIT のブロックを読む。#PRED がなければ None を返す。
+    返り値: {"予想": {馬番: {"勝率": %, "複勝率": %}}, "買い目": [...], "的中買い目": [...]（#HIT があるときだけ）}"""
+    lines = [_trim(ln) for ln in text.replace("\r", "").split("\n")]
+    heads = [_block_header(ln) for ln in lines]
+    if "PRED" not in heads:
         return None
     # 指示文の書式例にも #PRED があるので、最後に出てくる #PRED から読む
-    lines = lines[len(lines) - 1 - lines[::-1].index("#PRED"):]
+    start = len(heads) - 1 - heads[::-1].index("PRED")
     pred, bets, hit_bets, section = {}, [], [], None
     has_hit = False
-    for ln in lines:
-        if ln in ("#PRED", "#BET", "#HIT"):
-            section = ln
-            has_hit = has_hit or ln == "#HIT"
+    for ln, head in zip(lines[start:], heads[start:]):
+        if head:
+            section = head
+            has_hit = has_hit or head == "HIT"
             continue
-        if not ln or ln.startswith("```"):
-            if section in ("#BET", "#HIT") and ln.startswith("```"):
-                break
+        if ln.startswith("```"):
+            section = None  # コードブロックの終わり。次の見出しまで読まない（#HIT が別のブロックにあっても読む）
             continue
-        if section == "#PRED":
-            cells = [c.strip() for c in re.split(r"[,，\t]", ln)]
+        if not ln:
+            continue
+        if section == "PRED":
+            cells = [_trim(c) for c in re.split(r"[,，\t]", ln)]
             if len(cells) >= 3 and re.fullmatch(r"[0-9０-９]+", cells[0]):
                 win, place = _num(cells[1]), _num(cells[2])
                 if win is not None and place is not None:
                     pred[str(int(cells[0].translate(_ZEN_DIGITS)))] = {"勝率": win, "複勝率": place}
-        elif section in ("#BET", "#HIT"):
+        elif section in ("BET", "HIT"):
             # 金額の「1,000」の桁区切りで切れないよう、区切りは最初の2つだけで分ける
-            cells = [c.strip() for c in re.split(r"[,，\t]", ln, maxsplit=2)]
+            cells = [_trim(c) for c in re.split(r"[,，\t]", ln, maxsplit=2)]
             if len(cells) < 3:
                 continue
             bet_type = normalize_bet_type(cells[0])
             nums = re.findall(r"[0-9]+", cells[1].translate(_ZEN_DIGITS))
             amount, prob = _amount_and_prob(cells[2])
-            # 馬番の数が券種と合わない行（「ワイド,3,100」など）は読まない
-            if bet_type in BET_SPECS and len(nums) == BET_SPECS[bet_type][0] and amount and amount > 0:
+            # 馬番の数が券種と合わない行（「ワイド,3,100」など）や、100円未満の金額は読まない
+            if bet_type in BET_SPECS and len(nums) == BET_SPECS[bet_type][0] and amount is not None and int(amount) >= 100:
                 bet = {"券種": bet_type, "組み合わせ": combo_key(bet_type, nums), "金額": int(amount)}
                 if prob is not None:
                     bet["的中率"] = prob
-                (hit_bets if section == "#HIT" else bets).append(bet)
+                (hit_bets if section == "HIT" else bets).append(bet)
     if not pred:
         return None
     # 買い目は期待値重視（#BET）、的中買い目は的中重視（#HIT。ブロックがあるときだけ）
@@ -1620,13 +1674,17 @@ def ask_ai_answer(record, ai_text_path, scraped_text=None):
         if abs(total - 100) > 5:
             print(f"  ※推定勝率の合計が {total:.1f}% です（100% から外れています）。そのまま記録します。")
         record["AI"] = {**parsed, "記録時刻": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+        # Android版と同じく、記録したときの買い方と条件を残す（集計で期待値重視・的中重視を分けるため）
+        record.update({"買い方": BET_MODE, "EV_MIN": EV_MIN, "HIT_MIN": HIT_MIN, "HIT_EV_MIN": HIT_EV_MIN, "予算": BUDGET})
         save_record(record)
         ai_text_path.write_text(text, encoding="utf-8")
         def desc(bets):
             return " / ".join(f"{b['券種']} {b['組み合わせ']}：{b['金額']}円" for b in bets) or "見送り"
-        msg = f"  記録しました: {len(parsed['予想'])}頭の予想、期待値重視 {desc(parsed['買い目'])}"
-        if "的中買い目" in parsed:
-            msg += f"、的中重視 {desc(parsed['的中買い目'])}"
+        msg = f"  記録しました: {len(parsed['予想'])}頭の予想"
+        if BET_MODE != "hit":
+            msg += f"、期待値重視 {desc(parsed['買い目'])}"
+        if BET_MODE != "ev":
+            msg += f"、的中重視 {desc(parsed.get('的中買い目') or [])}"
         print(msg)
         return True
 
@@ -1825,8 +1883,11 @@ def compute_summary(records):
         return out
 
     # ---- 回収率（期待値重視の買い目。的中重視の買い目は、それを記録したレースだけで別に） ----
-    out["bets"], out["bet_rows"] = _bet_summary(races, "買い目")
-    hit_races = [r for r in races if "的中買い目" in r["AI"]]
+    # 的中重視だけで記録したレースは期待値重視に数えない。的中重視は #HIT を記録したか、買い方が的中重視・両方のレース
+    ev_races = [r for r in races if r.get("買い方") != "hit"]
+    if ev_races:
+        out["bets"], out["bet_rows"] = _bet_summary(ev_races, "買い目")
+    hit_races = [r for r in races if isinstance(r["AI"].get("的中買い目"), list) or r.get("買い方") in ("hit", "both")]
     if hit_races:
         out["hit_bets"], out["hit_bet_rows"] = _bet_summary(hit_races, "的中買い目")
 
@@ -1989,8 +2050,12 @@ def summarize(records):
 def run_import(path):
     """Android版で書き出した記録（JSON の配列）を output/records/ に取り込む。
     同じ race_id の記録が既にあれば、AI の回答・結果のうち手元に無いほうだけを足す"""
+    p0 = Path(path)
+    # run.bat は自分のフォルダに移ってから動くので、相対パスは run.bat を実行したフォルダから探す
+    if not p0.is_absolute() and not p0.exists() and os.environ.get("KEIBA_CWD"):
+        p0 = Path(os.environ["KEIBA_CWD"]) / p0
     try:
-        items = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+        items = json.loads(p0.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as e:
         print(f"読めませんでした: {path}（{e}）")
         return
@@ -2104,11 +2169,18 @@ def main():
     print("=" * 60)
 
     cmd = sys.argv[1].lower() if len(sys.argv) >= 2 else ""
+    # run.bat に書き出したファイル（.json）をドラッグしたときは取り込む
+    if cmd.endswith(".json"):
+        run_import(sys.argv[1])
+        return
     if cmd in ("verify", "検証"):
         run_verify()
         return
     if cmd in ("record", "記録"):
-        run_record()
+        try:
+            run_record()
+        except KeyboardInterrupt:
+            print("\n中断しました。")
         return
     if cmd in ("import", "取り込み"):
         if len(sys.argv) < 3:

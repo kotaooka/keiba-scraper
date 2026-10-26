@@ -44,6 +44,8 @@
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
+・オッズが「--」の馬の単勝・複勝と、オッズを取得できなかった券種は選ばないでください。
+・単勝が発売前の予想オッズ（「データの欠損」に書いてあります）のときは、期待値は参考値として計算し、その旨を【前提】に書いてください。
 
 ■ 手順
 1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
@@ -67,7 +69,7 @@
 3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
 {BET_OUTPUT}
 5. 【総評】50字以内
-6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、{BLOCK_NOTE}金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+6. 【記録用】最後に次の形式のブロックを1つのコードブロックにまとめて出力する（ブロックを分けない）。#PRED は見送りのときも全頭分出す。{BLOCK_NOTE}買い目の列はこの4列だけ（使用オッズ・期待値は入れない）。金額は100円単位で、桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
 #PRED
 馬番,推定勝率,推定複勝率
 1,12.5,35.0
@@ -556,7 +558,7 @@
     const fuku = parseTable(fukuT, true);
     // 発売前は単勝の表が netkeiba の「予想オッズ」（実際の投票ではない）になり、複勝の表は無い（PC版の _is_predicted）
     const firstRow = tanT && tanT.querySelector("tr");
-    const predicted = !!firstRow && rawSep(firstRow).includes("予想");
+    const predicted = tables.length === 1 && !!firstRow && rawSep(firstRow).includes("予想");
     const out = {};
     for (const no of new Set([...Object.keys(tan), ...Object.keys(fuku)])) {
       out[no] = { "単勝": tan[no] || "--", "複勝": fuku[no] || "--" };
@@ -761,13 +763,14 @@
 
   // 市場勝率(%)を h["市場勝率"] に入れ、単勝の払戻率の目安を返す（全頭そろわなければ null）
   function addMarketProb(horses) {
-    const inv = {};
+    const inv = {}, order = [];
     for (const h of horses) {
       if (h["取消"]) continue;
       const o = Number(h["単勝"]);
-      if (h["単勝"] && !isNaN(o) && o > 0) inv[h["馬番"]] = 1 / o;
+      if (h["単勝"] && !isNaN(o) && o > 0) { if (!(h["馬番"] in inv)) order.push(h["馬番"]); inv[h["馬番"]] = 1 / o; }
     }
-    const total = Object.values(inv).reduce((s, v) => s + v, 0);
+    // 足す順で小数の最後の桁が変わるので、PC版と同じく出馬表の順に足す
+    const total = order.reduce((s, k) => s + inv[k], 0);
     for (const h of horses) {
       h["市場勝率"] = total && h["馬番"] in inv ? inv[h["馬番"]] / total * 100 : null;
     }
@@ -866,23 +869,23 @@
   const MODE_TEXT = {
     "ev": {
       "GOAL": "・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
-      "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
       "BET_OUTPUT": "4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-      "BLOCK_NOTE": "#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。",
+      "BLOCK_NOTE": "#BET は、見送りのときも「#BET」と列名の2行は必ず出す。#BET の推定的中率は【買い目】の表と同じ値。",
       "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5"
     },
     "hit": {
-      "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上の買い目から選び、その中で期待値の高いものを優先してください。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
-      "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+      "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選んでください。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。条件を満たす買い目がなければ「見送り」と答えてください。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
       "BET_OUTPUT": "4. 【買い目（的中重視）】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-      "BLOCK_NOTE": "#HIT は見出し行だけにする。#HIT の推定的中率は【買い目（的中重視）】の表の推定的中率と同じ値。",
+      "BLOCK_NOTE": "#HIT は、見送りのときも「#HIT」と列名の2行は必ず出す。#HIT の推定的中率は【買い目（的中重視）】の表と同じ値。",
       "BET_BLOCK": "#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
     },
     "both": {
-      "GOAL": "・期待値重視と的中重視の2通りの買い目を、別々に出してください。予算はそれぞれ{BUDGET}円、最大{MAX_BETS}点、各100円単位。\n・期待値重視：目的は回収率（期待値）の最大化。期待値が{EV_MIN}以上の買い目がなければ「見送り」。\n・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上で期待値が{HIT_EV_MIN}以上の買い目から選ぶ。なければ「見送り」。",
-      "BET_STEP": "5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。\n   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。\n   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する。",
+      "GOAL": "・期待値重視と的中重視の2通りの買い目を、別々に出してください。予算はそれぞれ{BUDGET}円、最大{MAX_BETS}点、各100円単位。\n・期待値重視：目的は回収率（期待値）の最大化。期待値が{EV_MIN}以上の買い目がなければ「見送り」。\n・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選ぶ。なければ「見送り」。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。\n   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。\n   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
       "BET_OUTPUT": "4. 【買い目（期待値重視）】と【買い目（的中重視）】：それぞれ表形式で 券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-      "BLOCK_NOTE": "見送りの買い目のブロックは見出し行だけにする。#BET は期待値重視、#HIT は的中重視の買い目で、推定的中率はそれぞれの表の推定的中率と同じ値。",
+      "BLOCK_NOTE": "#BET（期待値重視）と #HIT（的中重視）は、見送りのときも「#BET」「#HIT」の行と列名の行は必ず出す。推定的中率はそれぞれの表と同じ値。",
       "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5\n#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
     }
   };
@@ -947,49 +950,70 @@
     JSON.stringify({ "予想": { "1": { "勝率": 12.5, "複勝率": 35 } }, "買い目": [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500 }] }),
   ];
 
-  // #BET の3列目以降を [金額, 推定的中率%] にする（PC版の _amount_and_prob）
-  function amountAndProb(rest) {
-    const parts = String(rest).split(/[,，\t]/).map((c) => c.trim());
-    if (parts.length >= 2) {
-      const amount = num(parts.slice(0, -1).join("")), prob = num(parts[parts.length - 1]);
-      if (amount !== null && amount >= 100 && amount % 100 === 0 && prob !== null && prob > 0 && prob <= 100) return [amount, prob];
-    }
-    return [num(parts.join("")), null];
+  // 前後の空白（BOM などを含む）を除く（PC版の _trim と同じ文字）
+  const trimAll = (t) => String(t).replace(/^[\s\x1c-\x1f\x85]+|[\s\x1c-\x1f\x85]+$/g, "");
+  const halfNum = (t) => toHalf(t).replace(/．/g, ".").replace(/－/g, "-").replace(/＋/g, "+");
+  const amountOk = (v) => v !== null && v >= 100 && v % 100 === 0;
+  // 「1」「000」のように桁区切りで分かれた金額を1つの数に（区切りが正しくなければ null。PC版の _grouped）
+  function grouped(parts) {
+    if (parts.length === 1) return num(parts[0]);
+    if (/^\d{1,3}$/.test(parts[0]) && parts.slice(1).every((x) => /^\d{3}$/.test(x))) return num(parts.join(""));
+    return null;
   }
 
-  // AI の回答から #PRED と #BET を読む。#PRED が無ければ null（PC版の parse_ai_block）
+  // #BET の3列目以降を [金額, 推定的中率%] にする（PC版の _amount_and_prob と同じ手順）
+  function amountAndProb(rest) {
+    const parts = halfNum(rest).split(/[,，\t]/).map(trimAll);
+    const probOk = (v) => v !== null && v > 0 && v <= 100;
+    if (parts.length >= 2) {
+      const amount = grouped(parts.slice(0, -1)), prob = num(parts[parts.length - 1]);
+      if (amountOk(amount) && probOk(prob)) return [amount, prob];
+      const g = grouped(parts);
+      if (amountOk(g) && (!amountOk(num(parts[0])) || parts.slice(1).every((x) => x === "000"))) return [g, null];
+      const p1 = num(parts[1]);
+      return [num(parts[0]), probOk(p1) ? p1 : null];
+    }
+    return [num(parts[0]), null];
+  }
+
+  // 記録用ブロックの見出し行なら "PRED"・"BET"・"HIT"（PC版の _block_header）
+  function blockHeader(ln) {
+    const m = /^#(PRED|BET|HIT)(?![A-Za-z0-9_])/i.exec(ln);
+    return m ? m[1].toUpperCase() : null;
+  }
+
+  // AI の回答から #PRED・#BET・#HIT を読む。#PRED が無ければ null（PC版の parse_ai_block）
   function parseAiBlock(text) {
-    let lines = String(text).replace(/\r/g, "").split("\n").map((l) => l.trim());
-    if (!lines.includes("#PRED")) return null;
-    // 指示文の書式例にも #PRED があるので、最後の #PRED から読む
-    lines = lines.slice(lines.lastIndexOf("#PRED"));
+    const lines = String(text).replace(/\r/g, "").split("\n").map(trimAll);
+    const heads = lines.map(blockHeader);
+    const start = heads.lastIndexOf("PRED");
+    if (start < 0) return null;
     const pred = {}, bets = [], hitBets = [];
     let section = null, hasHit = false;
-    for (const ln of lines) {
-      if (ln === "#PRED" || ln === "#BET" || ln === "#HIT") { section = ln; hasHit = hasHit || ln === "#HIT"; continue; }
-      if (!ln || ln.startsWith("```")) {
-        if ((section === "#BET" || section === "#HIT") && ln.startsWith("```")) break;
-        continue;
-      }
-      if (section === "#PRED") {
-        const cells = ln.split(/[,，\t]/).map((c) => c.trim());
+    for (let i = start; i < lines.length; i++) {
+      const ln = lines[i], head = heads[i];
+      if (head) { section = head; hasHit = hasHit || head === "HIT"; continue; }
+      if (ln.startsWith("```")) { section = null; continue; }  // コードブロックの終わり。次の見出しまで読まない
+      if (!ln) continue;
+      if (section === "PRED") {
+        const cells = ln.split(/[,，\t]/).map(trimAll);
         if (cells.length >= 3 && /^[0-9０-９]+$/.test(cells[0])) {
           const win = num(cells[1]), place = num(cells[2]);
           if (win !== null && place !== null) pred[String(parseInt(toHalf(cells[0]), 10))] = { "勝率": win, "複勝率": place };
         }
-      } else if (section === "#BET" || section === "#HIT") {
+      } else if (section === "BET" || section === "HIT") {
         // 金額の「1,000」の桁区切りで切れないよう、区切りは最初の2つだけで分ける（PC版の maxsplit=2）
         const m = /^([^,，\t]*)[,，\t]([^,，\t]*)[,，\t]([\s\S]*)$/.exec(ln);
         if (!m) continue;
-        const cells = [m[1], m[2], m[3]].map((c) => c.trim());
+        const cells = [m[1], m[2], m[3]].map(trimAll);
         const betType = normalizeBetType(cells[0]);
         const nums = toHalf(cells[1]).match(/[0-9]+/g) || [];
         const [amount, prob] = amountAndProb(cells[2]);
-        // 馬番の数が券種と合わない行は読まない
-        if (betType in BET_SPECS && nums.length === BET_SPECS[betType][0] && amount && amount > 0) {
+        // 馬番の数が券種と合わない行や、100円未満の金額は読まない
+        if (betType in BET_SPECS && nums.length === BET_SPECS[betType][0] && amount !== null && Math.trunc(amount) >= 100) {
           const bet = { "券種": betType, "組み合わせ": comboKey(betType, nums), "金額": Math.trunc(amount) };
           if (prob !== null) bet["的中率"] = prob;
-          (section === "#HIT" ? hitBets : bets).push(bet);
+          (section === "HIT" ? hitBets : bets).push(bet);
         }
       }
     }
@@ -1234,8 +1258,10 @@
     if (!races.length) return out;
 
     // 回収率（期待値重視の買い目。的中重視の買い目は、それを記録したレースだけで別に。PC版の _bet_summary）
-    [out.bets, out.bet_rows] = betSummary(races, "買い目");
-    const hitRaces = races.filter((r) => "的中買い目" in r["AI"]);
+    // 的中重視だけで記録したレースは期待値重視に数えない。的中重視は #HIT を記録したか、買い方が的中重視・両方のレース（PC版と同じ）
+    const evRaces = races.filter((r) => r["買い方"] !== "hit");
+    if (evRaces.length) [out.bets, out.bet_rows] = betSummary(evRaces, "買い目");
+    const hitRaces = races.filter((r) => Array.isArray(r["AI"]["的中買い目"]) || ["hit", "both"].includes(r["買い方"]));
     if (hitRaces.length) [out.hit_bets, out.hit_bet_rows] = betSummary(hitRaces, "的中買い目");
     accuracySummary(races, out);
     return out;
@@ -1396,7 +1422,7 @@
   }
 
   function formatSpeed(st) {
-    const lines = ["", `【同条件の走破タイム】${st["条件"]}（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速。速い順）`];
+    const lines = ["", `【同条件の走破タイム】${st["条件"]}（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速。速い順。馬場状態は混ざっているので馬場欄も見て比べる）`];
     const top = st.rows[0].sec;
     st.rows.forEach((x, i) => {
       const diff = i === 0 ? "最速" : `+${pyFixed(x.sec - top, 1)}秒`;
@@ -1489,6 +1515,14 @@
       lines.push("");
     }
 
+    const st = speedTable(horses, keibajo, ri);
+    if (st) lines.push(...formatSpeed(st));
+
+    const running = horses.filter((h) => !h["取消"]);
+    if (running.length && running.every((h) => ["", "--", null, undefined].includes(h["複勝"]))) {
+      lines.push("", "【複勝】オッズを取得できず（発売前か、取得に失敗）。複勝は選ばないこと");
+    }
+
     for (const [label, combos] of [["ワイド", wideTop], ["三連複", sanrenTop]]) {
       if (combos && combos.length) {
         lines.push("", `【${label} 人気上位】`);
@@ -1499,9 +1533,6 @@
         lines.push("", `【${label} 人気上位】取得できず（発売前か、取得に失敗）。${label}は選ばないこと`);
       }
     }
-
-    const st = speedTable(horses, keibajo, ri);
-    if (st) lines.push(...formatSpeed(st));
 
     const notes = oddsNotes(horses);
     if (notes.length) lines.push("", "【オッズの注記】", ...notes.map((n) => `・${n}`));

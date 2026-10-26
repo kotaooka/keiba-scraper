@@ -732,9 +732,9 @@ function renderRaces() {
     b.append(el("span", null, state.date === todayStr() ? "今日" : "この日"), el("span", null, `記録 ${pnl.n}件・結果 ${pnl.settled}件`));
     const sign = (x) => `${x >= 0 ? "+" : ""}${yen(x)}`;
     if (pnl.evSettled && pnl.hSettled) {
-      b.append(el("b", pnl.d >= 0 ? "up" : "down", `期待値 ${sign(pnl.d)}`), el("b", pnl.hd >= 0 ? "up" : "down", `的中 ${sign(pnl.hd)}`));
+      b.append(el("b", pnl.d >= 0 ? "up" : "down", `期待値重視 ${sign(pnl.d)}`), el("b", pnl.hd >= 0 ? "up" : "down", `的中重視 ${sign(pnl.hd)}`));
     } else if (pnl.evSettled) b.append(el("b", pnl.d >= 0 ? "up" : "down", sign(pnl.d)));
-    else if (pnl.hSettled) b.append(el("b", pnl.hd >= 0 ? "up" : "down", `的中 ${sign(pnl.hd)}`));
+    else if (pnl.hSettled) b.append(el("b", pnl.hd >= 0 ? "up" : "down", `的中重視 ${sign(pnl.hd)}`));
     b.append(el("span", "go", "記録 ›"));
     b.onclick = showRecords;
     area.append(b);
@@ -1108,6 +1108,7 @@ function horseDetail(h) {
 const App = {
   onRaceList(list) {
     state.loading = false;
+    if (!state.listDate) state.listDate = state.date;
     state.venues = list;
     if (list && !list.some((v) => v.name === state.venue)) {
       const saved = store.get(LAST_VENUE_KEY, null);
@@ -1438,7 +1439,8 @@ function pasteAiAnswer() {
   // 画面に期待値を出すため、記録したときのオッズ（買い目ごと）・予算・総評も残す（PC版はこれらを使わない）
   rec["AI"]["オッズ"] = parsed["買い目"].map((b) => { const o = betOddsOf(b, res.info); return o ? o.text : null; });
   if (parsed["的中買い目"]) rec["AI"]["的中オッズ"] = parsed["的中買い目"].map((b) => { const o = betOddsOf(b, res.info); return o ? o.text : null; });
-  { const bs = betSettings(); rec["買い方"] = parsed["的中買い目"] ? (parsed["買い目"].length || bs.mode === "both" ? "both" : "hit") : "ev"; rec["HIT_MIN"] = bs.hit_min; rec["HIT_EV_MIN"] = bs.hit_ev_min; }
+  // 記録したときの買い方と条件（指示文を書き換えていて #HIT が無いときは期待値重視として扱う）
+  { const bs = betSettings(); rec["買い方"] = bs.mode !== "ev" && !parsed["的中買い目"] && promptTemplate() ? "ev" : bs.mode; rec["HIT_MIN"] = bs.hit_min; rec["HIT_EV_MIN"] = bs.hit_ev_min; }
   rec["AI"]["総評"] = aiComment(text);
   rec["予算"] = betSettings().budget;
   if (res.info.predicted) rec["予想オッズ"] = true;
@@ -1459,7 +1461,7 @@ function scheduleResultCheck(key, rec, race) {
   try {
     Native.scheduleResultCheck(JSON.stringify({ key, race_id: rec.race_id, date: rec["日付"], venue: rec["競馬場"], no: rec["レース番号"],
       title: rec["レース名"] || race.title || "", time: rec["発走"], start: Math.round(Date.now() + um * 60000), bets: rec["AI"]["買い目"],
-      hit_bets: Array.isArray(rec["AI"]["的中買い目"]) ? rec["AI"]["的中買い目"] : null, mode: rec["買い方"] || "ev" }));
+      hit_bets: hasHitOf(rec) ? (rec["AI"]["的中買い目"] || []) : null, mode: rec["買い方"] || "ev" }));
   } catch (e) { /* 予約できなくても記録は残る */ }
 }
 // アプリを閉じている間に自動で取った結果を、記録へ入れる
@@ -1511,6 +1513,8 @@ function onResultsDone(err) {
   if (state.screen === "result" && state.result) renderResult();
 }
 // その日の記録の収支（AI の買い目どおりに買ったとして）。記録が無ければ null
+// 的中重視の買い目を記録したレースか（#HIT を読んだか、買い方が的中重視・両方。PC版の集計と同じ判定）
+function hasHitOf(r) { return !!r["AI"] && (Array.isArray(r["AI"]["的中買い目"]) || ["hit", "both"].includes(r["買い方"])); }
 function dayPnl(date) {
   const rs = Object.values(readRecords()).filter((r) => r["日付"] === date && r["AI"]);
   if (!rs.length) return null;
@@ -1520,7 +1524,7 @@ function dayPnl(date) {
     if (!r["結果"]) continue;
     let rows = null, hrows = null;
     try { rows = r["買い方"] === "hit" ? null : KS.settleBets(r, "買い目"); } catch (e) { /* 形の崩れた記録は数えない */ }
-    try { hrows = Array.isArray(r["AI"]["的中買い目"]) ? KS.settleBets(r, "的中買い目") : null; } catch (e) {}
+    try { hrows = hasHitOf(r) ? KS.settleBets(r, "的中買い目") : null; } catch (e) {}
     if (rows) { settled++; d += rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
     if (hrows) { hSettled++; hd += hrows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
   }
@@ -1590,7 +1594,7 @@ function aiCard(venue, race) {
   { const t = String(ai["記録時刻"] || ""); h.append(el("span", "aside", t.length >= 16 ? `記録 ${+t.slice(5, 7)}/${+t.slice(8, 10)} ${t.slice(11, 16)}` : "")); }
   const info = state.result.res.info;
   const updated = state.result.res.at && rec["収集時刻"] && state.result.res.at !== rec["収集時刻"];
-  const hasHit = Array.isArray(ai["的中買い目"]);
+  const hasHit = hasHitOf(rec);
   const evMin0 = rec["EV_MIN"] != null ? rec["EV_MIN"] : betSettings().ev_min;
   const hitEv0 = rec["HIT_EV_MIN"] != null ? rec["HIT_EV_MIN"] : betSettings().hit_ev_min;
   const hitMin0 = rec["HIT_MIN"] != null ? rec["HIT_MIN"] : betSettings().hit_min;
@@ -1812,9 +1816,9 @@ function renderRecords() {
     const it = el("button", "rec-item");
     it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
     const desc = (xs) => xs.length ? xs.map((x) => `${x["券種"]} ${x["組み合わせ"]}：${yen(x["金額"])}`).join("　") : "見送り";
-    const hasHit = r["AI"] && Array.isArray(r["AI"]["的中買い目"]);
+    const hasHit = r["AI"] && hasHitOf(r);
     const keys = !r["AI"] ? [] : hasHit ? (r["買い方"] === "hit" ? [["的中買い目", "的中重視 "]] : [["買い目", "期待値重視 "], ["的中買い目", "的中重視 "]]) : [["買い目", ""]];
-    it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(r["AI"][k])).join(" ／ ")));
+    it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(r["AI"][k] || [])).join(" ／ ")));
     let st;
     if (!r["AI"]) st = el("span", "st wait", "—");
     else if (!r["結果"]) st = el("span", "st wait", "結果待ち");
@@ -1946,7 +1950,7 @@ function renderSettings() {
 
   // 期待値の下限
   const f3 = el("div", "field");
-  f3.append(el("label", null, "期待値の下限"), el("p", "hint", "これ未満の買い目は選ばず、無ければ「見送り」にします"));
+  f3.append(el("label", null, b.mode === "both" ? "期待値重視：期待値の下限" : "期待値の下限"), el("p", "hint", "これ未満の買い目は選ばず、無ければ「見送り」にします"));
   f3.append(stepper(fmtEv(b.ev_min), b.ev_min <= 1.0, b.ev_min >= 3.0,
     () => save("ev_min", Math.round((b.ev_min - 0.05) * 100) / 100), () => save("ev_min", Math.round((b.ev_min + 0.05) * 100) / 100)));
   const picks3 = el("div", "chips-pick");

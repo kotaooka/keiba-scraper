@@ -5,6 +5,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
+import android.os.PowerManager
 import android.webkit.WebView
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -13,6 +14,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -26,6 +28,7 @@ class CollectService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var running = 0
+    private var lastStartId = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -45,12 +48,21 @@ class CollectService : Service() {
         // 常駐の通知は1つの番号を使い回す（レースごとに変えると、止めたときに前の通知が残る）
         startForeground(FOREGROUND_ID, ongoing, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 
+        lastStartId = startId
         if (r == null) { finishOne(); return START_NOT_STICKY }
         running++
+        // 画面が消えていても途中で止まらないよう、1件ごとに CPU を起こしておく（長くても6分で放す）
+        val wake = getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "keiba:collect")
+        wake.acquire(6 * 60_000L)
         scope.launch {
             try {
                 if (resultMode) checkResult(r, title) else collect(r, title)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 予期しないエラーでもアプリごと落とさない
             } finally {
+                if (wake.isHeld) wake.release()
                 running--
                 finishOne()
             }
@@ -62,8 +74,12 @@ class CollectService : Service() {
     private fun finishOne() {
         if (running > 0) return
         stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+        stopSelf(lastStartId)
     }
+
+    /** 裏の処理どうし・画面からの収集とは順番に行う（同じサイトへ同時にアクセスしない）。待っても取れなければ false */
+    private suspend fun lockOrNull(mutex: Mutex, waitMs: Long): Boolean =
+        withTimeoutOrNull(waitMs) { mutex.lock(); true } ?: false
 
     /** 収集用の WebView を1回分だけ作り、終わったら壊す */
     private suspend fun <T> withScraper(block: suspend (Scraper) -> T): T {
@@ -79,8 +95,8 @@ class CollectService : Service() {
 
     private suspend fun collect(r: JSONObject, title: String) {
         val key = r.optString("key")
-        val outcome = if (!CollectLock.mutex.tryLock()) {
-            Scraper.Outcome(null, "画面からの収集と重なったため、自動収集を見送りました")
+        val outcome = if (!lockOrNull(CollectLock.mutex, 4 * 60_000L)) {
+            Scraper.Outcome(null, "ほかの収集が終わらなかったため、自動収集を見送りました")
         } else try {
             withScraper { scraper ->
                 // 5分たっても終わらなければあきらめる
@@ -112,8 +128,8 @@ class CollectService : Service() {
     private suspend fun checkResult(r: JSONObject, title: String) {
         val key = r.optString("key")
         val raceId = r.optString("race_id")
-        if (!CollectLock.mutex.tryLock()) {
-            // 画面からの収集と重なった。回数に数えずに少しあとで読み直す
+        if (!lockOrNull(CollectLock.mutex, 3 * 60_000L)) {
+            // ほかの収集が長引いた。回数に数えずに少しあとで読み直す
             ResultChecks.retry(this, key, countTry = false)
             return
         }
@@ -154,7 +170,8 @@ class CollectService : Service() {
             ResultChecks.remove(this, key)
             Notifier.post(this, "$key|result".hashCode(), "答え合わせ：$title", "$message。タップで予想の記録を開きます",
                 Notifier.openIntent(this, "records", r))
-        } else if (!ResultChecks.retry(this, key)) {
+        } else if (ResultChecks.has(this, key) && !ResultChecks.retry(this, key)) {
+            // 3回読んでも確定しなかった（途中で記録が消された・画面で結果を取ったときは何も出さない）
             Notifier.post(this, "$key|result".hashCode(), "答え合わせ：$title",
                 "結果を自動で取得できませんでした。タップすると取得します", Notifier.openIntent(this, "fetch", r))
         }
@@ -173,7 +190,11 @@ class CollectService : Service() {
             }
             val d = ret - spent
             val sign = if (d >= 0) "+" else "−"
-            if (hit > 0) "的中 $sign${"%,d".format(kotlin.math.abs(d))}円" else "不的中 −${"%,d".format(spent)}円"
+            when {
+                hit > 0 -> "的中 $sign${"%,d".format(kotlin.math.abs(d))}円"
+                d == 0 -> "返還 ±0円"
+                else -> "不的中 $sign${"%,d".format(kotlin.math.abs(d))}円"  // 返還があれば、その分を差し引いた額
+            }
         }
     }
 

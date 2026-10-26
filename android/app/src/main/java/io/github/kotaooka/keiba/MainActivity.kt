@@ -87,6 +87,12 @@ class MainActivity : Activity() {
                     applyTheme()
                     deliverPendingOpen()
                 }
+
+                // 画面の WebView のレンダラーが落ちたら、アプリを落とさずに画面を作り直す
+                override fun onRenderProcessGone(view: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                    recreate()
+                    return true
+                }
             }
             addJavascriptInterface(Bridge(), "Android")
         }
@@ -350,7 +356,7 @@ class MainActivity : Activity() {
             val ids = runCatching { org.json.JSONArray(idsJson) }.getOrNull() ?: org.json.JSONArray()
             jobKind = "results"
             job = scope.launch {
-                prev?.join()
+                try { prev?.join() } catch (e: CancellationException) { js("App.onResultsDone('cancel')"); throw e }
                 if (!CollectLock.mutex.tryLock()) { js("App.onResultsDone('busy')"); return@launch }
                 setBusy(true)
                 try {

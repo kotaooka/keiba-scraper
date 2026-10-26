@@ -10,6 +10,11 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch:
 
+# 続けて push したときは古いほうの実行を止める（古い APK でリリースを上書きしないように）
+concurrency:
+  group: android-release
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -80,4 +85,6 @@ jobs:
           else
             gh release create android-latest --title "Android版（最新）" --notes "$notes" --latest
           fi
-          gh release upload android-latest keiba-collector.apk version.json --clobber
+          # APK を先に差し替えてから version.json を差し替える（新しい版の通知が出た時点で APK が新しくなっているように）
+          gh release upload android-latest keiba-collector.apk --clobber
+          gh release upload android-latest version.json --clobber
