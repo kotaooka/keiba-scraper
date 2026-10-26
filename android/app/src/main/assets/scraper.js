@@ -559,10 +559,76 @@
       .map((c) => ({ "組み合わせ": c["組み合わせ"], "オッズ": c["オッズ表示"] }));
   }
 
-  // 三連複の軸馬の選択肢（先頭は表示中の軸）
+  // 三連複の軸馬の選択肢のうち、まだ表示していないもの（表示中・取消・除外の馬は除く）。PC版の axis_values と同じ
   function axisValues(doc) {
-    return [...doc.querySelectorAll("#list_select_horse option")]
-      .map((o) => o.getAttribute("value")).filter(Boolean);
+    const sel = doc.querySelector("#list_select_horse");
+    if (!sel) return [];
+    const opts = [...sel.querySelectorAll("option")];
+    const selOpt = opts.find((o) => o.hasAttribute("selected"));
+    const current = selOpt ? selOpt.getAttribute("value") : (opts.length ? opts[0].getAttribute("value") : null);
+    return opts.filter((o) => o.getAttribute("value") && o.getAttribute("value") !== current && !/取消|除外/.test(raw(o)))
+      .map((o) => o.getAttribute("value"));
+  }
+
+  // 人気順の表を見分けるための券種名（PC版の _BET_LABELS と同じ）
+  const BET_LABELS = { "3連複": "3連複", "三連複": "3連複", "3連単": "3連単", "三連単": "3連単",
+    "馬単": "馬単", "馬連": "馬連", "ワイド": "ワイド", "単勝": "単勝", "枠連": "枠連", "枠単": "枠単" };
+
+  // 表の直前の文字（最大40個の文字列）と表の1行目から、どの券種の表かを決める（PC版の _table_kind と同じ）
+  function tableKind(doc, table) {
+    const walker = doc.createTreeWalker(doc.body || doc, 4);
+    const prev = [];
+    let n;
+    while ((n = walker.nextNode())) {
+      if (table.contains(n) || (table.compareDocumentPosition(n) & 4 /* FOLLOWING */)) break;
+      const t = n.nodeValue.trim();
+      if (t) prev.push(t);
+    }
+    const first = table.querySelector("tr");
+    const firstText = first ? rawSep(first).replace(/\s+/g, " ") : "";
+    const text = prev.slice(-40).join(" ") + " " + (firstText || "");
+    let best = null, pos = -1;
+    for (const [label, kind] of Object.entries(BET_LABELS)) {
+      const i = text.lastIndexOf(label);
+      if (i > pos) { best = kind; pos = i; }
+    }
+    return best;
+  }
+
+  // テキストノードを半角空白でつなぐ（BeautifulSoup の get_text(" ") と同じ）
+  function rawSep(el) {
+    const doc = el.ownerDocument || el;
+    const walker = doc.createTreeWalker(el, 4);
+    const parts = [];
+    let n;
+    while ((n = walker.nextNode())) parts.push(n.nodeValue);
+    return parts.join(" ");
+  }
+
+  // 上位人気一覧（type=b0）から三連複の人気上位を読む（PC版の parse_ninki_sanren と同じ）
+  function parseNinkiSanren(doc) {
+    let out = [];
+    for (const table of doc.querySelectorAll("table")) {
+      if (tableKind(doc, table) !== "3連複") continue;
+      for (const tr of table.querySelectorAll("tr")) {
+        const tds = [...tr.querySelectorAll("td")];
+        let combo = null, odds = null;
+        for (let i = 0; i < tds.length; i++) {
+          const nums = rawSep(tds[i]).match(/\d+(?:\.\d+)?/g) || [];
+          if (combo === null && nums.length === 3 && nums.every((x) => !x.includes("."))) {
+            combo = nums.slice().sort((a, b) => +a - +b).join("-");
+            const nx = tds.slice(i + 1).find((x) => /\d+\.\d/.test(rawSep(x)));
+            const m = nx ? rawSep(nx).replace(/,/g, "").match(/\d+\.\d/) : null;
+            odds = m ? m[0] : null;
+            break;
+          }
+        }
+        if (combo && odds) out.push({ "組み合わせ": combo, "オッズ": odds });
+      }
+      if (out.length) break;
+    }
+    out = out.map((c, i) => [c, i]).sort((a, b) => parseFloat(a[0]["オッズ"]) - parseFloat(b[0]["オッズ"]) || a[1] - b[1]).map((x) => x[0]);
+    return out.slice(0, 10);
   }
 
   // オッズ表の中身を1本の文字列にする（切替前後の比較用。PC版の _COMBO_SIG_JS と同じ）
@@ -825,7 +891,7 @@
     parseRaceList, nextRaceIndex,
     parseShutuba, parseRaceInfo, parseKyakuType,
     keibagoUrl, parseKeibago,
-    parseTanFuku, extractCombos, topCombos, axisValues, comboSignature, comboChanged, selectAxis,
+    parseTanFuku, extractCombos, topCombos, axisValues, parseNinkiSanren, comboSignature, comboChanged, selectAxis,
     mergeData, addDerivedFields, addMarketProb, checkData, formatForAi, build,
   };
 })(typeof window !== "undefined" ? window : globalThis);

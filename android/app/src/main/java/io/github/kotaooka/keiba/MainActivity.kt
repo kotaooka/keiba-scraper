@@ -107,7 +107,7 @@ class MainActivity : Activity() {
     @Suppress("DEPRECATION")
     private fun applySystemBars() {
         val dark = isDark()
-        val bg = if (dark) Color.parseColor("#11161b") else Color.parseColor("#eef1f4")
+        val bg = if (dark) Color.parseColor("#12100e") else Color.parseColor("#f2ebdf")
         window.statusBarColor = bg
         window.navigationBarColor = bg
         window.decorView.setBackgroundColor(bg)

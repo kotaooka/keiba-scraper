@@ -5,13 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>地方競馬データ収集</title>
 <style>
-/* 配色は QC Workbench の DESIGN.md（計算ツールの青系）に合わせる */
+/* 配色は地方競馬に寄せる（QC Workbench の DESIGN.md 1.4 に記載）。
+   ライト＝昼の砂の馬場と内馬場の緑、ダーク＝ナイター（夜の砂と照明・電光掲示板の琥珀）。
+   判定色（ok / warn / ng）は DESIGN.md の値のまま */
 :root {
-  --bg: #eef1f4; --surface: #ffffff; --ink: #15212c; --ink2: #475563; --muted: #74818e;
-  --line: #d5dce3; --grid: #e4e9ee;
-  --accent: #1d5c96; --accent-ink: #ffffff; --accent-weak: #e1ebf5;
+  --bg: #f2ebdf; --surface: #fffcf6; --ink: #2b2117; --ink2: #5e4f3f; --muted: #8b7b69;
+  --line: #e2d6c3; --grid: #ece3d4;
+  --accent: #1f5f3f; --accent-ink: #ffffff; --accent-weak: #e1eee5;
   --ok: #17703a; --ok-weak: #e2f2e7; --warn: #8a5300; --warn-weak: #f8ecd9; --ng: #ad2a22; --ng-weak: #f8e4e2;
-  --shadow: 0 1px 2px rgba(21, 33, 44, .06), 0 2px 8px rgba(21, 33, 44, .05);
+  --shadow: 0 1px 2px rgba(60, 40, 20, .07), 0 2px 8px rgba(60, 40, 20, .05);
+  --rail: #ffffff; --rail-post: #b9a98f;
+  /* レース番号は電光掲示板ふう（ライト・ダーク共通） */
+  --board: #17130f; --board-ink: #ffb43c;
   /* 端末に BIZ UDPGothic は無いので、外部から字体を読まずに端末の字体を使う */
   --f-ui: "BIZ UDPGothic", "Hiragino Sans", "Noto Sans CJK JP", "Noto Sans JP", system-ui, sans-serif;
   --f-num: "IBM Plex Mono", ui-monospace, "Roboto Mono", "Droid Sans Mono", monospace;
@@ -19,19 +24,19 @@
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #11161b; --surface: #19212a; --ink: #e6ecf2; --ink2: #a9b5c1; --muted: #7d8996;
-    --line: #2b3641; --grid: #253039;
-    --accent: #6ba6df; --accent-ink: #0d1620; --accent-weak: #1c2f43;
+    --bg: #12100e; --surface: #1e1a16; --ink: #f1e9dc; --ink2: #c4b6a3; --muted: #8f8170;
+    --line: #352d25; --grid: #2a241e;
+    --accent: #f0a83a; --accent-ink: #1a1206; --accent-weak: #3b2b12;
     --ok: #57c483; --ok-weak: #163222; --warn: #e3a84e; --warn-weak: #36280f; --ng: #f07a70; --ng-weak: #3a1c1a;
-    --shadow: none; color-scheme: dark;
+    --shadow: none; --rail: #e9e2d4; --rail-post: #5a4e40; color-scheme: dark;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #11161b; --surface: #19212a; --ink: #e6ecf2; --ink2: #a9b5c1; --muted: #7d8996;
-  --line: #2b3641; --grid: #253039;
-  --accent: #6ba6df; --accent-ink: #0d1620; --accent-weak: #1c2f43;
+  --bg: #12100e; --surface: #1e1a16; --ink: #f1e9dc; --ink2: #c4b6a3; --muted: #8f8170;
+  --line: #352d25; --grid: #2a241e;
+  --accent: #f0a83a; --accent-ink: #1a1206; --accent-weak: #3b2b12;
   --ok: #57c483; --ok-weak: #163222; --warn: #e3a84e; --warn-weak: #36280f; --ng: #f07a70; --ng-weak: #3a1c1a;
-  --shadow: none; color-scheme: dark;
+  --shadow: none; --rail: #e9e2d4; --rail-post: #5a4e40; color-scheme: dark;
 }
 
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -43,6 +48,10 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 
 /* ===== 上部の帯 ===== */
 .appbar { position: sticky; top: 0; z-index: 10; background: var(--bg); padding: 12px 16px 0; }
+#home .appbar::after { content: ""; display: block; height: 7px; margin: 0 -16px;
+  background:
+    linear-gradient(var(--rail), var(--rail)) 0 1px / 100% 3px no-repeat,
+    repeating-linear-gradient(90deg, var(--rail-post) 0 2px, transparent 2px 28px) 0 4px / 100% 3px no-repeat; }
 .appbar-row { display: flex; align-items: center; gap: 8px; min-height: 40px; }
 .appbar h1 { margin: 0; font-size: 18px; font-weight: 700; flex: 1; letter-spacing: .02em; }
 .appbar h1 small { display: block; font-size: 11.5px; font-weight: 400; color: var(--muted); letter-spacing: 0; }
@@ -73,11 +82,14 @@ main { padding: 0 16px 32px; }
 
 /* ===== レース一覧 ===== */
 .races { display: grid; gap: 8px; }
-.race { display: grid; grid-template-columns: 52px 1fr auto; align-items: center; gap: 12px; text-align: left; width: 100%;
+.race { display: grid; grid-template-columns: 50px 1fr auto; align-items: center; gap: 12px; text-align: left; width: 100%;
   background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; box-shadow: var(--shadow); }
 .race:active { background: var(--accent-weak); }
-.race .no { font-family: var(--f-num); font-weight: 500; font-size: 22px; color: var(--accent); text-align: center; line-height: 1; }
-.race .no small { font-size: 12px; margin-left: 1px; }
+.race .no { font-family: var(--f-num); font-weight: 500; font-size: 21px; text-align: center; line-height: 1; padding: 9px 0 8px;
+  background: var(--board); color: var(--board-ink); border-radius: 8px; text-shadow: 0 0 6px rgba(255, 170, 40, .55); }
+.race .no small { font-size: 11px; margin-left: 1px; }
+.race .no, .race-title .num { box-shadow: 0 0 0 1px rgba(255, 180, 60, .18) inset; }
+.race.started .no { color: #9a8a74; text-shadow: none; }
 .race .t { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .race .s { color: var(--ink2); font-size: 13px; display: flex; gap: 10px; }
 .race .badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
@@ -117,7 +129,7 @@ main { padding: 0 16px 32px; }
 .page-head .back { display: flex; align-items: center; gap: 2px; color: var(--accent); padding: 8px; border-radius: 10px; font-weight: 700; }
 .page-head .back:active { background: var(--grid); }
 .race-title { margin: 6px 0 2px; font-size: 21px; font-weight: 700; line-height: 1.35; }
-.race-title .num { color: var(--accent); }
+.race-title .num { background: var(--board); color: var(--board-ink); padding: 0 8px; border-radius: 6px; font-size: .9em; text-shadow: 0 0 6px rgba(255, 170, 40, .55); }
 .race-sub { color: var(--ink2); font-size: 13px; margin: 0 0 10px; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 14px; }
 .chip { font-size: 12.5px; padding: 3px 10px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); color: var(--ink2); }
@@ -143,6 +155,7 @@ main { padding: 0 16px 32px; }
 .steps .name small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
 .steps .det { color: var(--ink2); font-size: 13px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+.preview-btn { width: 100%; margin-top: 12px; min-height: 42px; font-size: 14px; }
 .note { font-size: 12.5px; color: var(--muted); margin: 10px 2px 0; }
 
 details.log { margin-top: 12px; }
@@ -231,7 +244,7 @@ details.preview pre { margin: 10px -14px -14px; padding: 12px 14px; border-top: 
 
 <div class="scrim hidden" id="scrim"></div>
 <div class="menu hidden" id="menu">
-  <button id="debugToggle">読み込み中のページを表示<span class="check" id="debugCheck"></span></button>
+  <button id="debugToggle">取得中のサイトをプレビュー<span class="check" id="debugCheck"></span></button>
   <button id="clearCache">収集済みの記録を消す</button>
 </div>
 <div class="toast" id="toast"></div>
@@ -256,7 +269,7 @@ const STEPS = [
   ["keibago", "馬柱・過去5走", "keiba.go.jp"],
   ["tanfuku", "単勝・複勝オッズ", "netkeiba"],
   ["wide", "ワイドオッズ", "netkeiba"],
-  ["sanren", "三連複オッズ", "netkeiba・軸ごとに切替"],
+  ["sanren", "三連複オッズ", "netkeiba・上位人気一覧"],
   ["build", "テキストを作成", ""],
 ];
 
@@ -419,7 +432,9 @@ function startCollect(venue, race) {
   }
   card.append(ul);
   body.append(card);
-  body.append(el("p", "note", "サイトに負荷をかけないよう、アクセスごとに2秒あけています。1レースで1〜2分かかります"));
+  body.append(el("p", "note", "サイトに負荷をかけないよう、アクセスごとに2秒あけています。1レースで30秒〜1分ほどかかります"));
+  const pv = el("button", "btn secondary preview-btn"); pv.id = "previewBtn"; pv.onclick = togglePreview;
+  body.append(pv); renderPreviewBtn();
 
   const log = el("details", "log");
   log.append(el("summary", null, "詳細ログ"));
@@ -580,10 +595,13 @@ function openMenu() { $("menu").classList.remove("hidden"); $("scrim").classList
 function closeMenu() { $("menu").classList.add("hidden"); $("scrim").classList.add("hidden"); }
 $("menuBtn").onclick = openMenu;
 $("scrim").onclick = closeMenu;
-$("debugToggle").onclick = () => {
-  state.debug = !state.debug; $("debugCheck").textContent = state.debug ? "✓" : "";
-  Native.setDebug(state.debug); closeMenu();
-};
+// 収集用の WebView が開いているページを画面の下半分に出す（読み取れないときの確認用）
+function togglePreview() { state.debug = !state.debug; Native.setDebug(state.debug); renderPreviewBtn(); }
+function renderPreviewBtn() {
+  $("debugCheck").textContent = state.debug ? "✓" : "";
+  const b = $("previewBtn"); if (b) b.textContent = state.debug ? "サイトのプレビューを閉じる" : "取得中のサイトをプレビュー";
+}
+$("debugToggle").onclick = () => { togglePreview(); closeMenu(); };
 $("clearCache").onclick = () => { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} closeMenu(); renderRaces(); toast("記録を消しました"); };
 
 // ===== 日付の操作 =====

@@ -768,6 +768,79 @@ _COMBO_CHANGED_JS = """(before) => {
 }"""
 
 
+def axis_values(soup):
+    """三連複の軸馬の選択肢のうち、まだ表示していないもの（表示中・取消・除外の馬は除く）"""
+    sel = soup.select_one("#list_select_horse")
+    if not sel:
+        return []
+    opts = sel.select("option")
+    current = next((o.get("value") for o in opts if o.has_attr("selected")), opts[0].get("value") if opts else None)
+    return [o.get("value") for o in opts
+            if o.get("value") and o.get("value") != current
+            and not re.search(r"取消|除外", o.get_text())]
+
+
+# 人気順の表を見分けるための券種名（表の直前の見出しや表の1行目に出る）
+_BET_LABELS = {"3連複": "3連複", "三連複": "3連複", "3連単": "3連単", "三連単": "3連単",
+               "馬単": "馬単", "馬連": "馬連", "ワイド": "ワイド", "単勝": "単勝", "枠連": "枠連", "枠単": "枠単"}
+
+
+def _table_kind(table):
+    """表の直前の文字（最大40個の文字列）と表の1行目から、どの券種の表かを決める"""
+    prev = [t.strip() for t in table.find_all_previous(string=True, limit=200) if t.strip()][:40]
+    first = table.find("tr")
+    text = " ".join(reversed(prev)) + " " + (re.sub(r"\s+", " ", first.get_text(" ")) if first else "")
+    best, pos = None, -1
+    for label, kind in _BET_LABELS.items():
+        i = text.rfind(label)
+        if i > pos:
+            best, pos = kind, i
+    return best
+
+
+def parse_ninki_sanren(html):
+    """上位人気一覧（type=b0）から三連複の人気上位を読む。[{"組み合わせ","オッズ"}] を人気順で返す"""
+    soup = BeautifulSoup(html, "html.parser")
+    out = []
+    for table in soup.find_all("table"):
+        if _table_kind(table) != "3連複":
+            continue
+        for tr in table.find_all("tr"):
+            tds = tr.find_all("td")
+            combo, odds = None, None
+            for i, td in enumerate(tds):
+                nums = re.findall(r"\d+(?:\.\d+)?", td.get_text(" "))
+                if combo is None and len(nums) == 3 and all("." not in n for n in nums):
+                    combo = "-".join(sorted(nums, key=int))
+                    m = next((re.search(r"\d+\.\d", x.get_text(" ").replace(",", "")) for x in tds[i + 1:]
+                              if re.search(r"\d+\.\d", x.get_text(" "))), None)
+                    odds = m.group(0) if m else None
+                    break
+            if combo and odds:
+                out.append({"組み合わせ": combo, "オッズ": odds})
+        if out:
+            break
+    out.sort(key=lambda c: float(c["オッズ"]))
+    return out[:10]
+
+
+def scrape_sanren(page, odds_url):
+    """三連複の人気上位10組を返す。まず上位人気一覧（1ページ）から読み、読めなければ軸ごとの表から集める"""
+    html = fetch_page(page, odds_url + "b0")
+    if html:
+        try:
+            page.wait_for_function("() => document.body.innerText.includes('3連複')", timeout=TIMEOUT_SELECTOR)
+            html = page.content()
+        except PlaywrightTimeout:
+            pass
+        top = parse_ninki_sanren(html)
+        if top:
+            print(f"  三連複: {len(top)}組取得（上位人気一覧）")
+            return top, ""
+    print("  上位人気一覧から読めなかったため、軸ごとの表から集めます")
+    return scrape_combo_odds(page, odds_url + "b7", "三連複")
+
+
 def scrape_combo_odds(page, url, label):
     """人気上位10組と注記（読めなかった部分があれば）を返す"""
     html = fetch_page(page, url, "td.Odds[cart-item]")
@@ -779,10 +852,9 @@ def scrape_combo_odds(page, url, label):
     # 三連複は軸馬ごとに表が切り替わるので、全軸馬を順に読む
     note = ""
     if "type=b7" in url:
-        options = BeautifulSoup(html, "html.parser").select("#list_select_horse option")
-        values = [o.get("value") for o in options if o.get("value")]
+        values = axis_values(BeautifulSoup(html, "html.parser"))
         skipped = []
-        for val in values[1:]:
+        for val in values:
             try:
                 before = page.evaluate(_COMBO_SIG_JS)
                 wait_interval()
@@ -1053,7 +1125,7 @@ def collect_race(page, keibajo_name, race_date, race_no):
     print("\n[ワイドオッズ]")
     wide_top, _ = scrape_combo_odds(page, odds_url + "b5", "ワイド")
     print("\n[三連複オッズ]")
-    sanren_top, sanren_note = scrape_combo_odds(page, odds_url + "b7", "三連複")
+    sanren_top, sanren_note = scrape_sanren(page, odds_url)
 
     merged = merge_data(horses, tan_fuku)
     payout_rate = add_market_prob(merged)

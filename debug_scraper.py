@@ -127,6 +127,14 @@ def main():
         print(report_o)
         (OUTPUT_DIR / "report_odds.txt").write_text(report_o, encoding="utf-8")
 
+        # 上位人気一覧（三連複の人気上位をここから読む）
+        url_ninki = f"https://nar.netkeiba.com/odds/?race_id={race_id}&type=b0"
+        html_ninki = fetch(page, url_ninki, "上位人気一覧")
+        (OUTPUT_DIR / "odds_ninki.html").write_text(html_ninki, encoding="utf-8")
+        report_n = analyze(html_ninki, "上位人気一覧")
+        print(report_n)
+        (OUTPUT_DIR / "report_ninki.txt").write_text(report_n, encoding="utf-8")
+
         # 結果（レース確定後のみ。検証機能の着順・払戻が読めないとき用）
         url_result = f"https://nar.netkeiba.com/race/result.html?race_id={race_id}"
         html_result = fetch(page, url_result, "結果")
@@ -138,7 +146,7 @@ def main():
         browser.close()
 
     print(f"\n✅ デバッグファイルを {OUTPUT_DIR.resolve()} に保存しました。")
-    print("   report_shutuba.txt・report_odds.txt・report_result.txt の内容を AI に貼り付けて、セレクタの修正を依頼してください。")
+    print("   report_shutuba.txt・report_odds.txt・report_ninki.txt・report_result.txt の内容を AI に貼り付けて、セレクタの修正を依頼してください。")
 
 if __name__ == "__main__":
     main()

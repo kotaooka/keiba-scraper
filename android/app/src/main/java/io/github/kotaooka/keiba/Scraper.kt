@@ -237,38 +237,47 @@ class Scraper(
             step("wide", "warn", "開けず")
         }
 
-        // ---- 三連複 ----
+        // ---- 三連複：まず上位人気一覧（1ページ）から読み、読めなければ軸ごとの表から集める ----
         step("sanren", "run", "")
         var sanren = "[]"
         var sanrenNote = ""
-        if (load(oddsUrl + "b7")) {
-            waitFor("document.querySelector('td.Odds[cart-item]')")
-            call("(window.__ksAll = KS.extractCombos(document, {}), true)")
-            val axes = runCatching { JSONArray(call("KS.axisValues(document)")) }.getOrNull() ?: JSONArray()
-            var skipped = 0
-            // 三連複は軸馬ごとに表が切り替わるので、全軸馬を順に読む
-            for (i in 1 until axes.length()) {
-                step("sanren", "run", "軸 ${i + 1}/${axes.length()}")
-                val before = decodeString(call("KS.comboSignature(document)"))
-                waitInterval()
-                call("KS.selectAxis(document, ${q(axes.getString(i))})")
-                // 切替前の表にも同じ要素があるため、中身が変わりオッズの数字が入るまで待つ
-                if (waitFor("KS.comboChanged(document, ${q(before)})")) {
-                    call("(KS.extractCombos(document, window.__ksAll), true)")
-                } else {
-                    skipped++
-                }
-            }
-            if (skipped > 0) {
-                sanrenNote = "三連複オッズは軸 ${axes.length()}頭中 ${skipped}頭分の表を読めなかった（人気上位10組が不完全な可能性）"
-                log("  ※$sanrenNote")
-            }
-            sanren = call("KS.topCombos(window.__ksAll || {})")
+        if (load(oddsUrl + "b0")) {
+            waitFor("document.body && document.body.innerText.includes('3連複')")
+            sanren = call("KS.parseNinkiSanren(document)")
+        }
+        if (count(sanren, true) > 0) {
             val n = count(sanren, true)
-            log("  三連複: ${n}組取得")
-            step("sanren", if (n > 0 && skipped == 0) "ok" else "warn", "${n}組")
+            log("  三連複: ${n}組取得（上位人気一覧）")
+            step("sanren", "ok", "${n}組")
         } else {
-            step("sanren", "warn", "開けず")
+            log("  上位人気一覧から読めなかったため、軸ごとの表から集めます")
+            sanren = "[]"
+            if (load(oddsUrl + "b7")) {
+                waitFor("document.querySelector('td.Odds[cart-item]')")
+                call("(window.__ksAll = KS.extractCombos(document, {}), true)")
+                val axes = runCatching { JSONArray(call("KS.axisValues(document)")) }.getOrNull() ?: JSONArray()
+                var skipped = 0
+                for (i in 0 until axes.length()) {
+                    step("sanren", "run", "軸 ${i + 1}/${axes.length()}")
+                    val before = decodeString(call("KS.comboSignature(document)"))
+                    waitInterval()
+                    call("KS.selectAxis(document, ${q(axes.getString(i))})")
+                    // 切替前の表にも同じ要素があるため、中身が変わりオッズの数字が入るまで待つ
+                    if (waitFor("KS.comboChanged(document, ${q(before)})")) {
+                        call("(KS.extractCombos(document, window.__ksAll), true)")
+                    } else {
+                        skipped++
+                    }
+                }
+                if (skipped > 0) {
+                    sanrenNote = "三連複オッズは軸 ${axes.length()}頭中 ${skipped}頭分の表を読めなかった（人気上位10組が不完全な可能性）"
+                    log("  ※$sanrenNote")
+                }
+                sanren = call("KS.topCombos(window.__ksAll || {})")
+            }
+            val n = count(sanren, true)
+            log("  三連複: ${n}組取得（軸ごとの表）")
+            step("sanren", if (n > 0 && sanrenNote.isEmpty()) "ok" else "warn", "${n}組")
         }
 
         // ---- テキスト作成 ----
