@@ -2,6 +2,9 @@ package io.github.kotaooka.keiba
 
 import android.annotation.SuppressLint
 import android.app.Activity
+import android.Manifest
+import android.app.PendingIntent
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -10,6 +13,7 @@ import android.content.res.Configuration
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -43,6 +47,9 @@ class MainActivity : Activity() {
     private var debug = false
     // 画面がダーク表示か（UI のテーマ切替で決まる。未設定なら端末の設定に従う）
     private var uiDark: Boolean? = null
+    // 通知から開いたときに、画面の読み込み後に UI へ渡す内容
+    private var pendingOpen: String? = null
+    private var pageReady = false
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -57,7 +64,11 @@ class MainActivity : Activity() {
             settings.allowFileAccess = false
             setBackgroundColor(Color.TRANSPARENT)
             webViewClient = object : WebViewClient() {
-                override fun onPageFinished(view: WebView, url: String) = applyTheme()
+                override fun onPageFinished(view: WebView, url: String) {
+                    pageReady = true
+                    applyTheme()
+                    deliverPendingOpen()
+                }
             }
             addJavascriptInterface(Bridge(), "Android")
         }
@@ -75,8 +86,39 @@ class MainActivity : Activity() {
             log = { line -> js("App.onLog(${JSONObject.quote(line)})") },
             step = { key, s, detail -> js("App.onStep(${JSONObject.quote(key)},${JSONObject.quote(s)},${JSONObject.quote(detail)})") })
 
+        Notifier.ensureChannels(this)
+        readOpenIntent(intent)
         // 収集済みの記録は ui.html の localStorage（この端末のアプリ内だけ）に置く
         ui.loadUrl("file:///android_asset/ui.html")
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        readOpenIntent(intent)
+        deliverPendingOpen()
+    }
+
+    // 戻ってきたら、自動収集の結果・予約・送り先を UI に読み直させる
+    override fun onResume() {
+        super.onResume()
+        // 「アラームとリマインダー」を許可して戻ってきたときなどに、予約を正確な時刻で登録し直す
+        Reservations.rescheduleAll(this)
+        if (pageReady) js("App.onResume()")
+    }
+
+    /** 通知のタップで開いたときの内容（open / collect と予約）を取り出す */
+    private fun readOpenIntent(i: Intent?) {
+        val type = i?.getStringExtra("open_type") ?: return
+        val r = i.getStringExtra("reservation") ?: return
+        pendingOpen = runCatching { JSONObject().put("type", type).put("r", JSONObject(r)).toString() }.getOrNull()
+        i.removeExtra("open_type")
+    }
+
+    private fun deliverPendingOpen() {
+        val p = pendingOpen ?: return
+        if (!pageReady) return
+        pendingOpen = null
+        js("App.onResume(); App.openFromNotification($p)")
     }
 
     override fun onDestroy() {
@@ -162,6 +204,11 @@ class MainActivity : Activity() {
             job?.cancel()
             job = scope.launch {
                 val me = coroutineContext[Job]
+                // 自動収集の実行中は重ねない（同じサイトへ同時にアクセスしないため）
+                if (!CollectLock.mutex.tryLock()) {
+                    js("App.onResult(null, ${JSONObject.quote("自動収集の実行中です。終わってからもう一度試してください。")})")
+                    return@launch
+                }
                 setBusy(true)
                 try {
                     val out = scraper.collectRace(keibajo, date, raceNo)
@@ -178,6 +225,7 @@ class MainActivity : Activity() {
                 } catch (e: Exception) {
                     js("App.onResult(null, ${JSONObject.quote("エラー: ${e.message}")})")
                 } finally {
+                    CollectLock.mutex.unlock()
                     setBusy(false)
                 }
             }
@@ -189,13 +237,73 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun copy(text: String) = runOnUiThread { copyText(text) }
 
+        /**
+         * AI アプリへ送る。choose=false なら前回選んだアプリへ直接送り、
+         * choose=true か、まだ選んでいない・アプリが無いときは共有メニューを出して、選んだアプリを覚える
+         */
         @JavascriptInterface
-        fun share(text: String) = runOnUiThread {
+        fun share(text: String, choose: Boolean) = runOnUiThread {
             val send = Intent(Intent.ACTION_SEND).apply {
                 type = "text/plain"
                 putExtra(Intent.EXTRA_TEXT, text)
             }
-            startActivity(Intent.createChooser(send, "AI アプリへ送る"))
+            val target = ShareTarget.get(this@MainActivity)
+            if (!choose && target != null) {
+                try {
+                    startActivity(Intent(send).setComponent(target))
+                    return@runOnUiThread
+                } catch (e: ActivityNotFoundException) {
+                    // アンインストールされていたら選び直してもらう
+                } catch (e: SecurityException) {
+                }
+            }
+            val chosen = PendingIntent.getBroadcast(this@MainActivity, 0,
+                Intent(this@MainActivity, ShareChosenReceiver::class.java),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE)
+            startActivity(Intent.createChooser(send, "AI アプリへ送る（選んだアプリを次から使います）", chosen.intentSender))
+        }
+
+        @JavascriptInterface
+        fun shareTarget(): String = ShareTarget.label(this@MainActivity)
+
+        // ---- 通知・自動収集の予約 ----
+
+        @JavascriptInterface
+        fun getReservations(): String = org.json.JSONArray(Reservations.list(this@MainActivity)).toString()
+
+        @JavascriptInterface
+        fun setReservation(json: String): String {
+            return try {
+                Reservations.set(this@MainActivity, JSONObject(json))
+                JSONObject().put("ok", true).put("exact", Reservations.exactAllowed(this@MainActivity))
+                    .put("notif", Notifier.allowed(this@MainActivity)).toString()
+            } catch (e: Exception) {
+                JSONObject().put("ok", false).put("error", e.message).toString()
+            }
+        }
+
+        @JavascriptInterface
+        fun removeReservation(key: String) = Reservations.remove(this@MainActivity, key)
+
+        @JavascriptInterface
+        fun takeBackgroundResults(): String = BackgroundResults.take(this@MainActivity)
+
+        @JavascriptInterface
+        fun exactAlarmAllowed(): Boolean = Reservations.exactAllowed(this@MainActivity)
+
+        @JavascriptInterface
+        fun openExactAlarmSettings() = runOnUiThread {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:$packageName")))
+            }
+        }
+
+        @JavascriptInterface
+        fun notificationsAllowed(): Boolean = Notifier.allowed(this@MainActivity)
+
+        @JavascriptInterface
+        fun requestNotifications() = runOnUiThread {
+            if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
 
         /** UI のテーマが決まったら、ステータスバーの色も合わせる */

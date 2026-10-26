@@ -878,7 +878,18 @@
         horses: horses.map((h) => ({
           no: h["馬番"], waku: h["枠番"] || "", name: h["馬名"] || "", cancel: !!h["取消"],
           odds: h["単勝"] || "--", prob: h["市場勝率"], jockey: h["騎手"] || "",
-          past: (h["過去成績"] || []).length,
+          ninki: h["人気"] || "", fuku: h["複勝"] || "", sex_age: h["性齢"] || "", kinryo: h["斤量"] || "",
+          weight: typeof h["馬体重"] === "number" ? `${h["馬体重"]}(${h["体重増減"] >= 0 ? "+" : ""}${h["体重増減"]})` : (h["馬体重"] || ""),
+          kyaku: h["脚質"] || "", trainer: h["調教師"] || "",
+          cond: h["条件別成績"] || {}, mochi: h["持ち時計"] || "", combo: h["コンビ"] || "",
+          interval: h["前走間隔"] || "", norikae: h["乗替"] || "", kinryo_diff: h["斤量差"] || "",
+          // 画面の小さな表に出す過去5走（上が新しい）
+          past: (h["過去成績"] || []).map((r) => ({
+            date: (r["日付"] || "").replace(/^\d{4}\//, ""), venue: (r["競馬場"] || "") + (r["JRA"] ? "(J)" : ""),
+            dist: r["距離"] || "", baba: r["馬場"] || "", heads: r["頭数"] || "", ninki: r["人気"] || "",
+            rank: (r["着順"] || "").replace(/着$/, ""), diff: r["差"] || "", agari: r["上がり"] || "",
+            time: r["タイム"] || "", pass: r["通過"] || "", cls: r["クラス"] || "", jockey: r["騎手"] || "",
+          })),
         })),
       },
     };
