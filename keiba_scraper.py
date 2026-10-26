@@ -1020,6 +1020,31 @@ def copy_to_clipboard(text):
 
 # ========== AI貼り付け用テキスト整形 ==========
 
+def odds_notes(horses):
+    """オッズの偏りの注記（Android版の oddsNotes と同じ）。
+    ふつうは人気順に複勝も低い。単勝の人気が4番手以下なのに、複勝の下限が人気上位のどの馬よりも低く、
+    かつ2.0倍以下の馬は、複勝に大口の投票が入っている可能性が高い"""
+    rows = []
+    for h in horses:
+        if h.get("取消"):
+            continue
+        tan = re.findall(r"\d+\.\d+", str(h.get("単勝", "")))
+        fuku = re.findall(r"\d+\.\d+", str(h.get("複勝", "")))
+        if tan and fuku:
+            rows.append((h, tan[0], fuku[0]))
+    rows.sort(key=lambda r: float(r[1]))  # 単勝の低い順（人気順）
+    notes = []
+    for i, (h, tan, fuku) in enumerate(rows):
+        if i < 3 or float(fuku) > 2.0:
+            continue
+        upper = min(float(f) for _, _, f in rows[:i])
+        if float(fuku) < upper:
+            notes.append(f"{h['馬番']}番 {h.get('馬名', '')}: 単勝{tan}倍（{i + 1}番人気）なのに、複勝の下限が{fuku}倍と"
+                         f"人気上位{i}頭のどの馬（最も低くて{upper:.1f}倍）よりも低い。複勝に大口の投票が入っている可能性がある"
+                         "（この馬の複勝・ワイドは実力以上に低く、ほかの馬の複勝は高めに出やすい）")
+    return notes
+
+
 def fmt_ev(v):
     """期待値の下限の表示（小数2桁まで、末尾の0は1つ落とす：1.2 / 1.25 / 1.0）"""
     s = f"{v:.2f}"
@@ -1124,6 +1149,10 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
             lines += ["", f"【{label} 人気上位】"]
             for i, c in enumerate(combos[:10], 1):
                 lines.append(f"  {i:2d}位  {pad(c['組み合わせ'], 8)}  {c['オッズ']}倍")
+
+    notes = odds_notes(horses)
+    if notes:
+        lines += ["", "【オッズの注記】"] + [f"・{n}" for n in notes]
 
     if warnings:
         lines += ["", "【データの欠損】"] + [f"・{w}" for w in warnings]

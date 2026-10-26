@@ -55,6 +55,7 @@ class MainActivity : Activity() {
 
     companion object {
         private const val REQ_EXPORT = 21
+        private const val REQ_IMPORT = 22
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -109,6 +110,7 @@ class MainActivity : Activity() {
         super.onResume()
         // 「アラームとリマインダー」を許可して戻ってきたときなどに、予約を正確な時刻で登録し直す
         Reservations.rescheduleAll(this)
+        ResultChecks.rescheduleAll(this)
         if (pageReady) js("App.onResume()")
     }
 
@@ -131,6 +133,17 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_IMPORT) {
+            val uri = data?.data
+            if (resultCode != RESULT_OK || uri == null) { js("App.onImported(null, '')"); return }
+            try {
+                val text = contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
+                js("App.onImported(${JSONObject.quote(text)}, null)")
+            } catch (e: Exception) {
+                js("App.onImported(null, ${JSONObject.quote(e.message ?: "")})")
+            }
+            return
+        }
         if (requestCode != REQ_EXPORT) return
         val text = pendingExport
         pendingExport = null
@@ -302,6 +315,33 @@ class MainActivity : Activity() {
                     setBusy(false)
                 }
             }
+        }
+
+        /** 結果の自動取得を予約する（AI の回答を記録したとき） */
+        @JavascriptInterface
+        fun scheduleResultCheck(json: String): String = try {
+            ResultChecks.set(this@MainActivity, JSONObject(json))
+            JSONObject().put("ok", true).put("exact", Reservations.exactAllowed(this@MainActivity)).toString()
+        } catch (e: Exception) {
+            JSONObject().put("ok", false).toString()
+        }
+
+        @JavascriptInterface
+        fun cancelResultCheck(key: String) = ResultChecks.remove(this@MainActivity, key)
+
+        @JavascriptInterface
+        fun takeRaceResults(): String = RaceResults.take(this@MainActivity)
+
+        /** 書き出した記録のファイルを選んでもらい、中身を App.onImported に渡す */
+        @JavascriptInterface
+        fun importRecords() = runOnUiThread {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                addCategory(Intent.CATEGORY_OPENABLE)
+                type = "*/*"
+                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "application/octet-stream"))
+            }
+            @Suppress("DEPRECATION")
+            startActivityForResult(intent, REQ_IMPORT)
         }
 
         /** 記録を JSON のファイルに書き出す（保存先は端末の画面で選んでもらう） */

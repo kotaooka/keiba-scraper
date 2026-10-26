@@ -16,6 +16,22 @@ class AlarmReceiver : BroadcastReceiver() {
         val title = Reservations.titleOf(r)
         val time = r.optString("time")
 
+        if (kind == "result") {
+            // 結果の自動取得：正確な時刻で起きたときだけ裏で読める。だめなら「タップで答え合わせ」の通知にする
+            val fallback = {
+                Notifier.post(ctx, "$key|result".hashCode(), "答え合わせ：$title",
+                    "結果が出たころです。タップすると結果を取得します", Notifier.openIntent(ctx, "fetch", r))
+            }
+            if (!intent.getBooleanExtra("exact", false)) { fallback(); return }
+            try {
+                ctx.startForegroundService(Intent(ctx, CollectService::class.java)
+                    .putExtra("mode", "result").putExtra("reservation", r.toString()))
+            } catch (e: Exception) {
+                fallback()
+            }
+            return
+        }
+
         if (kind != "collect") {
             Notifier.post(ctx, "$key|$kind".hashCode(), "$title — ${Reservations.notifyTitle(kind)}",
                 "$time 発走。タップで開きます", Notifier.openIntent(ctx, "open", r))
@@ -42,6 +58,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(ctx: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == "android.intent.action.MY_PACKAGE_REPLACED") {
             Reservations.rescheduleAll(ctx)
+            ResultChecks.rescheduleAll(ctx)
         }
     }
 }

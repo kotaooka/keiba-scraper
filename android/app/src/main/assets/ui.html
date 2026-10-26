@@ -318,6 +318,22 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .rec-item .st { grid-row: 1 / span 2; grid-column: 2; align-self: center; text-align: right; font-size: 13px; font-weight: 700; font-family: var(--f-num); }
 .st.wait { color: var(--muted); font-weight: 400; font-family: var(--f-ui); }
 
+/* オッズの動き・注記・今日の収支・指示文 */
+.diff-card h3 { color: var(--accent); }
+.diff-list { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+.diff-list li { padding: 5px 0; border-top: 1px solid var(--grid); }
+.diff-list li:first-child { border-top: 0; }
+.diff-list .dn { color: var(--ok); font-weight: 700; } .diff-list .upc { color: var(--ng); font-weight: 700; }
+.note-card { background: var(--accent-weak); border-color: transparent; box-shadow: none; font-size: 13px; }
+.note-card h3 { color: var(--accent); }
+.note-card ul { margin: 0; padding-left: 1.2em; }
+.day-pnl { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; margin: 0 2px 10px; font-size: 13px; color: var(--ink2); }
+.day-pnl b { font-family: var(--f-num); font-size: 15px; }
+.day-pnl .go { margin-left: auto; color: var(--accent); font-weight: 700; }
+textarea.prompt-edit { width: 100%; min-height: 50vh; font-family: var(--f-num); font-size: 12px; line-height: 1.5; color: var(--ink); background: var(--bg);
+  border: 1px solid var(--line); border-radius: 10px; padding: 10px; resize: vertical; }
+.badge.mod { background: var(--warn-weak); color: var(--warn); }
+
 /* 予想の条件 */
 .cond-line { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; margin: 10px 0 0; padding: 9px 12px;
   border-radius: 12px; border: 1px dashed var(--line); font-size: 13px; color: var(--ink2); }
@@ -398,7 +414,7 @@ body.previewing .send-bar { bottom: 52px; }
 <div class="menu hidden" id="menu">
   <button id="debugToggle">取得中のサイトをプレビュー<span class="check" id="debugCheck"></span></button>
   <button id="recordsBtn">予想の記録と答え合わせ<span class="check num" id="recBadge"></span></button>
-  <button id="settingsBtn">予想の条件（予算・点数・期待値）</button>
+  <button id="settingsBtn">予想の条件と指示文</button>
   <button id="clearCache">収集済みのレースを消す</button>
   <button id="aboutBtn">このアプリについて・更新<span class="check num" id="verText"></span></button>
 </div>
@@ -448,7 +464,7 @@ const Native = window.Android || {
   setReservation(j) { return JSON.stringify({ ok: true, exact: false, notif: true }); }, removeReservation() {},
   takeBackgroundResults() { return "[]"; }, exactAlarmAllowed() { return false; }, openExactAlarmSettings() {},
   notificationsAllowed() { return true; }, requestNotifications() {},
-  readClipboard() { return ""; }, fetchResults() {}, exportRecords() {}
+  readClipboard() { return ""; }, fetchResults() {}, exportRecords() {}, importRecords() {}, scheduleResultCheck() { return "{}"; }, cancelResultCheck() {}, takeRaceResults() { return "[]"; }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -655,6 +671,15 @@ function renderRaces() {
   head.append(el("h2", null, `${v.name}　${v.races.length}レース`));
   head.append(el("p", null, "タップで収集・長押しで通知"));
   area.append(head);
+  const pnl = dayPnl(state.date);
+  if (pnl) {
+    const b = el("button", "day-pnl");
+    b.append(el("span", null, state.date === todayStr() ? "今日" : "この日"), el("span", null, `記録 ${pnl.n}件・結果 ${pnl.settled}件`));
+    if (pnl.settled) b.append(el("b", pnl.d >= 0 ? "up" : "down", `${pnl.d >= 0 ? "+" : ""}${yen(pnl.d)}`));
+    b.append(el("span", "go", "記録 ›"));
+    b.onclick = showRecords;
+    area.append(b);
+  }
   const pi = patInfo(state.date, v.name);
   if (pi.status === "sold") {
     const pl = el("p", "pat-line");
@@ -828,9 +853,34 @@ function renderResult() {
   body.append(row);
   updateTimeLine();
   const cond = el("button", "cond-line");
-  cond.append(el("span", null, "AI への条件"), el("b", null, betSummary(betSettings())), el("span", "go", "変更 ›"));
+  cond.append(el("span", null, "AI への条件"), el("b", null, betSummary(betSettings()) + (promptTemplate() ? "・指示文は書き換え中" : "")), el("span", "go", "変更 ›"));
   cond.onclick = () => { state.back = "result"; showSettings(); };
   body.append(cond);
+
+  // オッズの動き（取り直したとき）
+  if (res.diff) {
+    const dc = el("div", "card diff-card");
+    dc.append(el("h3", null, `前回（${res.diff.prevAt}）からの変化`));
+    if (!res.diff.items.length) dc.append(el("p", "note", "単勝10%以上の動き・取消・騎手変更はありません"));
+    else {
+      const ul = el("ul", "diff-list");
+      for (const it of res.diff.items) {
+        const li = el("li"); li.append(el("b", null, `${it.no} ${it.name}　`));
+        it.changes.forEach((c, i) => { if (i) li.append(document.createTextNode("／")); li.append(el("span", c.kind === "odds" ? (c.down ? "dn" : "upc") : null, c.text)); });
+        ul.append(li);
+      }
+      dc.append(ul);
+      dc.append(el("p", "note", "↓は売れて下がった、↑は上がった。この変化は AI へ送るテキストにも入ります"));
+    }
+    body.append(dc);
+  }
+  // オッズの注記（複勝の大口投票の疑い）
+  if (info.odds_notes && info.odds_notes.length) {
+    const nc = el("div", "card note-card"); nc.append(el("h3", null, "オッズの注記"));
+    const ul = el("ul"); for (const n of info.odds_notes) ul.append(el("li", null, n)); nc.append(ul);
+    nc.append(el("p", "note", "AI へ送るテキストにも入っています"));
+    body.append(nc);
+  }
 
   // 欠損（1行に畳む）
   if (info.warnings.length) {
@@ -993,9 +1043,13 @@ const App = {
     }
     setPreview(false);
     const at = res.at;
-    const c = readCache(); c[cacheKey(state.date, job.venue, job.race.no)] = { at, text: res.text, info: res.info }; writeCache(c);
+    const c = readCache(); const ck = cacheKey(state.date, job.venue, job.race.no);
+    // 同じレースを取り直したときは、前回の収集と比べたオッズの動きを残す
+    const prev = c[ck];
+    if (prev && prev.info) res.diff = { prevAt: prev.at.slice(11, 16), items: KS.diffRaces(prev.info, res.info) };
+    c[ck] = { at, text: res.text, info: res.info, diff: res.diff || null }; writeCache(c);
     Native.copy(textFor(res));
-    showResult(job.venue, job.race, { at, text: res.text, info: res.info }, true);
+    showResult(job.venue, job.race, { at, text: res.text, info: res.info, diff: res.diff || null }, true);
   },
   // 戻るボタン：一覧以外なら一覧へ戻して true、一覧なら false（アプリを閉じる）
   back() {
@@ -1016,10 +1070,31 @@ const App = {
   onPatCalendar(month, data) { onPatCalendar(month, data); },
   onRaceResult(raceId, res) { onRaceResult(raceId, res); },
   onResultsDone(err) { onResultsDone(err); },
+  // 読み込んだファイルの中身（書き出しと同じ JSON。配列か {records: [...]}）を記録へ足す
+  onImported(text, err) {
+    if (text == null) { toast(err ? `読み込めませんでした（${err}）` : "読み込みを取りやめました"); return; }
+    let items;
+    try { items = JSON.parse(text); } catch (e) { toast("JSON として読めませんでした"); return; }
+    if (items && !Array.isArray(items)) items = items.records || [];
+    const recs = readRecords();
+    let added = 0, merged = 0;
+    for (const r of items) {
+      if (!r || !r["日付"] || !r["競馬場"] || !r["レース番号"]) continue;
+      const k = cacheKey(r["日付"], r["競馬場"], r["レース番号"]);
+      const cur = recs[k];
+      if (!cur) { recs[k] = r; added++; continue; }
+      let ch = false;
+      for (const f of ["AI", "結果"]) if (!cur[f] && r[f]) { cur[f] = r[f]; ch = true; }
+      if (ch) merged++;
+    }
+    writeRecords(recs); updateRecBadge();
+    toast(`読み込みました（新しい記録 ${added}件・足した記録 ${merged}件）`);
+    if (state.screen === "records") renderRecords();
+  },
   onExported(ok, err) { toast(ok ? "書き出しました" : err ? `書き出せませんでした（${err}）` : "書き出しを取りやめました"); },
   // アプリに戻ってきたとき：自動収集の結果・予約・送り先を読み直す
   onResume() {
-    mergeBackgroundResults(); loadReservations(); updateRecBadge();
+    mergeBackgroundResults(); mergeRaceResults(); loadReservations(); updateRecBadge();
     if (state.screen === "home" && !state.loading) renderRaces();
     if (state.screen === "result" && state.result) renderResult();
   },
@@ -1199,9 +1274,32 @@ function pasteAiAnswer() {
   rec["AI"] = Object.assign(parsed, { "記録時刻": new Date().toISOString().slice(0, 19).replace("T", " ") });
   recs[key] = rec;
   writeRecords(recs); saveAiText(key, text);
+  scheduleResultCheck(key, rec, race);
   const total = parsed["予想"] ? Object.values(parsed["予想"]).reduce((t, v) => t + v["勝率"], 0) : 100;
   toast(Math.abs(total - 100) > 5 ? `記録しました（推定勝率の合計が ${total.toFixed(1)}% です）` : "記録しました");
   renderResult(); updateRecBadge();
+}
+
+// 発走の15分後に結果を自動で1回取り、的中・不的中を通知する（アプリを閉じていても。Kotlin の Reservations）
+function scheduleResultCheck(key, rec, race) {
+  const um = untilMin(rec["日付"], rec["発走"]);
+  if (um == null || !rec.race_id) return;
+  try {
+    Native.scheduleResultCheck(JSON.stringify({ key, race_id: rec.race_id, date: rec["日付"], venue: rec["競馬場"], no: rec["レース番号"],
+      title: rec["レース名"] || race.title || "", time: rec["発走"], start: Math.round(Date.now() + um * 60000), bets: rec["AI"]["買い目"] }));
+  } catch (e) { /* 予約できなくても記録は残る */ }
+}
+// アプリを閉じている間に自動で取った結果を、記録へ入れる
+function mergeRaceResults() {
+  let list = [];
+  try { list = JSON.parse(Native.takeRaceResults() || "[]"); } catch (e) {}
+  if (!list.length) return;
+  const recs = readRecords();
+  for (const x of list) {
+    const k = Object.keys(recs).find((kk) => recs[kk].race_id === x.race_id);
+    if (k && !recs[k]["結果"] && x.result && KS.resultFinished(x.result)) recs[k]["結果"] = Object.assign(x.result, { "取得時刻": x.at || "" });
+  }
+  writeRecords(recs);
 }
 
 // 結果を取りに行く（race_id の配列）。1件ずつ App.onRaceResult で返ってくる
@@ -1232,6 +1330,20 @@ function onResultsDone(err) {
   updateRecBadge();
   if (state.screen === "records") renderRecords();
   if (state.screen === "result" && state.result) renderResult();
+}
+// その日の記録の収支（AI の買い目どおりに買ったとして）。記録が無ければ null
+function dayPnl(date) {
+  const rs = Object.values(readRecords()).filter((r) => r["日付"] === date && r["AI"]);
+  if (!rs.length) return null;
+  let d = 0, settled = 0;
+  for (const r of rs) {
+    if (!r["結果"]) continue;
+    const rows = KS.settleBets(r);
+    if (!rows) continue;
+    settled++;
+    d += rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0);
+  }
+  return { n: rs.length, settled, d };
 }
 function updateRecBadge() { const n = pendingResults().length; $("recBadge").textContent = n ? `結果待ち ${n}` : ""; }
 
@@ -1276,7 +1388,7 @@ function aiCard(venue, race) {
     const ss = sinceStart(rec);
     if (ss != null && ss >= 15 && rec.race_id) {
       const b = el("button", "btn secondary preview-btn", "結果を取得して答え合わせ"); b.onclick = () => fetchResults([key]); c.append(b);
-    } else c.append(el("p", "note", "確定から約10分後（発走の15分後以降）に、結果を取得して答え合わせできます"));
+    } else c.append(el("p", "note", "発走の15分後に結果を自動で取得し、的中・不的中を通知します（確定していなければ15分おきに読み直し、3回まで）。手動で取得するのは発走の15分後から"));
   }
   // 市場と AI の比較（AI の推定勝率の高い順）
   const horses = (state.result.res.info.horses || []).filter((x) => !x.cancel);
@@ -1299,7 +1411,7 @@ function aiCard(venue, race) {
   const row = el("div", "btn-row"); row.style.marginTop = "10px";
   const again = el("button", "btn quiet", "貼り直す"); again.onclick = pasteAiAnswer;
   const del = el("button", "btn quiet", "記録を消す");
-  del.onclick = () => { if (del.dataset.armed) { const r = readRecords(); delete r[key]; writeRecords(r); renderResult(); updateRecBadge(); toast("記録を消しました"); } else { del.dataset.armed = "1"; del.textContent = "もう一度押すと消します"; } };
+  del.onclick = () => { if (del.dataset.armed) { const r = readRecords(); delete r[key]; writeRecords(r); try { Native.cancelResultCheck(key); } catch (e) {} renderResult(); updateRecBadge(); toast("記録を消しました"); } else { del.dataset.armed = "1"; del.textContent = "もう一度押すと消します"; } };
   row.append(again, del); c.append(row);
   return c;
 }
@@ -1407,7 +1519,10 @@ function renderRecords() {
     Native.exportRecords(JSON.stringify(Object.values(readRecords()), null, 1), `keiba-records-${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}.json`);
   };
   act.append(ex);
-  act.append(el("p", "note", "書き出したファイルを PC へ移し、run.bat import <ファイル> で取り込むと verify.bat で集計できます"));
+  const im = el("button", "btn secondary", "読み込む（書き出したファイルから戻す）");
+  im.onclick = () => Native.importRecords();
+  act.append(im);
+  act.append(el("p", "note", "書き出したファイルは、機種変更や入れ直しのあとに「読み込む」で戻せます。PC へ移して run.bat import <ファイル> で取り込むと verify.bat でも集計できます"));
   body.append(act);
 }
 
@@ -1425,11 +1540,23 @@ function betSettings() {
   v.max_bets = Math.min(v.max_bets, Math.floor(v.budget / 100));
   return v;
 }
+// 指示文（設定画面で書き換えたもの。未設定なら既定の指示文）
+const PROMPT_KEY = "keiba-prompt";
+function promptTemplate() { const t = store.get(PROMPT_KEY, null); return t && t.trim() ? t : null; }
 const fmtEv = (v) => (window.KS ? KS.fmtEv(v) : String(v));
 const yen = (n) => `${Number(n).toLocaleString("ja-JP")}円`;
 function betSummary(b) { return `予算 ${yen(b.budget)}・最大${b.max_bets}点・期待値 ${fmtEv(b.ev_min)} 以上`; }
 // 送る・コピー・表示するテキスト（指示文を今の条件で書き直したもの）
-function textFor(res) { return window.KS ? KS.withSettings(res.text, betSettings()) : res.text; }
+function textFor(res) {
+  if (!window.KS) return res.text;
+  let t = KS.withSettings(res.text, Object.assign({}, betSettings(), { template: promptTemplate() }));
+  if (res.diff) {
+    const block = KS.formatDiff(res.diff.items, res.diff.prevAt);
+    const i = t.indexOf("【データの欠損】") >= 0 ? t.indexOf("【データの欠損】") : t.indexOf("【AIへの指示】");
+    if (i >= 0) t = t.slice(0, i) + block + "\n\n" + t.slice(i);
+  }
+  return t;
+}
 
 function showSettings() {
   closeMenu();
@@ -1439,7 +1566,7 @@ function showSettings() {
 function renderSettings() {
   const b = betSettings();
   const body = $("detailBody"); body.replaceChildren();
-  body.append(el("h2", "race-title", "予想の条件"));
+  body.append(el("h2", "race-title", "予想の条件と指示文"));
   body.append(el("p", "race-sub", "AI への指示文に入れる条件です。収集済みのレースにも、次に送るときから効きます"));
 
   const card = el("div", "card");
@@ -1483,11 +1610,36 @@ function renderSettings() {
   // 指示文のうち条件が入る行
   const pc = el("div", "card");
   pc.append(el("h3", null, "指示文に入る文"));
-  const lines = (window.KS ? KS.promptText(b) : "").split("\n").filter((l) => l.includes("予算は") || l.includes("期待値 =") );
+  const lines = (window.KS ? KS.promptText(Object.assign({}, b, { template: promptTemplate() })) : "").split("\n").filter((l) => /\d+円|期待値/.test(l)).slice(0, 4);
   pc.append(el("pre", "prompt-preview", lines.join("\n")));
   body.append(pc);
 
-  const reset = el("button", "btn quiet", "既定値に戻す");
+  // 指示文の編集
+  const tc = el("div", "card");
+  const th = el("h3", null, "指示文");
+  if (promptTemplate()) th.append(el("span", "badge mod", "書き換え中"));
+  tc.append(th);
+  tc.append(el("p", "note", "AI への指示文を書き換えられます。{BUDGET}・{MAX_BETS}・{EV_MIN} は上の条件に置き換わります。記録と答え合わせを使うなら、最後の「#PRED」「#BET」の書式の指示は残してください"));
+  const ta = el("textarea", "prompt-edit");
+  ta.value = (promptTemplate() || KS.PROMPT_TEXT).trim();
+  ta.spellcheck = false;
+  tc.append(ta);
+  const prow = el("div", "btn-row"); prow.style.marginTop = "8px";
+  const psave = el("button", "btn secondary", "指示文を保存");
+  psave.onclick = () => {
+    let t = ta.value.trim();
+    if (!t.startsWith("【AIへの指示】")) t = "【AIへの指示】\n" + t;  // 見出しは書き直しの目印なので必ず付ける
+    if (t.trim() === KS.PROMPT_TEXT.trim()) { store.set(PROMPT_KEY, null); toast("既定の指示文と同じなので、既定に戻しました"); renderSettings(); return; }
+    store.set(PROMPT_KEY, t);
+    toast(t.includes("#PRED") ? "指示文を保存しました" : "保存しました（#PRED の指示が無いので、記録は読めません）");
+    renderSettings();
+  };
+  const preset = el("button", "btn quiet", "既定の指示文に戻す");
+  preset.onclick = () => { if (preset.dataset.armed) { store.set(PROMPT_KEY, null); toast("既定の指示文に戻しました"); renderSettings(); } else { preset.dataset.armed = "1"; preset.textContent = "もう一度押すと戻します"; } };
+  prow.append(psave, preset); tc.append(prow);
+  body.append(tc);
+
+  const reset = el("button", "btn quiet", "予算・点数・期待値を既定値に戻す");
   reset.style.width = "100%"; reset.style.marginTop = "12px";
   reset.onclick = () => { store.set(BET_KEY, {}); renderSettings(); toast("既定値に戻しました"); };
   body.append(reset);
@@ -1593,6 +1745,14 @@ function openFromNotification(p) {
   if (!p || !p.r) return;
   const r = p.r;
   closeSheet(); closeMenu();
+  // 答え合わせの通知：予想の記録を開く（取れていなければその場で取りに行く）
+  if (p.type === "records" || p.type === "fetch") {
+    mergeRaceResults();
+    showRecords();
+    const rec = readRecords()[r.key];
+    if (p.type === "fetch" && rec && !rec["結果"]) fetchResults([r.key]);
+    return;
+  }
   if (state.date !== r.date) { state.date = r.date; renderDate(); loadRaceList(); }
   state.venue = r.venue;
   const race = { no: r.no, title: r.title, time: r.time };
@@ -1608,7 +1768,11 @@ function mergeBackgroundResults() {
   try { list = JSON.parse(Native.takeBackgroundResults() || "[]"); } catch (e) {}
   if (!list.length) return;
   const c = readCache();
-  for (const x of list) c[x.key] = { at: x.at, text: x.text, info: x.info };
+  for (const x of list) {
+    const prev = c[x.key];
+    const diff = prev && prev.info ? { prevAt: prev.at.slice(11, 16), items: KS.diffRaces(prev.info, x.info) } : null;
+    c[x.key] = { at: x.at, text: x.text, info: x.info, diff };
+  }
   writeCache(c);
 }
 
@@ -1690,6 +1854,7 @@ setInterval(() => {
 renderDate();
 applyTheme();
 mergeBackgroundResults();
+mergeRaceResults();
 loadReservations();
 renderUpdateUi();
 updateRecBadge();

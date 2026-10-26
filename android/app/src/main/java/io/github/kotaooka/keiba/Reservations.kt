@@ -189,3 +189,106 @@ object BackgroundResults {
 object CollectLock {
     val mutex = Mutex()
 }
+
+/**
+ * 結果の自動取得の予約。AI の回答を記録したレースについて、発走の15分後に結果ページを1回読み、
+ * 的中・不的中を通知する。未確定なら15分おきに最大3回まで読み直す。
+ * 1件は {key, race_id, date, venue, no, title, time, start(ミリ秒), bets:[{券種,組み合わせ,金額}], tries}
+ */
+object ResultChecks {
+    private const val PREFS = "result_checks"
+    private const val KEY_LIST = "list"
+    const val FIRST_DELAY = 15 * 60_000L   // 発走から最初に読むまで
+    const val RETRY_DELAY = 15 * 60_000L   // 未確定のとき次に読むまで
+    const val MAX_TRIES = 3
+
+    fun list(ctx: Context): List<JSONObject> {
+        val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LIST, "[]") ?: "[]"
+        val arr = runCatching { JSONArray(raw) }.getOrDefault(JSONArray())
+        return (0 until arr.length()).map { arr.getJSONObject(it) }
+    }
+
+    private fun save(ctx: Context, items: List<JSONObject>) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_LIST, JSONArray(items).toString()).apply()
+    }
+
+    /** 予約する（同じ key は置き換え）。発走から1日たったものは捨てる */
+    fun set(ctx: Context, r: JSONObject) {
+        val key = r.getString("key")
+        r.put("tries", r.optInt("tries", 0))
+        val keep = pruned(ctx).filter { it.optString("key") != key } + r
+        save(ctx, keep)
+        schedule(ctx, r, r.getLong("start") + FIRST_DELAY)
+    }
+
+    fun remove(ctx: Context, key: String) {
+        ctx.getSystemService(AlarmManager::class.java).cancel(intent(ctx, key, null, Reservations.exactAllowed(ctx)))
+        ctx.getSystemService(AlarmManager::class.java).cancel(intent(ctx, key, null, !Reservations.exactAllowed(ctx)))
+        save(ctx, pruned(ctx).filter { it.optString("key") != key })
+    }
+
+    /** 未確定だったので、少しあとにもう一度読む。回数を超えたら false */
+    fun retry(ctx: Context, key: String): Boolean {
+        val items = pruned(ctx)
+        val r = items.firstOrNull { it.optString("key") == key } ?: return false
+        val tries = r.optInt("tries", 0) + 1
+        if (tries >= MAX_TRIES) { remove(ctx, key); return false }
+        r.put("tries", tries)
+        save(ctx, items)
+        schedule(ctx, r, System.currentTimeMillis() + RETRY_DELAY)
+        return true
+    }
+
+    /** 端末の再起動後や、許可を変えて戻ってきたときに登録し直す */
+    fun rescheduleAll(ctx: Context) {
+        val items = pruned(ctx)
+        save(ctx, items)
+        val now = System.currentTimeMillis()
+        for (r in items) schedule(ctx, r, maxOf(r.getLong("start") + FIRST_DELAY, now + 60_000L))
+    }
+
+    private fun pruned(ctx: Context): List<JSONObject> {
+        val limit = System.currentTimeMillis() - 24 * 3600_000L
+        return list(ctx).filter { it.optLong("start") > limit }
+    }
+
+    private fun intent(ctx: Context, key: String, r: JSONObject?, exact: Boolean): PendingIntent {
+        val i = Intent(ctx, AlarmReceiver::class.java).apply {
+            action = "io.github.kotaooka.keiba.RESULT"
+            putExtra("key", key)
+            putExtra("kind", "result")
+            putExtra("exact", exact)
+            if (r != null) putExtra("reservation", r.toString())
+        }
+        return PendingIntent.getBroadcast(ctx, "$key|result".hashCode(), i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    private fun schedule(ctx: Context, r: JSONObject, at: Long) {
+        val am = ctx.getSystemService(AlarmManager::class.java)
+        val exact = Reservations.exactAllowed(ctx)
+        val pi = intent(ctx, r.getString("key"), r, exact)
+        if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+        else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+    }
+}
+
+/** 自動で取った結果の置き場所。アプリを開いたときに ui.html の予想の記録へ入れる */
+object RaceResults {
+    private fun file(ctx: Context) = File(ctx.filesDir, "race_results.json")
+
+    @Synchronized
+    fun add(ctx: Context, raceId: String, result: JSONObject, at: String) {
+        val arr = runCatching { JSONArray(file(ctx).readText()) }.getOrDefault(JSONArray())
+        arr.put(JSONObject().put("race_id", raceId).put("result", result).put("at", at))
+        file(ctx).writeText(arr.toString())
+    }
+
+    @Synchronized
+    fun take(ctx: Context): String {
+        val f = file(ctx)
+        if (!f.exists()) return "[]"
+        val text = f.readText()
+        f.delete()
+        return text
+    }
+}

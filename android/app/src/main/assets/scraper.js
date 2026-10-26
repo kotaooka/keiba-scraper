@@ -754,13 +754,69 @@
 
   // ========== AI貼り付け用テキスト整形 ==========
 
+  // オッズの偏りの注記（PC版の odds_notes と同じ）。単勝の人気が4番手以下なのに、複勝の下限が人気上位のどの馬よりも低く、
+  // かつ2.0倍以下の馬（複勝に大口の投票が入っている可能性）
+  function oddsNotes(horses) {
+    const rows = [];
+    for (const h of horses) {
+      if (h["取消"]) continue;
+      const tan = String(h["単勝"] ?? "").match(/\d+\.\d+/g);
+      const fuku = String(h["複勝"] ?? "").match(/\d+\.\d+/g);
+      if (tan && fuku) rows.push([h, tan[0], fuku[0]]);
+    }
+    // 単勝の低い順（人気順）。同じ値は元の順（Python の sort と同じく安定）
+    rows.sort((a, b) => parseFloat(a[1]) - parseFloat(b[1]));
+    const notes = [];
+    rows.forEach(([h, tan, fuku], i) => {
+      if (i < 3 || parseFloat(fuku) > 2.0) return;
+      const upper = Math.min(...rows.slice(0, i).map((r) => parseFloat(r[2])));
+      if (parseFloat(fuku) < upper) {
+        notes.push(`${h["馬番"]}番 ${h["馬名"] || ""}: 単勝${tan}倍（${i + 1}番人気）なのに、複勝の下限が${fuku}倍と` +
+          `人気上位${i}頭のどの馬（最も低くて${upper.toFixed(1)}倍）よりも低い。複勝に大口の投票が入っている可能性がある` +
+          "（この馬の複勝・ワイドは実力以上に低く、ほかの馬の複勝は高めに出やすい）");
+      }
+    });
+    return notes;
+  }
+
+  // ===== オッズの動き（アプリ版だけ。同じレースを取り直したとき、前回の収集と比べる） =====
+  // prev・cur は buildWithInfo の info。単勝が10%以上動いた馬・取消・騎手変更・馬体重の発表を拾う
+  function diffRaces(prev, cur) {
+    const items = [];
+    const prevBy = {};
+    for (const h of (prev && prev.horses) || []) prevBy[String(parseInt(h.no, 10))] = h;
+    for (const h of (cur && cur.horses) || []) {
+      const p = prevBy[String(parseInt(h.no, 10))];
+      if (!p) continue;
+      const ch = [];
+      if (h.cancel && !p.cancel) ch.push({ kind: "cancel", text: "取消" });
+      if (!h.cancel) {
+        const a = parseFloat(p.odds), b = parseFloat(h.odds);
+        if (a > 0 && b > 0 && Math.abs(b - a) / a >= 0.1) ch.push({ kind: "odds", from: p.odds, to: h.odds, down: b < a, text: `単勝 ${p.odds}→${h.odds}${b < a ? "↓" : "↑"}` });
+        if (p.jockey && h.jockey && p.jockey !== h.jockey) ch.push({ kind: "jockey", text: `騎手 ${p.jockey}→${h.jockey}` });
+        if ((!p.weight || p.weight === "未発表") && h.weight && h.weight !== "未発表") ch.push({ kind: "weight", text: `馬体重 ${h.weight}` });
+      }
+      if (ch.length) items.push({ no: h.no, name: h.name, changes: ch });
+    }
+    return items;
+  }
+
+  // オッズの動きを AI へ送るテキストの一節にする（prevAt は前回の収集時刻 "HH:MM"）
+  function formatDiff(items, prevAt) {
+    const lines = [`【前回の収集（${prevAt}）からの変化】`, "凡例: 単勝の↓は下がった（売れて人気が上がった）、↑は上がった。単勝は10%以上動いた馬だけ"];
+    if (!items.length) lines.push("・大きな変化なし");
+    for (const it of items) lines.push(`・${it.no}番 ${it.name}: ${it.changes.map((c) => c.text).join("／")}`);
+    return lines.join("\n");
+  }
+
   // 期待値の下限の表示（PC版の fmt_ev と同じ：1.2 / 1.25 / 1.0）
   function fmtEv(v) { const s = Number(v).toFixed(2); return s.endsWith("0") ? s.slice(0, -1) : s; }
 
   // AI への指示文（PC版の prompt_text と同じ）
   function promptText(settings) {
     const st = Object.assign({}, DEFAULT_SETTINGS, settings || {});
-    return PROMPT_TEXT.split("{BUDGET}").join(String(st.budget)).split("{MAX_BETS}").join(String(st.max_bets))
+    // アプリの設定画面で書き換えた指示文があれば、それを使う（{BUDGET}・{MAX_BETS}・{EV_MIN} は同じく置き換える）
+    return (st.template || PROMPT_TEXT).split("{BUDGET}").join(String(st.budget)).split("{MAX_BETS}").join(String(st.max_bets))
       .split("{EV_MIN}").join(fmtEv(st.ev_min)).trim().split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
   }
 
@@ -1258,6 +1314,9 @@
       }
     }
 
+    const notes = oddsNotes(horses);
+    if (notes.length) lines.push("", "【オッズの注記】", ...notes.map((n) => `・${n}`));
+
     if (warnings && warnings.length) {
       lines.push("", "【データの欠損】", ...warnings.map((w) => `・${w}`));
     }
@@ -1309,6 +1368,7 @@
         heads: active.length,
         payout_rate: total && active.every((h) => h["市場勝率"] != null) ? 1 / total : null,
         warnings,
+        odds_notes: oddsNotes(horses),
         wide: (parts.wide || []).length,
         sanren: (parts.sanren || []).length,
         horses: horses.map((h) => ({
@@ -1333,8 +1393,9 @@
 
   global.KS = {
     buildWithInfo,
-    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, fmtEv, promptText, withSettings,
+    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, PROMPT_TEXT, fmtEv, promptText, withSettings,
     parsePatCalendar, parsePatRange,
+    oddsNotes, diffRaces, formatDiff,
     parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,

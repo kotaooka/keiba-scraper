@@ -24,11 +24,12 @@ docs/                     説明書と画面例
 | `keiba_scraper.py` の解析・整形 | `scraper.js`（同じ処理を JavaScript に移植） |
 | `fetch_page`・`collect_race`（Playwright） | `Scraper.kt`（WebView） |
 | 対話（`run.bat`） | `ui.html`（画面）と `MainActivity.kt`（画面との受け渡し） |
-| — | `Reservations.kt`・`Receivers.kt`・`CollectService.kt`（通知・自動収集）、`Updater.kt`（更新） |
+| — | `Reservations.kt`・`Receivers.kt`・`CollectService.kt`（通知・自動収集・結果の自動取得）、`Updater.kt`（更新） |
 
 - 解析を直すときは、`keiba_scraper.py` と `scraper.js` の両方を同じように直す。指示文（`PROMPT_TEXT`）・予想の条件の既定値（`BUDGET`・`MAX_BETS`・`EV_MIN`）・競馬場コード・アクセス間隔（`REQUEST_INTERVAL`）も両方にある
 - 予想の記録と答え合わせも両方にある（PC版の `parse_ai_block`・`parse_result`・`settle_bets`・`horse_rows`・`compute_summary` ↔ `scraper.js` の `parseAiBlock`・`parseResult`・`settleBets`・`horseRows`・`computeSummary`）。95%区間のブートストラップは、`scraper.js` に Python の `random.Random` と同じ乱数（MT19937）を移植しているので、同じ記録なら同じ値になる。記録の形式も同じなので、Android版の書き出しを PC版の `import` で取り込める
-- 即PAT・A-PAT の発売カレンダーの解析（`parsePatCalendar`）は Android版だけにある
+- オッズの注記（`odds_notes` ↔ `oddsNotes`）も両方にある
+- 即PAT・A-PAT の発売カレンダーの解析（`parsePatCalendar`）と、取り直したときのオッズの変化（`diffRaces`・`formatDiff`）は Android版だけにある
 
 ## 取れなくなったとき
 

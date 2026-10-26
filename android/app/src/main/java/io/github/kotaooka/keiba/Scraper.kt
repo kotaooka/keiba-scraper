@@ -133,6 +133,9 @@ class Scraper(
         return evalRaw("(function(){try{return $expr}catch(e){return {__error:String(e)}}})()")
     }
 
+    /** 収集用の WebView で KS の式を実行し、結果を JSON の文字列で返す（自動の答え合わせで使う） */
+    suspend fun evalKs(expr: String): String = call(expr)
+
     /** 文字列を返す JS の結果を Kotlin の文字列に戻す */
     private fun decodeString(raw: String): String =
         if (raw == "null") "" else (JSONTokener(raw).nextValue() as? String ?: raw)
