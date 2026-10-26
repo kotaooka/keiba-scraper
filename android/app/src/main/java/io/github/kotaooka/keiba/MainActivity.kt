@@ -362,9 +362,16 @@ class MainActivity : Activity() {
             }
         }
 
+        /** ブラウザでページを開く（https のみ。即PAT の入口・リリースページなど） */
         @JavascriptInterface
         fun openUrl(url: String) = runOnUiThread {
-            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+            val uri = android.net.Uri.parse(url)
+            if (uri.scheme != "https") return@runOnUiThread
+            try {
+                startActivity(Intent(Intent.ACTION_VIEW, uri))
+            } catch (e: ActivityNotFoundException) {
+                android.widget.Toast.makeText(this@MainActivity, "ブラウザが見つかりません", android.widget.Toast.LENGTH_SHORT).show()
+            }
         }
 
         @JavascriptInterface
