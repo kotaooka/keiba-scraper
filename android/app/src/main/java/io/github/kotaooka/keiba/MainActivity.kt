@@ -213,7 +213,7 @@ class MainActivity : Activity() {
                 try {
                     val out = scraper.collectRace(keibajo, date, raceNo)
                     if (out.json != null) {
-                        copyText(JSONObject(out.json).getString("text"))
+                        // コピーは UI 側で行う（指示文を今の予想の条件で書き直してから写すため）
                         js("App.onResult(${out.json})")
                     } else {
                         js("App.onResult(null, ${JSONObject.quote(out.error ?: "")})")

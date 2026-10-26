@@ -28,8 +28,9 @@
   const NETKEIBA = "https://nar.netkeiba.com";
   const COND_MAP = { "稍": "稍重", "不": "不良", "良": "良", "重": "重", "稍重": "稍重", "不良": "不良" };
 
-  // 買い目に採用する期待値の下限（PC版の EV_MIN と同じ）
+  // 買い目の条件の既定値（PC版の BUDGET・MAX_BETS・EV_MIN と同じ）。アプリでは設定画面で変えられる
   const EV_MIN = 1.2;
+  const DEFAULT_SETTINGS = { budget: 1000, max_bets: 3, ev_min: EV_MIN };
 
   // AI への指示文（PC版の PROMPT_TEXT と同じ文面にそろえる）
   const PROMPT_TEXT = `
@@ -38,7 +39,7 @@
 
 ■ 目的と制約
 ・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。
-・予算は1000円、最大3点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
+・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
@@ -57,7 +58,7 @@
    ・騎手：乗り替わりの有無と騎手コンビ成績
    ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
 4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
-5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大3点を選び、資金を配分する。
+5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。
 
 ■ 出力フォーマット（この順で出力）
 1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬
@@ -732,7 +733,23 @@
 
   // ========== AI貼り付け用テキスト整形 ==========
 
-  function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt) {
+  // 期待値の下限の表示（PC版の fmt_ev と同じ：1.2 / 1.25 / 1.0）
+  function fmtEv(v) { const s = Number(v).toFixed(2); return s.endsWith("0") ? s.slice(0, -1) : s; }
+
+  // AI への指示文（PC版の prompt_text と同じ）
+  function promptText(settings) {
+    const st = Object.assign({}, DEFAULT_SETTINGS, settings || {});
+    return PROMPT_TEXT.split("{BUDGET}").join(String(st.budget)).split("{MAX_BETS}").join(String(st.max_bets))
+      .split("{EV_MIN}").join(fmtEv(st.ev_min)).trim().split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
+  }
+
+  // 作ったテキストの指示文の部分だけを、今の条件で書き直す（収集し直さずに条件を変えられる）
+  function withSettings(text, settings) {
+    const i = text.indexOf("【AIへの指示】");
+    return i < 0 ? text : text.slice(0, i) + promptText(settings);
+  }
+
+  function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt, settings) {
     ri = ri || {};
     const d = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6)}`;
     let title = `${d} ${keibajo} ${raceNo}R`;
@@ -826,7 +843,7 @@
       lines.push("", "【データの欠損】", ...warnings.map((w) => `・${w}`));
     }
 
-    lines.push("", ...PROMPT_TEXT.split("{EV_MIN}").join(EV_MIN.toFixed(1)).trim().split("\n"));
+    lines.push("", ...promptText(settings).split("\n"));
     return lines.map((l) => l.replace(/\s+$/, "")).join("\n");
   }
 
@@ -850,7 +867,7 @@
     if (parts.sanren_note) warnings.push(parts.sanren_note);
     for (const n of parts.notes || []) warnings.push(n);
     return formatForAi(horses, parts.keibajo, parts.race_date, parts.race_no, parts.shutuba.race_info,
-      parts.wide, parts.sanren, warnings, payoutRate, parts.collected_at || nowStamp());
+      parts.wide, parts.sanren, warnings, payoutRate, parts.collected_at || nowStamp(), parts.settings);
   }
 
   // build と同じテキストに、画面の要約に使う情報を添えて返す（アプリの結果画面用）
@@ -897,7 +914,7 @@
 
   global.KS = {
     buildWithInfo,
-    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN,
+    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, fmtEv, promptText, withSettings,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,
     parseShutuba, parseRaceInfo, parseKyakuType,

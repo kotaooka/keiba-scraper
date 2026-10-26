@@ -71,15 +71,19 @@ COND_MAP = {"稍": "稍重", "不": "不良", "良": "良", "重": "重",
 # 検証（verify）の実績を見て決め直す
 EV_MIN = 1.2
 
+# AI に伝える予算（円）と最大点数。1点は100円単位
+BUDGET = 1000
+MAX_BETS = 3
+
 # AI への指示文（出力テキストの末尾に付ける）。文言を変えるときはここだけ直す
-# {EV_MIN} は実行時に EV_MIN の値に置き換わる
+# {BUDGET}・{MAX_BETS}・{EV_MIN} は実行時に上の値に置き換わる（Android版は設定画面で変えられる）
 PROMPT_TEXT = """
 【AIへの指示】
 上記データだけを使って、このレースの買い目を決めてください。
 
 ■ 目的と制約
 ・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。
-・予算は1000円、最大3点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
+・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
@@ -98,7 +102,7 @@ PROMPT_TEXT = """
    ・騎手：乗り替わりの有無と騎手コンビ成績
    ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
 4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
-5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大3点を選び、資金を配分する。
+5. 買い目：期待値 = 推定的中率 × オッズ で計算する。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する。
 
 ■ 出力フォーマット（この順で出力）
 1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬
@@ -982,6 +986,19 @@ def copy_to_clipboard(text):
 
 # ========== AI貼り付け用テキスト整形 ==========
 
+def fmt_ev(v):
+    """期待値の下限の表示（小数2桁まで、末尾の0は1つ落とす：1.2 / 1.25 / 1.0）"""
+    s = f"{v:.2f}"
+    return s[:-1] if s.endswith("0") else s
+
+
+def prompt_text(budget=None, max_bets=None, ev_min=None):
+    """AI への指示文（各行の末尾の空白を除いて改行でつなぐ）"""
+    t = (PROMPT_TEXT.replace("{BUDGET}", str(budget or BUDGET)).replace("{MAX_BETS}", str(max_bets or MAX_BETS))
+         .replace("{EV_MIN}", fmt_ev(ev_min or EV_MIN)))
+    return "\n".join(line.rstrip() for line in t.strip().split("\n"))
+
+
 def format_for_ai(horses, keibajo, date, race_no, race_info=None,
                   wide_top=None, sanren_top=None, warnings=None, payout_rate=None):
     d = f"{date[:4]}/{date[4:6]}/{date[6:]}"
@@ -1077,7 +1094,7 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
     if warnings:
         lines += ["", "【データの欠損】"] + [f"・{w}" for w in warnings]
 
-    lines += ["", *PROMPT_TEXT.replace("{EV_MIN}", f"{EV_MIN:.1f}").strip().split("\n")]
+    lines += ["", *prompt_text().split("\n")]
     return "\n".join(line.rstrip() for line in lines)
 
 
