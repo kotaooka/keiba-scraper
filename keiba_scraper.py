@@ -1078,6 +1078,67 @@ def prompt_text(budget=None, max_bets=None, ev_min=None):
     return "\n".join(line.rstrip() for line in t.strip().split("\n"))
 
 
+def _time_sec(t):
+    """走破タイム "1:28.3" / "58.9" を秒にする。読めなければ None"""
+    m = re.fullmatch(r"(?:(\d+):)?(\d+(?:\.\d+)?)", str(t or "").strip())
+    if not m:
+        return None
+    return int(m.group(1) or 0) * 60 + float(m.group(2))
+
+
+def speed_table(horses, keibajo, race_info):
+    """過去5走のうち、今回と同じ競馬場・同じ馬場種別・同じ距離のレースの最速タイムを馬ごとに出し、速い順に並べる。
+    タイムは条件が違うと比べられないので、同じ条件のレースだけを使う（Android版の speedTable と同じ）"""
+    ri = race_info or {}
+    dist = re.sub(r"\D", "", str(ri.get("距離", "")))
+    surface = {"ダート": "ダ", "芝": "芝"}.get(ri.get("馬場種別", ""), "")
+    if not dist or not surface:
+        return None
+    rows, none = [], []
+    for h in horses:
+        if h.get("取消"):
+            continue
+        best = None
+        n = 0
+        for r in h.get("過去成績") or []:
+            if r.get("JRA") or r.get("競馬場") != keibajo:
+                continue
+            if str(r.get("距離", "")).replace("m", "") != surface + dist:
+                continue
+            if not re.match(r"\d", str(r.get("着順", ""))):
+                continue  # 取止・中止などはタイムが無い
+            sec = _time_sec(r.get("タイム"))
+            if sec is None:
+                continue
+            n += 1
+            agari = _num(r.get("上がり"))
+            if best is None or sec < best["sec"]:
+                best = {"sec": sec, "time": r.get("タイム", ""), "馬場": r.get("馬場", ""),
+                        "日付": str(r.get("日付", ""))[5:], "上がり": agari}
+        if best:
+            rows.append({"馬番": h["馬番"], "馬名": h.get("馬名", ""), "n": n, **best})
+        else:
+            none.append(h["馬番"])
+    if not rows:
+        return None
+    rows.sort(key=lambda x: (x["sec"], int(x["馬番"]) if str(x["馬番"]).isdigit() else 0))
+    return {"条件": f"{keibajo} {surface}{dist}m", "rows": rows, "none": none}
+
+
+def format_speed(st):
+    """speed_table の結果を AI へ送るテキストの一節にする"""
+    lines = ["", f"【同条件の走破タイム】{st['条件']}（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速。速い順）"]
+    top = st["rows"][0]["sec"]
+    for i, x in enumerate(st["rows"], 1):
+        diff = "最速" if i == 1 else f"+{x['sec'] - top:.1f}秒"
+        agari = f"上がり{x['上がり']:.1f}" if x["上がり"] is not None else "上がり--"
+        lines.append(f"  {i:2d}位  {pad(str(x['馬番']) + '番 ' + x['馬名'], 22)}  {x['time']:>6}  {pad(diff, 8)}"
+                     f"  {x['馬場'] or '--'} {x['日付']}  {agari}  同条件{x['n']}走")
+    if st["none"]:
+        lines.append(f"  同条件の走歴なし: 馬番 {', '.join(st['none'])}")
+    return lines
+
+
 def format_for_ai(horses, keibajo, date, race_no, race_info=None,
                   wide_top=None, sanren_top=None, warnings=None, payout_rate=None):
     d = f"{date[:4]}/{date[4:6]}/{date[6:]}"
@@ -1169,6 +1230,10 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
             lines += ["", f"【{label} 人気上位】"]
             for i, c in enumerate(combos[:10], 1):
                 lines.append(f"  {i:2d}位  {pad(c['組み合わせ'], 8)}  {c['オッズ']}倍")
+
+    st = speed_table(horses, keibajo, ri)
+    if st:
+        lines += format_speed(st)
 
     notes = odds_notes(horses)
     if notes:

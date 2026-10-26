@@ -1283,6 +1283,53 @@
     return i < 0 ? text : text.slice(0, i) + promptText(settings);
   }
 
+  // 走破タイム "1:28.3" / "58.9" を秒に（PC版の _time_sec）
+  function timeSec(t) {
+    const m = /^(?:(\d+):)?(\d+(?:\.\d+)?)$/.exec(String(t || "").trim());
+    return m ? (+(m[1] || 0)) * 60 + parseFloat(m[2]) : null;
+  }
+
+  // 過去5走のうち、今回と同じ競馬場・同じ馬場種別・同じ距離のレースの最速タイム（PC版の speed_table）
+  function speedTable(horses, keibajo, ri) {
+    ri = ri || {};
+    const dist = String(ri["距離"] || "").replace(/\D/g, "");
+    const surface = { "ダート": "ダ", "芝": "芝" }[ri["馬場種別"] || ""] || "";
+    if (!dist || !surface) return null;
+    const rows = [], none = [];
+    for (const h of horses) {
+      if (h["取消"]) continue;
+      let best = null, n = 0;
+      for (const r of h["過去成績"] || []) {
+        if (r["JRA"] || r["競馬場"] !== keibajo) continue;
+        if (String(r["距離"] || "").replace(/m/g, "") !== surface + dist) continue;
+        if (!/^\d/.test(String(r["着順"] || ""))) continue;
+        const sec = timeSec(r["タイム"]);
+        if (sec === null) continue;
+        n++;
+        const agari = num(r["上がり"] == null ? "" : r["上がり"]);
+        if (best === null || sec < best.sec) best = { sec, time: r["タイム"] || "", "馬場": r["馬場"] || "", "日付": String(r["日付"] || "").slice(5), "上がり": agari };
+      }
+      if (best) rows.push(Object.assign({ "馬番": h["馬番"], "馬名": h["馬名"] || "", n }, best));
+      else none.push(h["馬番"]);
+    }
+    if (!rows.length) return null;
+    rows.sort((a, b) => a.sec - b.sec || ((/^\d+$/.test(String(a["馬番"])) ? +a["馬番"] : 0) - (/^\d+$/.test(String(b["馬番"])) ? +b["馬番"] : 0)));
+    return { "条件": `${keibajo} ${surface}${dist}m`, rows, none };
+  }
+
+  function formatSpeed(st) {
+    const lines = ["", `【同条件の走破タイム】${st["条件"]}（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速。速い順）`];
+    const top = st.rows[0].sec;
+    st.rows.forEach((x, i) => {
+      const diff = i === 0 ? "最速" : `+${pyFixed(x.sec - top, 1)}秒`;
+      const agari = x["上がり"] !== null ? `上がり${pyFixed(x["上がり"], 1)}` : "上がり--";
+      lines.push(`  ${String(i + 1).padStart(2)}位  ${pad(String(x["馬番"]) + "番 " + x["馬名"], 22)}  ${String(x.time).padStart(6)}  ${pad(diff, 8)}` +
+        `  ${x["馬場"] || "--"} ${x["日付"]}  ${agari}  同条件${x.n}走`);
+    });
+    if (st.none.length) lines.push(`  同条件の走歴なし: 馬番 ${st.none.join(", ")}`);
+    return lines;
+  }
+
   function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt, settings) {
     ri = ri || {};
     const d = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6)}`;
@@ -1373,6 +1420,9 @@
       }
     }
 
+    const st = speedTable(horses, keibajo, ri);
+    if (st) lines.push(...formatSpeed(st));
+
     const notes = oddsNotes(horses);
     if (notes.length) lines.push("", "【オッズの注記】", ...notes.map((n) => `・${n}`));
 
@@ -1430,6 +1480,8 @@
         odds_notes: oddsNotes(horses),
         wide: (parts.wide || []).length,
         sanren: (parts.sanren || []).length,
+        // 同条件の走破タイム（画面の表に使う）
+        speed: speedTable(horses, parts.keibajo, (parts.shutuba || {}).race_info),
         // 買い目の期待値の表示に使う組み合わせのオッズ（人気上位10組。キーは comboKey と同じ形）
         combos: {
           "ワイド": (parts.wide || []).slice(0, 10).map((c) => ({ key: comboKey("ワイド", String(c["組み合わせ"]).match(/\d+/g) || []), odds: String(c["オッズ"]) })),
@@ -1459,7 +1511,7 @@
     buildWithInfo,
     NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, PROMPT_TEXT, fmtEv, promptText, withSettings,
     parsePatCalendar, parsePatRange,
-    oddsNotes, diffRaces, formatDiff, pyFixed,
+    oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed,
     parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,
