@@ -1413,6 +1413,11 @@
         odds_notes: oddsNotes(horses),
         wide: (parts.wide || []).length,
         sanren: (parts.sanren || []).length,
+        // 買い目の期待値の表示に使う組み合わせのオッズ（人気上位10組。キーは comboKey と同じ形）
+        combos: {
+          "ワイド": (parts.wide || []).slice(0, 10).map((c) => ({ key: comboKey("ワイド", String(c["組み合わせ"]).match(/\d+/g) || []), odds: String(c["オッズ"]) })),
+          "3連複": (parts.sanren || []).slice(0, 10).map((c) => ({ key: comboKey("3連複", String(c["組み合わせ"]).match(/\d+/g) || []), odds: String(c["オッズ"]) })),
+        },
         horses: horses.map((h) => ({
           no: h["馬番"], waku: h["枠番"] || "", name: h["馬名"] || "", cancel: !!h["取消"],
           odds: h["単勝"] || "--", prob: h["市場勝率"], jockey: h["騎手"] || "",
