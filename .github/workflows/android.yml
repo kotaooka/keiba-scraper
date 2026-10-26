@@ -31,7 +31,18 @@ jobs:
 
       - name: Build debug APK
         working-directory: android
-        run: gradle assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee build.log
+        # 失敗したら、コンパイルエラーの行を注釈（::error::）として出す（ログを開かなくても API から読めるように）
+
+      - name: Report build errors
+        if: failure()
+        working-directory: android
+        run: |
+          grep -E "^e: |error:|What went wrong" -A2 build.log | head -40 | while IFS= read -r line; do
+            echo "::error::${line}"
+          done
 
       - uses: actions/upload-artifact@v4
         with:

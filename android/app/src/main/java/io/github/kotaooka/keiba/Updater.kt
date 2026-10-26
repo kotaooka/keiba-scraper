@@ -97,6 +97,7 @@ class Updater(private val context: Context) {
                             val reason = c.getInt(c.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON))
                             throw IllegalStateException("ダウンロードに失敗しました（理由コード $reason）")
                         }
+                        else -> Unit  // 待機中・ダウンロード中はそのまま待つ
                     }
                 }
             }
