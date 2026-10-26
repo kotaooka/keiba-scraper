@@ -26,7 +26,7 @@ docs/                     説明書と画面例
 | 対話（`run.bat`） | `ui.html`（画面）と `MainActivity.kt`（画面との受け渡し） |
 | — | `Reservations.kt`・`Receivers.kt`・`CollectService.kt`（通知・自動収集・結果の自動取得）、`Updater.kt`（更新） |
 
-- 解析を直すときは、`keiba_scraper.py` と `scraper.js` の両方を同じように直す。指示文（`PROMPT_TEXT`）・予想の条件の既定値（`BUDGET`・`MAX_BETS`・`EV_MIN`）・競馬場コード・アクセス間隔（`REQUEST_INTERVAL`）も両方にある
+- 解析を直すときは、`keiba_scraper.py` と `scraper.js` の両方を同じように直す。指示文（`PROMPT_TEXT`・買い方ごとの文 `MODE_TEXT`）・予想の条件の既定値（`BUDGET`・`MAX_BETS`・`EV_MIN`・`BET_MODE`・`HIT_MIN`・`HIT_EV_MIN` ↔ `DEFAULT_SETTINGS`）・競馬場コード・アクセス間隔（`REQUEST_INTERVAL`）も両方にある
 - 予想の記録と答え合わせも両方にある（PC版の `parse_ai_block`・`parse_result`・`settle_bets`・`horse_rows`・`compute_summary` ↔ `scraper.js` の `parseAiBlock`・`parseResult`・`settleBets`・`horseRows`・`computeSummary`）。95%区間のブートストラップは、`scraper.js` に Python の `random.Random` と同じ乱数（MT19937）を移植しているので、同じ記録なら同じ値になる。記録の形式も同じなので、Android版の書き出しを PC版の `import` で取り込める
 - オッズの注記（`odds_notes` ↔ `oddsNotes`）も両方にある
 - 小数の結果を両方で同じにするための約束
@@ -49,8 +49,8 @@ venv\Scripts\python.exe debug_scraper.py 202635102505
 
 ## Android版のビルドと配布
 
-- `android/` 以下を push すると、GitHub Actions がデバッグ版をビルドし、リリース `android-latest` の APK と `version.json`（版番号・コミット・ビルド日時・最近の変更）を差し替える。アプリの更新確認はこの `version.json` を読む
+- main ブランチで `android/` 以下か `.github/workflows/android.yml` を変えて push すると（または Actions から手動で実行すると）、GitHub Actions がデバッグ版をビルドし、リリース `android-latest` の APK と `version.json`（版番号・コミット・ビルド日時・最近の変更）を差し替える。アプリの更新確認はこの `version.json` を読む
 - ビルドに失敗したときは、コンパイルエラーを Actions の注釈に出す
 - バージョンは `0.4.<ビルド番号>`。ビルド番号は Actions の実行番号で、push のたびに増える
-- 手元でビルドするときは Android Studio で `android/` を開く
+- 手元でビルドするときは Android Studio で `android/` を開く（手元のビルドは版番号が 0.4.0 になるので、更新確認では常に新しい版があると出る）
 - `debug.keystore` はデバッグ版の署名を固定するための鍵で、パスワードは Android 標準のデバッグ鍵と同じ `android`。秘密の鍵ではない。鍵を固定しているので、どのビルドも上書きインストールできる

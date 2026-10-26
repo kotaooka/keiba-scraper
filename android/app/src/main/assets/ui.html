@@ -65,7 +65,7 @@ button { font: inherit; color: inherit; border: 0; background: none; padding: 0;
 .datebar .date { flex: 1; position: relative; border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); border: 1px solid var(--line); padding: 8px 14px; text-align: left; display: flex; align-items: center; gap: 10px; }
 .datebar .date .d { font-size: 17px; font-weight: 700; }
 .datebar .date .w { color: var(--ink2); font-size: 13px; }
-.datebar .date .tag { margin-left: auto; font-size: 12px; color: var(--accent); background: var(--accent-weak); padding: 2px 8px; border-radius: 10px; }
+.datebar .date .tag { white-space: nowrap; margin-left: auto; font-size: 12px; color: var(--accent); background: var(--accent-weak); padding: 2px 8px; border-radius: 10px; }
 .datebar .date .tag.past { color: var(--muted); background: var(--grid); }
 .datebar input[type=date] { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; border: 0; }
 .datebar button:active { filter: brightness(.96); }
@@ -327,7 +327,8 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .note-card { background: var(--accent-weak); border-color: transparent; box-shadow: none; font-size: 13px; }
 .note-card h3 { color: var(--accent); }
 .note-card ul { margin: 0; padding-left: 1.2em; }
-.day-pnl { display: flex; align-items: baseline; gap: 10px; width: 100%; text-align: left; margin: 0 2px 10px; font-size: 13px; color: var(--ink2); }
+.day-pnl { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; row-gap: 2px; width: 100%; text-align: left; margin: 0 2px 10px; font-size: 13px; color: var(--ink2); }
+.day-pnl > * { white-space: nowrap; }
 .day-pnl b { font-family: var(--f-num); font-size: 15px; }
 .rec-item .st.multi { text-align: right; font-size: 12px; line-height: 1.5; }
 .rec-item .st.multi .up { color: var(--ok); } .rec-item .st.multi .down { color: var(--ng); } .rec-item .st.multi .wait { color: var(--muted); }
@@ -363,7 +364,7 @@ pre.prompt-preview { margin: 8px 0 0; font-family: var(--f-num); font-size: 11.5
 body.previewing main { padding-bottom: 64px; }
 body.previewing .send-bar { bottom: 52px; }
 
-/* ===== メニュー・通知 ===== */
+/* ===== 印・シート・通知 ===== */
 .icon-btn.has-dot { position: relative; }
 .icon-btn .dot { position: absolute; top: 7px; right: 7px; width: 9px; height: 9px; border-radius: 50%; background: var(--warn); border: 2px solid var(--bg); }
 /* 設定の画面 */
@@ -418,7 +419,7 @@ button.pref-row:active { background: var(--grid); }
 .buy-mark { display: inline-block; font-size: 11px; line-height: 1; padding: 3px 4px; margin-right: 5px; border-radius: 4px; background: var(--accent); color: var(--bg); vertical-align: 1px; }
 .h-tag { display: inline-block; font-size: 11px; line-height: 1; padding: 3px 5px; margin-left: 6px; border-radius: 4px; border: 1px solid currentColor; font-weight: 700; vertical-align: 1px; }
 .h-tag.pick { color: var(--accent); } .h-tag.over { color: var(--ink2); }
-.toast { position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px); opacity: 0; background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 20px; font-size: 14px; transition: all .25s; z-index: 40; pointer-events: none; white-space: nowrap; }
+.toast { position: fixed; left: 50%; bottom: 96px; transform: translate(-50%, 20px); opacity: 0; background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 20px; font-size: 14px; transition: all .25s; z-index: 40; pointer-events: none; white-space: nowrap; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 </style>
 </head>
@@ -723,7 +724,7 @@ function renderRaces() {
 
   const head = el("div", "section-title");
   head.append(el("h2", null, `${v.name}　${v.races.length}レース`));
-  head.append(el("p", null, "タップで収集・長押しで通知"));
+  head.append(el("p", null, "タップで収集・長押しで通知・自動収集"));
   area.append(head);
   const pnl = dayPnl(state.date);
   if (pnl) {
@@ -929,7 +930,7 @@ function renderResult() {
   if (res.diff) {
     const dc = el("div", "card diff-card");
     dc.append(el("h3", null, `前回（${res.diff.prevAt}）からの変化`));
-    if (!res.diff.items.length) dc.append(el("p", "note", "単勝10%以上の動き・取消・騎手変更はありません"));
+    if (!res.diff.items.length) dc.append(el("p", "note", "単勝10%以上の動き・取消・騎手変更・馬体重の発表はありません"));
     else {
       const ul = el("ul", "diff-list");
       for (const it of res.diff.items) {
@@ -1177,7 +1178,11 @@ const App = {
       const cur = recs[k];
       if (!cur) { recs[k] = r; added++; continue; }
       let ch = false;
-      for (const f of ["AI", "結果"]) if (!cur[f] && r[f]) { cur[f] = r[f]; ch = true; }
+      if (!cur["AI"] && r["AI"]) {
+        cur["AI"] = r["AI"]; ch = true;
+        for (const f of ["買い方", "EV_MIN", "HIT_MIN", "HIT_EV_MIN", "予算", "予想オッズ"]) if (r[f] != null) cur[f] = r[f];
+      }
+      if (!cur["結果"] && r["結果"]) { cur["結果"] = r["結果"]; ch = true; }
       if (ch) merged++;
     }
     writeRecords(recs); updateRecBadge();
@@ -1193,6 +1198,8 @@ const App = {
     mergeBackgroundResults(); mergeRaceResults(); loadReservations(); updateRecBadge();
     if (state.screen === "home" && !state.loading) renderRaces();
     if (state.screen === "result" && state.result) renderResult();
+    if (state.screen === "records" && !state.fetching) renderRecords();
+    if (state.screen === "prefs") renderPrefs();
   },
   onUpdateState(s, detail) { onUpdateState(s, detail); },
 };
@@ -1326,7 +1333,7 @@ function renderAbout() {
   ic.append(el("h3", null, "このビルド"));
   const dl = el("dl", "kv");
   for (const [k, v] of [["バージョン", `v${current.versionName}（${current.versionCode}）`], ["ビルド日時", current.builtAt ? `${current.builtAt} JST` : "—"],
-    ["コミット", current.commit || "—"], ["データの取得元", "netkeiba（出馬表・オッズ）、keiba.go.jp（馬柱・過去5走）"]]) {
+    ["コミット", current.commit || "—"], ["データの取得元", "netkeiba（開催一覧・出馬表・オッズ・結果）、keiba.go.jp（馬柱・過去5走・即PAT の発売カレンダー）"]]) {
     dl.append(el("dt", null, k), el("dd", k === "コミット" ? "num" : null, v));
   }
   ic.append(dl);
@@ -1373,12 +1380,20 @@ function validRecord(r) {
   if (r["AI"] != null) {
     const a = r["AI"];
     if (!isObj(a) || !isObj(a["予想"]) || !Array.isArray(a["買い目"])) return false;
+    // 予想は各馬の推定勝率・推定複勝率が数
+    if (!Object.values(a["予想"]).every((v) => isObj(v) && Number.isFinite(v["勝率"]) && Number.isFinite(v["複勝率"]))) return false;
     const okBets = (xs) => xs.every((b) => isObj(b) && typeof b["券種"] === "string" && typeof b["組み合わせ"] === "string" && Number.isFinite(b["金額"]));
     if (!okBets(a["買い目"])) return false;
+    if (a["的中買い目"] === null) delete a["的中買い目"];
     if (a["的中買い目"] != null && !(Array.isArray(a["的中買い目"]) && okBets(a["的中買い目"]))) return false;
     if (typeof a["記録時刻"] !== "string") a["記録時刻"] = "";
   }
-  if (r["結果"] != null && (!isObj(r["結果"]) || !isObj(r["結果"]["着順"]) || !isObj(r["結果"]["払戻"]))) return false;
+  if (r["結果"] != null) {
+    const x = r["結果"];
+    if (!isObj(x) || !isObj(x["着順"]) || !isObj(x["払戻"])) return false;
+    // 払戻は券種ごとに {組み合わせ: 円}
+    if (!Object.values(x["払戻"]).every((t) => isObj(t) && Object.values(t).every((v) => Number.isFinite(v)))) return false;
+  }
   return true;
 }
 // 記録の新しさ（収集時刻。無ければ AI の記録時刻、それも無ければレースの日付）
@@ -1509,7 +1524,7 @@ function dayPnl(date) {
     if (rows) { settled++; d += rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
     if (hrows) { hSettled++; hd += hrows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
   }
-  return { n: rs.length, settled: Math.max(settled, hSettled), d, evSettled: settled, hd, hSettled };
+  return { n: rs.length, settled: rs.filter((r) => r["結果"]).length, d, evSettled: settled, hd, hSettled };
 }
 function updateRecBadge() { const n = pendingResults().length; $("recDot").classList.toggle("hidden", !n); }
 
@@ -1572,7 +1587,7 @@ function aiCard(venue, race) {
     return c;
   }
   const ai = rec["AI"], pred = ai["予想"] || {};
-  h.append(el("span", "aside", `記録 ${(ai["記録時刻"] || "").slice(5, 16)}`));
+  { const t = String(ai["記録時刻"] || ""); h.append(el("span", "aside", t.length >= 16 ? `記録 ${+t.slice(5, 7)}/${+t.slice(8, 10)} ${t.slice(11, 16)}` : "")); }
   const info = state.result.res.info;
   const updated = state.result.res.at && rec["収集時刻"] && state.result.res.at !== rec["収集時刻"];
   const hasHit = Array.isArray(ai["的中買い目"]);
@@ -1627,7 +1642,7 @@ function aiCard(venue, race) {
         d.append(el("span", null, `${label}${o.text}倍`));
         if (p != null) {
           const ev = p * o.low;
-          d.append(el("span", null, `　×　当たる確率 ${(p * 100).toFixed(1)}%　＝　`), el("b", ev >= evMin ? "ev-ok" : "ev-ng", `期待値 ${ev.toFixed(2)}`));
+          d.append(el("span", null, `　×　当たる確率 ${(p * 100).toFixed(1)}%　＝　`), el("b", Math.round(ev * 100) / 100 >= evMin - 1e-9 ? "ev-ok" : "ev-ng", `期待値 ${ev.toFixed(2)}`));
         }
         return d;
       };
@@ -1652,7 +1667,7 @@ function aiCard(venue, race) {
       sum.append(el("span", "hit-any", range ? `どれかが当たる確率 ${pct(max1)}〜${pct(total1)}` : `どれかが当たる確率 ${pct(total1)}`));
       if (range) sum.append(el("span", "note", "複勝・ワイドや券種の違う買い目は同時に当たることがあるので、幅で出しています（AI の見積もり）"));
     }
-    if (bets.some((b) => betProbOf(b, pred) == null)) sum.append(el("span", "note", "この回答の記録用ブロックには推定的中率の列が無いため、ワイド・3連複の期待値は出せません（指示文を最新にすると出ます）"));
+    if (bets.some((b) => betProbOf(b, pred) == null)) sum.append(el("span", "note", "推定的中率が分からない買い目は、期待値を出していません（記録用ブロックに推定的中率の列が無い古い回答など）"));
     c.append(sum);
     if (settled) {
       const spent = settled.reduce((t, x) => t + x["金額"], 0), ret = settled.reduce((t, x) => t + x["払戻"], 0);
@@ -1739,7 +1754,11 @@ function renderRecords() {
     body.append(el("p", "note", "結果ページを1レースにつき1回、2秒おきに読みます"));
   }
 
-  const sm = KS.computeSummary(all);
+  // 形の崩れた記録があっても画面は出す（集計できない記録を除いて集計し直す）
+  let sm;
+  try { sm = KS.computeSummary(all); } catch (e) {
+    sm = KS.computeSummary(all.filter((r) => { try { KS.computeSummary([r]); return true; } catch (e2) { return false; } }));
+  }
   // 回収率（期待値重視と的中重視は別々に）
   for (const [bb, title] of [[sm.bets, sm.hit_bets ? "回収率：期待値重視" : "回収率"], [sm.hit_bets, "回収率：的中重視"]]) {
   if (!bb) continue;
@@ -1794,14 +1813,15 @@ function renderRecords() {
     it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
     const desc = (xs) => xs.length ? xs.map((x) => `${x["券種"]} ${x["組み合わせ"]}：${yen(x["金額"])}`).join("　") : "見送り";
     const hasHit = r["AI"] && Array.isArray(r["AI"]["的中買い目"]);
-    const keys = !r["AI"] ? [] : hasHit ? (r["買い方"] === "hit" ? [["的中買い目", ""]] : [["買い目", "期待値 "], ["的中買い目", "的中 "]]) : [["買い目", ""]];
+    const keys = !r["AI"] ? [] : hasHit ? (r["買い方"] === "hit" ? [["的中買い目", "的中重視 "]] : [["買い目", "期待値重視 "], ["的中買い目", "的中重視 "]]) : [["買い目", ""]];
     it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(r["AI"][k])).join(" ／ ")));
     let st;
     if (!r["AI"]) st = el("span", "st wait", "—");
     else if (!r["結果"]) st = el("span", "st wait", "結果待ち");
     else {
       const parts = keys.map(([k, lb]) => {
-        const rows = KS.settleBets(r, k);
+        let rows = null;
+        try { rows = KS.settleBets(r, k); } catch (e) { /* 形の崩れた記録 */ }
         if (!rows) return [lb + "払戻不明", "wait"];
         if (!rows.length) return [lb + "見送り", "wait"];
         const d = rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0);
@@ -1861,8 +1881,8 @@ const fmtEv = (v) => (window.KS ? KS.fmtEv(v) : String(v));
 const yen = (n) => `${Number(n).toLocaleString("ja-JP")}円`;
 function betSummary(b) {
   const ev = `期待値 ${fmtEv(b.ev_min)} 以上`, hit = `的中率 ${b.hit_min}%以上・期待値 ${fmtEv(b.hit_ev_min)} 以上`;
-  const cond = b.mode === "ev" ? `期待値重視（${ev}）` : b.mode === "hit" ? `的中重視（${hit}）` : `期待値重視と的中重視の両方`;
-  return `予算 ${yen(b.budget)}・最大${b.max_bets}点・${cond}`;
+  if (b.mode === "both") return `期待値重視と的中重視の両方（それぞれ予算 ${yen(b.budget)}・最大${b.max_bets}点）`;
+  return `予算 ${yen(b.budget)}・最大${b.max_bets}点・${b.mode === "ev" ? `期待値重視（${ev}）` : `的中重視（${hit}）`}`;
 }
 // 送る・コピー・表示するテキスト（指示文を今の条件で書き直したもの）
 function textFor(res) {
@@ -1904,7 +1924,7 @@ function renderSettings() {
 
   // 予算
   const f1 = el("div", "field");
-  f1.append(el("label", null, "予算"), el("p", "hint", "1レースで使う金額。1点は100円単位"));
+  f1.append(el("label", null, "予算"), el("p", "hint", b.mode === "both" ? "1レースで使う金額（期待値重視・的中重視それぞれに）。1点は100円単位" : "1レースで使う金額。1点は100円単位"));
   f1.append(stepper(yen(b.budget), b.budget <= 100, b.budget >= 100000,
     () => save("budget", b.budget - (b.budget > 3000 ? 500 : 100)), () => save("budget", b.budget + (b.budget >= 3000 ? 500 : 100))));
   const picks1 = el("div", "chips-pick");
@@ -1916,11 +1936,12 @@ function renderSettings() {
 
   // 点数
   const f2 = el("div", "field");
-  f2.append(el("label", null, "最大点数"), el("p", "hint", "買い目の数の上限。期待値の高い順にこの点数まで選びます"));
+  f2.append(el("label", null, "最大点数"), el("p", "hint", b.mode === "ev" ? "買い目の数の上限。期待値の高い順にこの点数まで選びます"
+    : b.mode === "hit" ? "買い目の数の上限。推定的中率の高い順にこの点数まで選びます" : "買い目の数の上限（期待値重視・的中重視それぞれに）"));
   const maxByBudget = Math.min(10, Math.floor(b.budget / 100));
   f2.append(stepper(`${b.max_bets}点`, b.max_bets <= 1, b.max_bets >= maxByBudget,
     () => save("max_bets", b.max_bets - 1), () => save("max_bets", b.max_bets + 1)));
-  if (b.max_bets > maxByBudget) f2.append(el("p", "note", `予算 ${yen(b.budget)} では ${maxByBudget}点までしか買えません（1点100円）`));
+  if (maxByBudget < 10) f2.append(el("p", "note", `予算 ${yen(b.budget)} では ${maxByBudget}点まで（1点100円）`));
   card.append(f2);
 
   // 期待値の下限
@@ -1980,11 +2001,11 @@ function renderSettings() {
   prow.append(psave, preset); tc.append(prow);
   body.append(tc);
 
-  const reset = el("button", "btn quiet", "予算・点数・期待値を既定値に戻す");
+  const reset = el("button", "btn quiet", "条件をすべて既定値に戻す");
   reset.style.width = "100%"; reset.style.marginTop = "12px";
   reset.onclick = () => { store.set(BET_KEY, {}); renderSettings(); toast("既定値に戻しました"); };
   body.append(reset);
-  body.append(el("p", "note", "既定値は予算 1,000円・最大3点・期待値 1.2 です（PC版の BUDGET・MAX_BETS・EV_MIN と同じ）"));
+  body.append(el("p", "note", "既定値は、買い方：両方・予算 1,000円・最大3点・期待値 1.2・的中重視の推定的中率 30%以上・的中重視の期待値 0.9 です（PC版の BET_MODE・BUDGET・MAX_BETS・EV_MIN・HIT_MIN・HIT_EV_MIN と同じ）。指示文の書き換えは戻りません"));
 }
 function stepper(label, minDisabled, maxDisabled, dec, inc) {
   const w = el("div", "stepper");
@@ -2087,7 +2108,7 @@ function openFromNotification(p) {
   const r = p.r;
   closeSheet(); closeMenu();
   if (state.screen === "collect" && state.job) { Native.cancel(); state.job = null; }
-  state.parent = null;
+  state.parent = null; state.fromRecords = false; state.back = null;
   // 答え合わせの通知：予想の記録を開く（取れていなければその場で取りに行く）
   if (p.type === "records" || p.type === "fetch") {
     mergeRaceResults();
@@ -2201,7 +2222,10 @@ function renderPrefs() {
   // 取れないとき
   const g4 = group("取れないとき");
   const sw = el("span", "switch" + (state.debug ? " on" : ""));
-  row(g4, "取得中のサイトをプレビュー", "裏で開いているページを下半分に表示", sw, null).onclick = () => togglePreview();
+  const pvRow = el("button", "pref-row");
+  { const tx = el("div", "tx"); tx.append(el("b", null, "取得中のサイトをプレビュー"), el("small", null, "裏で開いているページを下半分に表示")); pvRow.append(tx, sw); }
+  pvRow.onclick = () => togglePreview(); pvRow.setAttribute("aria-pressed", String(!!state.debug));
+  g4.append(pvRow);
   const clr = row(g4, "収集済みのレースを消す", "予想の記録は残ります", null, () => {
     if (!clr.dataset.armed) { clr.dataset.armed = "1"; clr.querySelector("b").textContent = "もう一度押すと消します"; return; }
     try { localStorage.removeItem(CACHE_KEY); } catch (e) {}
