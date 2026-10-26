@@ -1990,7 +1990,9 @@ def format_summary(sm):
         lo, hi = br["ci"]
         lines.append(f"  対象 {br['n']}レース　市場 {br['market']:.4f} / AI {br['ai']:.4f}")
         lines.append(f"  AI − 市場 = {br['diff']:+.4f}（95%区間 {lo:+.4f}〜{hi:+.4f}）")
-        if hi < 0:
+        if br["n"] < 30:
+            lines.append("  → まだ判断できない（30レース未満）")
+        elif hi < 0:
             lines.append("  → AI の推定勝率は市場（単勝オッズ）より当たっている")
         elif lo > 0:
             lines.append("  → AI の推定勝率は市場（単勝オッズ）より外れている")
