@@ -764,6 +764,62 @@
       .split("{EV_MIN}").join(fmtEv(st.ev_min)).trim().split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
   }
 
+  // ========== 即PAT・A-PAT の発売カレンダー（keiba.go.jp/jranet/calendar/YYYYMM.html） ==========
+
+  // カレンダーの競馬場名を netkeiba の名前（KEIBA_CODES のキー）にそろえる
+  const PAT_VENUE_ALIASES = { "帯広": "帯広(ば)", "ばんえい": "帯広(ば)", "帯広ばんえい": "帯広(ば)" };
+
+  // 発売範囲 "全R" / "1～5R" を {all, from, to} にする。読めなければ null
+  function parsePatRange(text) {
+    const t = String(text).replace(/\s/g, "");
+    if (/^全R?$/.test(t) || t === "全レース") return { all: true, from: 1, to: 99 };
+    const m = t.match(/(\d+)[～~〜\-－](\d+)R?/);
+    if (m) return { all: false, from: +m[1], to: +m[2] };
+    const one = t.match(/^(\d+)R$/);
+    return one ? { all: false, from: +one[1], to: +one[1] } : null;
+  }
+
+  /**
+   * 1か月分の発売カレンダーを読む。返り値：
+   * {days: {"27": {kind: "apat"|"pat", time: "10:00～20:48", venues: {"大井": {all, from, to, text, night, race}}}}}
+   * kind：apat＝即PAT・A-PAT の両方で買える日、pat＝即PAT だけで買える日。発売のない日は days に入れない。
+   * カレンダーの部分が見つからなければ null（ページの構造が変わったとき）
+   */
+  function parsePatCalendar(doc) {
+    const list = doc.querySelector(".calendar ul.stable");
+    if (!list) return null;
+    const days = {};
+    for (const li of list.querySelectorAll(":scope > li[name^='day']")) {
+      const day = String(parseInt(li.getAttribute("name").slice(3), 10));
+      const cls = li.classList;
+      const kind = cls.contains("apat") ? "apat" : cls.contains("pat") ? "pat" : null;
+      if (!kind && li.getAttribute("data-pat") !== "buy") continue;
+      const header = li.querySelector("header");
+      const time = ((header && header.getAttribute("title")) || "").replace("発売時刻", "").trim();
+      const venues = {};
+      for (const dl of li.querySelectorAll(".section dl")) {
+        let venue = gt(dl.querySelector("dt"));
+        let rangeText = gt([...dl.querySelectorAll(":scope > dd")].find((d) => !d.classList.contains("name")));
+        let race = gt(dl.querySelector("dd.name > span"));
+        // 重賞の行は書き方が違う（<p class="buy"><span>船橋</span> 全R</p>）
+        const buy = dl.querySelector("p.buy");
+        if (!venue && buy) {
+          venue = gt(buy.querySelector("span"));
+          rangeText = gt(buy, " ").replace(venue, "").trim();
+          const ps = [...dl.querySelectorAll(".grade a > p")].filter((p) => !p.classList.contains("buy") && !p.querySelector("strong"));
+          race = ps.length ? gt(ps[0]) : race;
+        }
+        if (!venue) continue;
+        venue = PAT_VENUE_ALIASES[venue] || venue;
+        const range = parsePatRange(rangeText);
+        venues[venue] = Object.assign({ text: rangeText, night: dl.classList.contains("night"), race },
+          range || { all: false, from: null, to: null });
+      }
+      days[day] = { kind: kind || "pat", time, venues };
+    }
+    return { days };
+  }
+
   // 作ったテキストの指示文の部分だけを、今の条件で書き直す（収集し直さずに条件を変えられる）
   function withSettings(text, settings) {
     const i = text.indexOf("【AIへの指示】");
@@ -936,6 +992,7 @@
   global.KS = {
     buildWithInfo,
     NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, fmtEv, promptText, withSettings,
+    parsePatCalendar, parsePatRange,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,
     parseShutuba, parseRaceInfo, parseKyakuType,

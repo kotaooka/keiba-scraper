@@ -160,6 +160,16 @@ class Scraper(
         return if (runCatching { JSONArray(raw) }.isSuccess) raw else null
     }
 
+    // ========== 即PAT・A-PAT の発売カレンダー ==========
+
+    /** その月の発売カレンダー（keiba.go.jp）を読み、JSON の文字列で返す。読めなければ null。yyyymm は "202610" */
+    suspend fun fetchPatCalendar(yyyymm: String): String? {
+        if (!load("https://www.keiba.go.jp/jranet/calendar/$yyyymm.html")) return null
+        waitFor("document.querySelector('.calendar ul.stable li')", 5_000)
+        val raw = call("KS.parsePatCalendar(document)")
+        return if (raw.startsWith("{") && !raw.contains("\"__error\"")) raw else null
+    }
+
     // ========== 1レース分の収集 ==========
 
     /** 収集の結果。成功なら json（{text, info, at}）、失敗なら error に理由 */

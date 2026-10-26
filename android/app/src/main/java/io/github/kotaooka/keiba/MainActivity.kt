@@ -189,13 +189,21 @@ class MainActivity : Activity() {
     // ========== UI から呼ばれる（JavaScript のスレッドで呼ばれるので UI スレッドへ移す） ==========
 
     inner class Bridge {
+        /**
+         * 開催一覧を読む。patMonth（"202610" など）が空でなければ、続けて即PAT・A-PAT の発売カレンダーも読む
+         * （UI 側で6時間以内に読んだ月は空にして渡す。カレンダーは月に1ページ）
+         */
         @JavascriptInterface
-        fun loadRaceList(date: String) = runOnUiThread {
+        fun loadRaceList(date: String, patMonth: String) = runOnUiThread {
             // 前の読み込み・収集が残っていれば止めてから読む（日付を続けて変えたときなど）
             job?.cancel()
             job = scope.launch {
                 val list = try { scraper.fetchRaceList(date) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
                 js("App.onRaceList(${list ?: "null"})")
+                if (patMonth.isNotEmpty()) {
+                    val cal = try { scraper.fetchPatCalendar(patMonth) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+                    js("App.onPatCalendar(${JSONObject.quote(patMonth)}, ${cal ?: "null"})")
+                }
             }
         }
 

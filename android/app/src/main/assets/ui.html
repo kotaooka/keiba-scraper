@@ -287,6 +287,16 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .sheet-scrim { position: fixed; inset: 0; z-index: 34; background: rgba(0,0,0,.35); }
 .badge.alarm { background: var(--accent-weak); color: var(--accent); }
 
+/* 即PAT・A-PAT の発売 */
+.badge.pat { border: 1px solid var(--accent); color: var(--accent); padding: 0 7px; font-weight: 700; }
+.badge.nopat { background: var(--grid); color: var(--muted); }
+.venue .pat { font-size: 10.5px; font-weight: 700; margin-left: 6px; padding: 0 5px; border-radius: 6px; border: 1px solid var(--accent); color: var(--accent); }
+.venue[aria-selected="true"] .pat { border-color: var(--accent-ink); color: var(--accent-ink); }
+.pat-line { margin: -2px 2px 10px; font-size: 12.5px; color: var(--ink2); }
+.pat-line b { color: var(--accent); }
+.pat-line.none { color: var(--muted); }
+.chip.pat { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+
 /* 予想の条件 */
 .cond-line { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; margin: 10px 0 0; padding: 9px 12px;
   border-radius: 12px; border: 1px dashed var(--line); font-size: 13px; color: var(--ink2); }
@@ -477,11 +487,50 @@ function writeCache(c) {
 }
 const cacheKey = (date, venue, no) => `${date}|${venue}|${no}`;
 
+// ===== 即PAT・A-PAT の発売カレンダー =====
+// keiba.go.jp の月ごとのカレンダーを、開催一覧を読むときに一緒に読む（6時間以内に読んだ月は読み直さない）
+const PAT_KEY = "keiba-pat-calendar";
+const PAT_KIND = { apat: "即PAT・A-PAT", pat: "即PATのみ" };
+const patMonthOf = (date) => date.slice(0, 6);
+function patStore() { return store.get(PAT_KEY, {}); }
+function needPat(month) { const c = patStore()[month]; return !c || Date.now() - c.at > 6 * 3600 * 1000; }
+state.patFailed = {};  // 読めなかった月
+function onPatCalendar(month, data) {
+  if (data && data.days) {
+    const all = patStore(); all[month] = { at: Date.now(), days: data.days };
+    // 新しい3か月分だけ残す
+    const keep = Object.keys(all).sort().slice(-3); const out = {}; for (const k of keep) out[k] = all[k];
+    store.set(PAT_KEY, out); delete state.patFailed[month];
+  } else state.patFailed[month] = true;
+  renderVenues();
+  if (state.screen === "home" && !state.loading) renderRaces();
+  if (state.screen === "result" && state.result) renderResult();
+}
+// その日・その競馬場の発売状況。status：sold（発売あり）/ none（発売なし）/ unknown（カレンダー未取得）
+function patInfo(date, venue) {
+  const cal = patStore()[patMonthOf(date)];
+  if (!cal) return { status: state.patFailed[patMonthOf(date)] ? "failed" : "unknown" };
+  const day = cal.days[String(parseInt(date.slice(6), 10))];
+  const v = day && day.venues[venue];
+  if (!v) return { status: "none" };
+  return { status: "sold", kind: day.kind, time: day.time, v };
+}
+// そのレースが即PAT で買えるか（true / false / null＝分からない）
+function patRace(info, no) {
+  if (info.status === "none") return false;
+  if (info.status !== "sold") return null;
+  if (info.v.all) return true;
+  if (info.v.from == null) return null;
+  return no >= info.v.from && no <= info.v.to;
+}
+const patRangeText = (v) => (v.all ? "全R" : v.from != null ? `${v.from}〜${v.to}R` : v.text);
+
 // ===== 開催一覧 =====
 function loadRaceList() {
   state.loading = true; state.venues = null; state.scrolled = false;
   renderVenues(); renderRaces();
-  Native.loadRaceList(state.date);
+  const month = patMonthOf(state.date);
+  Native.loadRaceList(state.date, needPat(month) ? month : "");
 }
 
 // お気に入りの競馬場を先頭に（お気に入りに入れた順）
@@ -515,6 +564,8 @@ function renderVenues() {
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", String(state.venue === v.name));
     b.append(el("span", null, `${v.races.length}R`));
+    const pi = patInfo(state.date, v.name);
+    if (pi.status === "sold") b.append(el("span", "pat", pi.v.all ? "PAT" : `PAT ${patRangeText(pi.v)}`));
     onPress(b, () => selectVenue(v.name), () => toggleFav(v.name));
     nav.append(b);
   }
@@ -578,6 +629,16 @@ function renderRaces() {
   head.append(el("h2", null, `${v.name}　${v.races.length}レース`));
   head.append(el("p", null, "タップで収集・長押しで通知"));
   area.append(head);
+  const pi = patInfo(state.date, v.name);
+  if (pi.status === "sold") {
+    const pl = el("p", "pat-line");
+    pl.append(el("b", null, `${PAT_KIND[pi.kind]}で発売`), document.createTextNode(`　${patRangeText(pi.v)}${pi.time ? `・${pi.time}` : ""}`));
+    area.append(pl);
+  } else if (pi.status === "none") {
+    area.append(el("p", "pat-line none", `この日の${v.name}は、即PAT・A-PAT での発売はありません`));
+  } else if (pi.status === "failed") {
+    area.append(el("p", "pat-line none", "即PAT・A-PAT の発売カレンダーを読めませんでした（引っ張って読み直せます）"));
+  }
 
   const list = el("div", "races");
   v.races.forEach((r, i) => {
@@ -599,6 +660,9 @@ function renderRaces() {
     if (i === nextIdx) badges.append(el("span", "badge next", "次"));
     else if (started) badges.append(el("span", "badge ended", "発走済み"));
     if (c) badges.append(el("span", "badge done", `✓ 収集済み ${c.at.slice(11, 16)}`));
+    const onPat = patRace(pi, r.no);
+    if (onPat === true) badges.append(el("span", "badge pat", "即PAT"));
+    else if (onPat === false && pi.status === "sold") badges.append(el("span", "badge nopat", "即PAT対象外"));
     const rv = reservations[cacheKey(state.date, v.name, r.no)];
     if (rv) badges.append(el("span", "badge alarm", rv.auto ? `⏰ 自動収集 ${hhmm(rv.start - rv.auto * 60000)}` : "⏰ 通知"));
     if (!badges.childElementCount) badges.append(el("span", "chev", "›"));
@@ -721,6 +785,9 @@ function renderResult() {
 
   const chips = el("div", "chips");
   for (const c of [info.course, info.cond && `馬場 ${info.cond}`, info.cls]) if (c) chips.append(el("span", "chip", c));
+  const pi = patInfo(state.date, venue), onPat = patRace(pi, +race.no);
+  if (onPat === true) chips.append(el("span", "chip pat", `${PAT_KIND[pi.kind]}で発売`));
+  else if (onPat === false) chips.append(el("span", "chip", "即PAT・A-PAT は発売なし"));
   body.append(chips);
 
   // 発走までの時間と、オッズを取ってからの時間
@@ -905,6 +972,7 @@ const App = {
   setSystemDark(d) { systemDark = !!d; applyTheme(); },
   onUpdateInfo(latest, error) { onUpdateInfo(latest, error); },
   openFromNotification(p) { openFromNotification(p); },
+  onPatCalendar(month, data) { onPatCalendar(month, data); },
   // アプリに戻ってきたとき：自動収集の結果・予約・送り先を読み直す
   onResume() {
     mergeBackgroundResults(); loadReservations();
@@ -1315,7 +1383,11 @@ setInterval(() => {
   window.addEventListener("touchend", () => {
     if (y0 == null) return;
     ptr.classList.remove("dragging"); ptr.style.height = "0";
-    if (Math.min(dy * 0.5, 72) >= 56) { loadRaceList(); toast("開催一覧を読み直しています"); }
+    if (Math.min(dy * 0.5, 72) >= 56) {
+      // 引っ張ったときは発売カレンダーも読み直す
+      const all = patStore(); delete all[patMonthOf(state.date)]; store.set(PAT_KEY, all);
+      loadRaceList(); toast("開催一覧と即PATの発売を読み直しています");
+    }
     y0 = null; dy = 0;
   });
 })();
