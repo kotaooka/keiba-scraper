@@ -91,7 +91,8 @@ main { padding: 0 16px 32px; }
 .race .no, .race-title .num { box-shadow: 0 0 0 1px rgba(255, 180, 60, .18) inset; }
 .race.started .no { color: #9a8a74; text-shadow: none; }
 .race .t { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.race .s { color: var(--ink2); font-size: 13px; display: flex; gap: 10px; }
+.race .s { color: var(--ink2); font-size: 13px; display: flex; flex-wrap: wrap; gap: 0 10px; }
+.race .s span { white-space: nowrap; }
 .race .badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
 .race.started { opacity: .55; box-shadow: none; }
 .race.next { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset, var(--shadow); }
@@ -286,6 +287,13 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .sheet-scrim { position: fixed; inset: 0; z-index: 34; background: rgba(0,0,0,.35); }
 .badge.alarm { background: var(--accent-weak); color: var(--accent); }
 
+/* プレビュー表示中の帯（どの画面でも閉じられるように、画面の下に固定） */
+.preview-bar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; background: var(--ink); color: var(--bg); font-size: 13.5px; }
+.preview-bar button { margin-left: auto; padding: 7px 14px; border-radius: 16px; background: var(--bg); color: var(--ink); font-weight: 700; font-size: 13.5px; }
+body.previewing main { padding-bottom: 64px; }
+body.previewing .send-bar { bottom: 52px; }
+
 /* ===== メニュー・通知 ===== */
 .menu { position: fixed; top: 52px; right: 12px; z-index: 30; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 6px 24px rgba(0,0,0,.18); min-width: 240px; padding: 6px; }
 .menu button { display: flex; width: 100%; text-align: left; padding: 11px 12px; border-radius: 8px; gap: 10px; align-items: center; }
@@ -343,6 +351,7 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 </div>
 <div class="sheet-scrim hidden" id="sheetScrim"></div>
 <div class="sheet hidden" id="sheet" role="dialog" aria-modal="true"></div>
+<div class="preview-bar hidden" id="previewBar"><span>下半分にサイトのプレビューを表示中</span><button id="previewClose">閉じる</button></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -848,6 +857,7 @@ const App = {
       a.append(retry, back); body.append(a);
       return;
     }
+    setPreview(false);
     const at = res.at;
     const c = readCache(); c[cacheKey(state.date, job.venue, job.race.no)] = { at, text: res.text, info: res.info }; writeCache(c);
     showResult(job.venue, job.race, { at, text: res.text, info: res.info }, true);
@@ -856,6 +866,7 @@ const App = {
   back() {
     if (!$("menu").classList.contains("hidden")) { closeMenu(); return true; }
     if (!$("sheet").classList.contains("hidden")) { closeSheet(); return true; }
+    if (state.debug) { setPreview(false); return true; }
     if (state.screen === "home") return false;
     if (state.screen === "collect" && state.job) { Native.cancel(); }
     goHome(); return true;
@@ -1132,12 +1143,19 @@ function closeMenu() { $("menu").classList.add("hidden"); $("scrim").classList.a
 $("menuBtn").onclick = openMenu;
 $("scrim").onclick = closeMenu;
 // 収集用の WebView が開いているページを画面の下半分に出す（読み取れないときの確認用）
-function togglePreview() { state.debug = !state.debug; Native.setDebug(state.debug); renderPreviewBtn(); }
+function togglePreview() { setPreview(!state.debug); }
+function setPreview(on) {
+  if (state.debug === on) return;
+  state.debug = on; Native.setDebug(on); renderPreviewBtn();
+}
 function renderPreviewBtn() {
   $("debugCheck").textContent = state.debug ? "✓" : "";
+  $("previewBar").classList.toggle("hidden", !state.debug);
+  document.body.classList.toggle("previewing", state.debug);
   const b = $("previewBtn"); if (b) b.textContent = state.debug ? "サイトのプレビューを閉じる" : "取得中のサイトをプレビュー";
 }
 $("debugToggle").onclick = () => { togglePreview(); closeMenu(); };
+$("previewClose").onclick = () => setPreview(false);
 $("aboutBtn").onclick = showAbout;
 $("updateBar").onclick = showAbout;
 $("themeBtn").onclick = () => {
