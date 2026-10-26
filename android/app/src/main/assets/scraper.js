@@ -42,7 +42,7 @@
 ・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
-・ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
+・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
 
 ■ 手順
 1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
@@ -66,13 +66,13 @@
 3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
 4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）
 5. 【総評】50字以内
-6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
 #PRED
 馬番,推定勝率,推定複勝率
 1,12.5,35.0
 #BET
-券種,組み合わせ,金額
-ワイド,3-7,500
+券種,組み合わせ,金額,推定的中率
+ワイド,3-7,500,18.5
 `;
 
   // ========== 文字列ユーティリティ ==========
@@ -848,7 +848,8 @@
 
   // '12.5' '12.5%' '1,000円' などを数にする。読めなければ null（PC版の _num）
   function num(text) {
-    const t = toHalf(text).replace(/[%％円,，\s]/g, "");
+    // 全角の数字・小数点・符号も読む（PC版の _ZEN_DIGITS）
+    const t = toHalf(text).replace(/．/g, ".").replace(/－/g, "-").replace(/＋/g, "+").replace(/[%％円,，\s]/g, "");
     if (t === "" || !/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(t)) return null;
     const v = parseFloat(t);
     return Number.isFinite(v) ? v : null;
@@ -875,7 +876,21 @@
     return nums.join("-");
   }
 
-  const EXAMPLE_BLOCK = JSON.stringify({ "予想": { "1": { "勝率": 12.5, "複勝率": 35 } }, "買い目": [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500 }] });
+  // 指示文の書式例の記録用ブロック（推定的中率の列が無かった頃の例も。PC版の _EXAMPLE_BLOCKS）
+  const EXAMPLE_BLOCKS = [
+    JSON.stringify({ "予想": { "1": { "勝率": 12.5, "複勝率": 35 } }, "買い目": [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500, "的中率": 18.5 }] }),
+    JSON.stringify({ "予想": { "1": { "勝率": 12.5, "複勝率": 35 } }, "買い目": [{ "券種": "ワイド", "組み合わせ": "3-7", "金額": 500 }] }),
+  ];
+
+  // #BET の3列目以降を [金額, 推定的中率%] にする（PC版の _amount_and_prob）
+  function amountAndProb(rest) {
+    const parts = String(rest).split(/[,，\t]/).map((c) => c.trim());
+    if (parts.length >= 2) {
+      const amount = num(parts.slice(0, -1).join("")), prob = num(parts[parts.length - 1]);
+      if (amount !== null && amount >= 100 && amount % 100 === 0 && prob !== null && prob > 0 && prob <= 100) return [amount, prob];
+    }
+    return [num(parts.join("")), null];
+  }
 
   // AI の回答から #PRED と #BET を読む。#PRED が無ければ null（PC版の parse_ai_block）
   function parseAiBlock(text) {
@@ -904,17 +919,19 @@
         const cells = [m[1], m[2], m[3]].map((c) => c.trim());
         const betType = normalizeBetType(cells[0]);
         const nums = toHalf(cells[1]).match(/[0-9]+/g) || [];
-        const amount = num(cells[2]);
+        const [amount, prob] = amountAndProb(cells[2]);
         // 馬番の数が券種と合わない行は読まない
         if (betType in BET_SPECS && nums.length === BET_SPECS[betType][0] && amount && amount > 0) {
-          bets.push({ "券種": betType, "組み合わせ": comboKey(betType, nums), "金額": Math.trunc(amount) });
+          const bet = { "券種": betType, "組み合わせ": comboKey(betType, nums), "金額": Math.trunc(amount) };
+          if (prob !== null) bet["的中率"] = prob;
+          bets.push(bet);
         }
       }
     }
     if (!Object.keys(pred).length) return null;
     const block = { "予想": pred, "買い目": bets };
     // 指示文の書式例そのもの（AI の回答に記録用ブロックが無く、指示文ごとコピーしたとき）は記録しない
-    if (JSON.stringify(block) === EXAMPLE_BLOCK) return null;
+    if (EXAMPLE_BLOCKS.includes(JSON.stringify(block))) return null;
     return block;
   }
 

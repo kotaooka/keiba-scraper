@@ -1483,8 +1483,9 @@ function betOddsOf(b, info) {
   const low = c && lowOf(c.odds);
   return low ? { text: c.odds, low } : null;
 }
-// AI が見積もった的中率（単勝は推定勝率、複勝は推定複勝率。ほかの券種は記録用ブロックに無いので null）
+// AI が見積もった的中率。#BET の推定的中率の列があればそれ、無ければ単勝は推定勝率・複勝は推定複勝率（ほかは null）
 function betProbOf(b, pred) {
+  if (typeof b["的中率"] === "number" && b["的中率"] > 0) return b["的中率"] / 100;
   const a = pred[b["組み合わせ"]];
   if (!a) return null;
   if (b["券種"] === "単勝") return a["勝率"] / 100;
@@ -1582,7 +1583,7 @@ function aiCard(venue, race) {
     c.append(list);
     const sum = el("p", "bet-total");
     sum.append(document.createTextNode(`合計 ${yen(total)}`));
-    if (bets.some((b) => betProbOf(b, pred) == null)) sum.append(el("span", "note", "ワイド・3連複の的中率は記録用ブロックに無いので、期待値は AI の回答本文を見てください"));
+    if (bets.some((b) => betProbOf(b, pred) == null)) sum.append(el("span", "note", "この回答の記録用ブロックには推定的中率の列が無いため、ワイド・3連複の期待値は出せません（指示文を最新にすると出ます）"));
     c.append(sum);
     if (settled) {
       const spent = settled.reduce((t, x) => t + x["金額"], 0), ret = settled.reduce((t, x) => t + x["払戻"], 0);

@@ -87,7 +87,7 @@ PROMPT_TEXT = """
 ・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。
 ・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
-・ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
+・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
 
 ■ 手順
 1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
@@ -111,13 +111,13 @@ PROMPT_TEXT = """
 3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
 4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）
 5. 【総評】50字以内
-6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
+6. 【記録用】最後に次の形式のブロックをコードブロックで出力する。見送りの場合も #PRED は全頭分出し、#BET は見出し行だけにする。#BET の推定的中率は【買い目】の表の推定的中率と同じ値。金額は桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
 #PRED
 馬番,推定勝率,推定複勝率
 1,12.5,35.0
 #BET
-券種,組み合わせ,金額
-ワイド,3-7,500
+券種,組み合わせ,金額,推定的中率
+ワイド,3-7,500,18.5
 """
 
 TIMEOUT_PAGE     = 20000  # ページロード待機 (ms)
@@ -1363,6 +1363,18 @@ def combo_key(bet_type, numbers):
     return "-".join(nums)
 
 
+def _amount_and_prob(rest):
+    """#BET の3列目以降（「500」「500,18.5」「1,000,18.5」「1,000」）を (金額, 推定的中率%) にする。
+    最後の列を的中率とみて、残りが100円単位の金額として読めて的中率が0〜100なら採る。
+    そうでなければ全体を金額として読む（推定的中率の列が無い回答・桁区切りの付いた金額）"""
+    parts = [c.strip() for c in re.split(r"[,，\t]", rest)]
+    if len(parts) >= 2:
+        amount, prob = _num("".join(parts[:-1])), _num(parts[-1])
+        if amount is not None and amount >= 100 and amount % 100 == 0 and prob is not None and 0 < prob <= 100:
+            return amount, prob
+    return _num("".join(parts)), None
+
+
 def parse_ai_block(text):
     """AI の回答から #PRED と #BET のブロックを読む。#PRED がなければ None を返す。
     返り値: {"予想": {馬番: {"勝率": %, "複勝率": %}}, "買い目": [{"券種","組み合わせ","金額"}]}"""
@@ -1393,22 +1405,27 @@ def parse_ai_block(text):
                 continue
             bet_type = normalize_bet_type(cells[0])
             nums = re.findall(r"[0-9]+", cells[1].translate(_ZEN_DIGITS))
-            amount = _num(cells[2])
+            amount, prob = _amount_and_prob(cells[2])
             # 馬番の数が券種と合わない行（「ワイド,3,100」など）は読まない
             if bet_type in BET_SPECS and len(nums) == BET_SPECS[bet_type][0] and amount and amount > 0:
-                bets.append({"券種": bet_type, "組み合わせ": combo_key(bet_type, nums),
-                             "金額": int(amount)})
+                bet = {"券種": bet_type, "組み合わせ": combo_key(bet_type, nums), "金額": int(amount)}
+                if prob is not None:
+                    bet["的中率"] = prob
+                bets.append(bet)
     if not pred:
         return None
     block = {"予想": pred, "買い目": bets}
     # 指示文の書式例そのもの（AI の回答に記録用ブロックが無く、指示文ごとコピーしたとき）は記録しない
-    if block == _EXAMPLE_BLOCK:
+    if block in _EXAMPLE_BLOCKS:
         return None
     return block
 
 
-# 指示文の書式例の記録用ブロック（これと同じなら AI の回答ではない）
-_EXAMPLE_BLOCK = {"予想": {"1": {"勝率": 12.5, "複勝率": 35.0}}, "買い目": [{"券種": "ワイド", "組み合わせ": "3-7", "金額": 500}]}
+# 指示文の書式例の記録用ブロック（これと同じなら AI の回答ではない。推定的中率の列が無かった頃の例も）
+_EXAMPLE_BLOCKS = [
+    {"予想": {"1": {"勝率": 12.5, "複勝率": 35.0}}, "買い目": [{"券種": "ワイド", "組み合わせ": "3-7", "金額": 500, "的中率": 18.5}]},
+    {"予想": {"1": {"勝率": 12.5, "複勝率": 35.0}}, "買い目": [{"券種": "ワイド", "組み合わせ": "3-7", "金額": 500}]},
+]
 
 
 def ask_ai_answer(record, ai_text_path, scraped_text=None):
@@ -1770,10 +1787,10 @@ def summarize(records):
     if sm["bet_rows"]:
         OUTPUT_DIR.mkdir(exist_ok=True)
         with open(OUTPUT_DIR / "verify_bets.csv", "w", encoding="utf-8-sig", newline="") as f:
-            f.write("race_id,日付,競馬場,R,券種,組み合わせ,金額,払戻,判定\n")
+            f.write("race_id,日付,競馬場,R,券種,組み合わせ,金額,推定的中率,払戻,判定\n")
             for x in sm["bet_rows"]:
                 f.write(f"{x['race_id']},{x['日付']},{x['競馬場']},{x['レース番号']},{x['券種']},"
-                        f"{x['組み合わせ']},{x['金額']},{x['払戻']},{x['判定']}\n")
+                        f"{x['組み合わせ']},{x['金額']},{x.get('的中率', '')},{x['払戻']},{x['判定']}\n")
     return format_summary(sm)
 
 
