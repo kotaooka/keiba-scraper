@@ -682,7 +682,8 @@
       const odds = tanFuku[h["馬番"]] || {};
       h["単勝"] = odds["単勝"] || "--";
       h["複勝"] = odds["複勝"] || "--";
-      if (["", "--"].includes(h["単勝"]) && h["単勝_出馬表"]) h["単勝"] = h["単勝_出馬表"];
+      h["単勝_代用"] = false;
+      if (["", "--"].includes(h["単勝"]) && h["単勝_出馬表"]) { h["単勝"] = h["単勝_出馬表"]; h["単勝_代用"] = true; }
     }
     return horses;
   }
@@ -748,6 +749,8 @@
       const nos = active.filter(missing).map((h) => h["馬番"]);
       if (nos.length) warnings.push(`${label}未取得: 馬番 ${nos.join(", ")}`);
     }
+    const subs = active.filter((h) => h["単勝_代用"]).map((h) => h["馬番"]);
+    if (subs.length) warnings.push(`単勝はオッズのページで取れず、出馬表の値で代用: 馬番 ${subs.join(", ")}（発売前は予想オッズのことがあり、市場勝率は参考値）`);
     if (active.some((h) => h["馬体重"] === "未発表")) warnings.push("馬体重は未発表（発走約2時間前に発表）");
     return warnings;
   }

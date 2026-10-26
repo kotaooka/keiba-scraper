@@ -982,8 +982,10 @@ function updateTimeLine() {
     const a = el("span"); a.append(document.createTextNode(um > 0 ? "発走まで " : ""), el("b", null, um > 0 ? fmtUntil(um).replace("あと", "") : "発走済み"));
     tl.append(a);
   }
-  const stale = um != null && um > 0 && ago != null && ago >= 10;
-  if (ago != null) tl.append(el("span", stale ? "stale" : null, `オッズは${ago < 1 ? "1分以内" : `${Math.floor(ago)}分前`}に取得`));
+  // 発走まで90分を切ってから、取って10分以上たったオッズを目立たせる（前日や朝のうちは更新しても変わりにくい）
+  const stale = um != null && um > 0 && um <= 90 && ago != null && ago >= 10;
+  const agoText = ago < 1 ? "1分以内" : ago < 60 ? `${Math.floor(ago)}分前` : `${Math.floor(ago / 60)}時間${Math.floor(ago % 60)}分前`;
+  if (ago != null) tl.append(el("span", stale ? "stale" : null, `オッズは${agoText}に取得`));
   again.className = "btn " + (stale ? "stale" : "secondary");
   // 古いことは上の行（オッズは○分前に取得）と色で伝え、ボタンの文言は短く保つ
   again.textContent = um != null && um <= 0 ? "取り直す" : stale ? "! オッズを更新" : "オッズを更新";
@@ -1240,6 +1242,27 @@ function renderAbout() {
 // 形式は PC版の output/records/<race_id>.json と同じ（書き出して PC版の verify にもかけられる）。キーは cacheKey
 const REC_KEY = "keiba-records", AI_TEXT_KEY = "keiba-ai-texts";
 const readRecords = () => store.get(REC_KEY, {});
+// 端末の時刻（日本時間）で「YYYY-MM-DD HH:MM:SS」。PC版の記録と同じ形
+function localStamp(d) {
+  d = d || new Date();
+  const z = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`;
+}
+// 0.4.18 までは記録時刻・取得時刻を UTC で残していたので、1回だけ端末の時刻に直す
+(function fixUtcStamps() {
+  const FLAG = "keiba-stamp-local";
+  if (store.get(FLAG, false)) return;
+  const recs = store.get(REC_KEY, null);
+  if (recs) {
+    const conv = (t) => { const d = new Date(t.replace(" ", "T") + "Z"); return isNaN(d) ? t : localStamp(d); };
+    for (const r of Object.values(recs)) {
+      if (r["AI"] && r["AI"]["記録時刻"]) r["AI"]["記録時刻"] = conv(r["AI"]["記録時刻"]);
+      if (r["結果"] && r["結果"]["取得時刻"]) r["結果"]["取得時刻"] = conv(r["結果"]["取得時刻"]);
+    }
+    store.set(REC_KEY, recs);
+  }
+  store.set(FLAG, true);
+})();
 function writeRecords(recs) {
   // 新しい順に 500件まで残す
   const keys = Object.keys(recs).sort((a, b) => (recs[b]["収集時刻"] || "").localeCompare(recs[a]["収集時刻"] || "")).slice(0, 500);
@@ -1271,7 +1294,7 @@ function pasteAiAnswer() {
   const key = cacheKey(state.date, venue, race.no);
   const recs = readRecords();
   const rec = Object.assign(KS.newRecord(state.date, venue, race.no, res), { "発走": res.info.start || race.time || "", "EV_MIN": betSettings().ev_min });
-  rec["AI"] = Object.assign(parsed, { "記録時刻": new Date().toISOString().slice(0, 19).replace("T", " ") });
+  rec["AI"] = Object.assign(parsed, { "記録時刻": localStamp() });
   recs[key] = rec;
   writeRecords(recs); saveAiText(key, text);
   scheduleResultCheck(key, rec, race);
@@ -1317,7 +1340,7 @@ function onRaceResult(raceId, res) {
   const recs = readRecords();
   const key = Object.keys(recs).find((k) => recs[k].race_id === raceId);
   if (key && res && KS.resultFinished(res)) {
-    recs[key]["結果"] = Object.assign(res, { "取得時刻": new Date().toISOString().slice(0, 19).replace("T", " ") });
+    recs[key]["結果"] = Object.assign(res, { "取得時刻": localStamp() });
     writeRecords(recs);
     if (state.fetching) state.fetching.got++;
   }
@@ -1423,7 +1446,7 @@ function renderRecords() {
   body.append(el("h2", "race-title", "予想の記録と答え合わせ"));
   const recs = readRecords();
   const all = Object.values(recs);
-  body.append(el("p", "race-sub", `記録 ${all.length}件・結果まで ${all.filter((r) => r["AI"] && r["結果"]).length}件`));
+  body.append(el("p", "race-sub", `記録 ${all.length}件・答え合わせ済み ${all.filter((r) => r["AI"] && r["結果"]).length}件`));
 
   const pend = pendingResults();
   if (state.fetching) {
@@ -1488,7 +1511,7 @@ function renderRecords() {
     const it = el("button", "rec-item");
     it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
     const bets = r["AI"] ? r["AI"]["買い目"] : [];
-    it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : bets.length ? bets.map((x) => `${x["券種"]} ${x["組み合わせ"]} ${x["金額"]}円`).join("・") : "見送り"));
+    it.append(el("span", "s", !r["AI"] ? "AI の回答なし" : bets.length ? bets.map((x) => `${x["券種"]} ${x["組み合わせ"]}：${yen(x["金額"])}`).join("　") : "見送り"));
     let st;
     if (!r["AI"]) st = el("span", "st wait", "—");
     else if (!r["結果"]) st = el("span", "st wait", "結果待ち");

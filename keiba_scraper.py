@@ -921,8 +921,10 @@ def merge_data(horses, tan_fuku):
         h["単勝"] = odds.get("単勝", "--")
         h["複勝"] = odds.get("複勝", "--")
         # オッズページで取れなかった単勝は出馬表の値で埋める
+        h["単勝_代用"] = False
         if h["単勝"] in ("", "--") and h.get("単勝_出馬表"):
             h["単勝"] = h["単勝_出馬表"]
+            h["単勝_代用"] = True
     return horses
 
 
@@ -988,6 +990,10 @@ def check_data(horses):
         nos = [h["馬番"] for h in active if missing(h)]
         if nos:
             warnings.append(f"{label}未取得: 馬番 {', '.join(nos)}")
+    subs = [h["馬番"] for h in active if h.get("単勝_代用")]
+    if subs:
+        warnings.append(f"単勝はオッズのページで取れず、出馬表の値で代用: 馬番 {', '.join(subs)}"
+                        "（発売前は予想オッズのことがあり、市場勝率は参考値）")
     if any(h.get("馬体重") == "未発表" for h in active):
         warnings.append("馬体重は未発表（発走約2時間前に発表）")
     return warnings
