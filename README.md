@@ -5,7 +5,7 @@
 <p>
 <img src="docs/screen_list.png" width="200" alt="レース一覧">
 <img src="docs/screen_result.png" width="200" alt="結果画面">
-<img src="docs/screen_horse.png" width="200" alt="各馬の過去5走">
+<img src="docs/screen_horse.png" width="200" alt="AI の予想">
 </p>
 
 Android版の画面例です（馬名・オッズは試験用の架空のデータ）。
@@ -22,6 +22,7 @@ Android版の画面例です（馬名・オッズは試験用の架空のデー�
 | 即PAT・A-PAT の発売 | 表示し、投票画面を開ける | — |
 | 発走前の通知・自動収集 | あり | — |
 | 予想の記録と答え合わせ | あり（結果は自動で取得して通知。書き出して PC版でも集計できる） | あり |
+| 実際に買った馬券の記録 | 結果画面で入れ、AI の買い目と別に集計 | Android版で入れたものを取り込んで集計 |
 | 取り直したときのオッズの変化 | 表示し、AI へのテキストにも入れる | — |
 | 指示文の書き換え | 設定画面で | `PROMPT_TEXT` を書き換える |
 

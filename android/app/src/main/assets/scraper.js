@@ -1103,10 +1103,11 @@
 
   // 買い目ごとの払戻（払戻の表に無い券種があれば null。取消馬を含む買い目は返還。PC版の settle_bets）
   function settleBets(record, key) {
-    const res = record["結果"], ai = record["AI"];
+    const res = record["結果"], ai = record["AI"] || {};
     const scratched = new Set(Object.entries(res["着順"]).filter(([, r]) => r === "取消" || r === "除外").map(([n]) => n));
     const rows = [];
-    for (const b of ai[key || "買い目"] || []) {
+    // key="購入" は自分で実際に買った馬券（AI の回答とは別に記録する。PC版と同じ）
+    for (const b of (key === "購入" ? record["購入"] : ai[key || "買い目"]) || []) {
       let ret, status;
       // 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
       if (!b["券種"].startsWith("枠") && b["組み合わせ"].split("-").some((n) => scratched.has(n))) { ret = b["金額"]; status = "返還"; }
@@ -1246,15 +1247,20 @@
     // 区間（ブートストラップ）は並び順で変わるので、race_id 順にそろえる（PC版と同じ値にするため）
     const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
     const sortKey = (r) => [String(r.race_id || ""), String(r["日付"] || ""), String(r["競馬場"] || ""), parseInt(r["レース番号"], 10) || 0];
-    const races = records.filter((r) => r["AI"] && r["結果"]).map((r) => [sortKey(r), r])
+    const sortRaces = (rs) => rs.map((r) => [sortKey(r), r])
       .sort((x, y) => cmp(x[0][0], y[0][0]) || cmp(x[0][1], y[0][1]) || cmp(x[0][2], y[0][2]) || x[0][3] - y[0][3]).map((x) => x[1]);
+    const races = sortRaces(records.filter((r) => r["AI"] && r["結果"]));
     const out = {
       n_races: races.length,
       n_no_ai: records.filter((r) => !r["AI"]).length,
       n_no_result: records.filter((r) => r["AI"] && !r["結果"]).length,
       bets: null, bet_rows: [], hit_bets: null, hit_bet_rows: [],
+      own_bets: null, own_bet_rows: [],
       brier: null, calib_win: null, calib_place: null,
     };
+    // 自分で買った馬券（AI の回答が無いレースも含む）
+    const ownRaces = sortRaces(records.filter((r) => r["結果"] && Array.isArray(r["購入"]) && r["購入"].length));
+    if (ownRaces.length) [out.own_bets, out.own_bet_rows] = betSummary(ownRaces, "購入");
     if (!races.length) return out;
 
     // 回収率（期待値重視の買い目。的中重視の買い目は、それを記録したレースだけで別に。PC版の _bet_summary）

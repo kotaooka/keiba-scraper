@@ -1796,10 +1796,11 @@ def scrape_result(page, race_id):
 def settle_bets(record, key="買い目"):
     """買い目ごとの払戻を計算する。払戻が読めていない券種があれば None を返す
     （出走取消を含む買い目は返還として購入額をそのまま戻す）。key="的中買い目" で的中重視の買い目"""
-    res, ai = record["結果"], record["AI"]
+    res, ai = record["結果"], record.get("AI") or {}
     scratched = {no for no, rank in res["着順"].items() if rank in ("取消", "除外")}
     rows = []
-    for b in ai.get(key) or []:
+    # key="購入" は自分で実際に買った馬券（AI の回答とは別に記録する）
+    for b in (record.get("購入") if key == "購入" else ai.get(key)) or []:
         # 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
         if not b["券種"].startswith("枠") and set(b["組み合わせ"].split("-")) & scratched:
             ret, status = b["金額"], "返還"
@@ -1867,18 +1868,26 @@ def calibration_table(pairs, edges):
     return out
 
 
+def _race_order(r):
+    return (str(r.get("race_id") or ""), str(r.get("日付", "")), str(r.get("競馬場", "")), int(r.get("レース番号") or 0))
+
+
 def compute_summary(records):
     """記録済みのレースから回収率・精度・キャリブレーションを計算する（数値だけ。Android版の computeSummary と同じ）"""
     # 区間（ブートストラップ）は並び順で変わるので、race_id 順にそろえる（Android版と同じ値にするため）
-    races = sorted((r for r in records if r.get("AI") and r.get("結果")),
-                   key=lambda r: (str(r.get("race_id") or ""), str(r.get("日付", "")), str(r.get("競馬場", "")), int(r.get("レース番号") or 0)))
+    races = sorted((r for r in records if r.get("AI") and r.get("結果")), key=_race_order)
     out = {
         "n_races": len(races),
         "n_no_ai": sum(1 for r in records if not r.get("AI")),
         "n_no_result": sum(1 for r in records if r.get("AI") and not r.get("結果")),
         "bets": None, "bet_rows": [], "hit_bets": None, "hit_bet_rows": [],
+        "own_bets": None, "own_bet_rows": [],
         "brier": None, "calib_win": None, "calib_place": None,
     }
+    # 自分で買った馬券（AI の回答が無いレースも含む）
+    own_races = sorted((r for r in records if r.get("結果") and isinstance(r.get("購入"), list) and r["購入"]), key=_race_order)
+    if own_races:
+        out["own_bets"], out["own_bet_rows"] = _bet_summary(own_races, "購入")
     if not races:
         return out
 
@@ -1967,10 +1976,11 @@ def format_summary(sm):
     lines = ["=" * 60, "  検証結果", "=" * 60]
     lines.append(f"対象: 結果まで記録済みのレース {sm['n_races']}件"
                  f"（AI 回答なし {sm['n_no_ai']}件・結果未取得 {sm['n_no_result']}件は除外）")
-    if not sm["n_races"]:
+    own = sm.get("own_bets")
+    if not sm["n_races"] and not own:
         return "\n".join(lines)
 
-    for title, b in (("【回収率：期待値重視の買い目】", sm["bets"]), ("【回収率：的中重視の買い目】", sm.get("hit_bets"))):
+    for title, b in (("【回収率：自分で買った馬券】", own), ("【回収率：AI の買い目（期待値重視）】", sm["bets"]), ("【回収率：AI の買い目（的中重視）】", sm.get("hit_bets"))):
         if not b:
             continue
         lines += ["", title,
@@ -2038,11 +2048,11 @@ def summarize(records):
                 for x in rows:
                     f.write(f"{r['race_id']},{r['日付']},{r['競馬場']},{r['レース番号']},{x['馬番']},"
                             f"{x['市場'] * 100:.2f},{x['AI勝率'] * 100:.2f},{x['AI複勝率'] * 100:.2f},{x['着順']}\n")
-    if sm["bet_rows"] or sm.get("hit_bet_rows"):
+    if sm["bet_rows"] or sm.get("hit_bet_rows") or sm.get("own_bet_rows"):
         OUTPUT_DIR.mkdir(exist_ok=True)
         with open(OUTPUT_DIR / "verify_bets.csv", "w", encoding="utf-8-sig", newline="") as f:
             f.write("race_id,日付,競馬場,R,買い方,券種,組み合わせ,金額,推定的中率,払戻,判定\n")
-            for mode, rows in (("期待値重視", sm["bet_rows"]), ("的中重視", sm.get("hit_bet_rows") or [])):
+            for mode, rows in (("期待値重視", sm["bet_rows"]), ("的中重視", sm.get("hit_bet_rows") or []), ("自分", sm.get("own_bet_rows") or [])):
                 for x in rows:
                     f.write(f"{x['race_id']},{x['日付']},{x['競馬場']},{x['レース番号']},{mode},{x['券種']},"
                             f"{x['組み合わせ']},{x['金額']},{x.get('的中率', '')},{x['払戻']},{x['判定']}\n")
@@ -2079,10 +2089,15 @@ def run_import(path):
                 skipped += 1
                 continue
             changed = False
-            for k in ("AI", "結果"):
+            for k in ("AI", "結果", "購入"):
                 if not cur.get(k) and r.get(k):
                     cur[k] = r[k]
                     changed = True
+                    # AI の回答を足すときは、記録したときの買い方と条件も足す（自分の馬券なら記録時刻）
+                    extra = {"AI": ("買い方", "EV_MIN", "HIT_MIN", "HIT_EV_MIN", "予算", "予想オッズ"), "購入": ("購入時刻",)}.get(k, ())
+                    for f in extra:
+                        if r.get(f) is not None:
+                            cur[f] = r[f]
             if changed:
                 save_record(cur)
                 merged += 1
@@ -2112,7 +2127,7 @@ def run_verify():
         start = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
         return (now - start).total_seconds() >= 15 * 60
 
-    pending = [r for r in recs if r.get("AI") and not r.get("結果") and started(r)]
+    pending = [r for r in recs if (r.get("AI") or r.get("購入")) and not r.get("結果") and started(r)]
     if pending:
         print(f"\n結果を取得します: {len(pending)}件")
         with sync_playwright() as p:

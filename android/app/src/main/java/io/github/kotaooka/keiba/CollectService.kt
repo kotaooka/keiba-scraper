@@ -139,24 +139,32 @@ class CollectService : Service() {
                 val res = withTimeoutOrNull(2 * 60_000L) { scraper.fetchResult(raceId) } ?: return@withScraper null
                 val bets = r.optJSONArray("bets") ?: JSONArray()
                 val hitBets = r.optJSONArray("hit_bets")  // 的中重視の買い目（記録していなければ null）
+                val ownBets = r.optJSONArray("own_bets")  // 自分で買った馬券（入れていなければ null）
+                val mode = r.optString("mode", "ev")      // "none" は AI の回答を記録していないレース
                 // 答え合わせは scraper.js の settleBets（PC版と同じ計算）で行う
                 val judged = JSONObject(scraper.evalKs(
                     "(function(){const res=$res;if(!KS.resultFinished(res))return {finished:false};" +
-                        "const rec={'結果':res,'AI':{'買い目':$bets,'的中買い目':${hitBets ?: "[]"}}};" +
-                        "const rows=KS.settleBets(rec,'買い目');const hit=KS.settleBets(rec,'的中買い目');" +
+                        "const rec={'結果':res,'AI':{'買い目':$bets,'的中買い目':${hitBets ?: "[]"}},'購入':${ownBets ?: "[]"}};" +
+                        "const rows=KS.settleBets(rec,'買い目');const hit=KS.settleBets(rec,'的中買い目');const own=KS.settleBets(rec,'購入');" +
                         "const top=Object.entries(res['着順']).filter(([,x])=>/^[123]$/.test(x)).sort((a,b)=>a[1]-b[1]).map(([n,x])=>x+'着 '+n+'番').join('・');" +
-                        "return {finished:true,rows:rows,hit:hit,top:top};})()"))
+                        "return {finished:true,rows:rows,hit:hit,own:own,top:top};})()"))
                 if (!judged.optBoolean("finished")) return@withScraper null
                 RaceResults.add(this, raceId, JSONObject(res), Jst.stamp())
                 val top = judged.optString("top")
-                // 期待値重視と的中重視の両方を記録していれば、両方の収支を並べる
-                val evText = summarize(judged.optJSONArray("rows"))
-                val hitText = if (hitBets != null) summarize(judged.optJSONArray("hit")) else null
-                when {
-                    hitText == null -> "$evText。結果：$top"
-                    bets.length() == 0 && r.optString("mode") == "hit" -> "$hitText。結果：$top"
-                    else -> "期待値重視 $evText／的中重視 $hitText。結果：$top"
+                // 自分の馬券を先に、AI の買い目（期待値重視・的中重視）を後ろに並べる
+                val parts = mutableListOf<String>()
+                if (ownBets != null) parts += "自分 ${summarize(judged.optJSONArray("own"))}"
+                if (mode != "none") {
+                    val evText = summarize(judged.optJSONArray("rows"))
+                    val hitText = if (hitBets != null) summarize(judged.optJSONArray("hit")) else null
+                    val ai = if (ownBets != null) "AI " else ""
+                    when {
+                        hitText == null -> parts += "$ai$evText".trim()
+                        bets.length() == 0 && mode == "hit" -> parts += if (ownBets != null) "AI的中重視 $hitText" else "$hitText"
+                        else -> { parts += "${ai}期待値重視 $evText"; parts += "${ai}的中重視 $hitText" }
+                    }
                 }
+                parts.joinToString("／") + "。結果：$top"
             }
         } catch (e: CancellationException) {
             throw e
