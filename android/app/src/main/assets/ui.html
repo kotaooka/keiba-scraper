@@ -393,6 +393,10 @@ button.pref-row:active { background: var(--grid); }
 .ai-cond { font-size: 13px; color: var(--ink2); margin: 2px 0 8px; }
 .ai-skip { font-weight: 700; margin: 6px 0; }
 .bet-list { display: grid; gap: 8px; }
+.result-btn { width: 100%; margin-top: 10px; }
+.result-card .top3 td { font-weight: 700; }
+.result-card .rec-table:not(.pay-table) td:first-child, .result-card .rec-table:not(.pay-table) th:first-child { width: 3.5em; }
+.pay-table td:first-child { white-space: nowrap; }
 .bet-del { margin-left: auto; width: 32px; height: 32px; border-radius: 16px; color: var(--muted); font-size: 18px; }
 .bet-del:active { background: var(--grid); }
 .own-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
@@ -935,6 +939,22 @@ function renderResult() {
   row.append(again, alarm);
   body.append(row);
   updateTimeLine();
+  // 発走したら、結果ページを読んで着順と払戻を出す（記録があればそのまま答え合わせする）
+  {
+    const umNow = untilMin(state.date, res.info.start || race.time);
+    const rk = cacheKey(state.date, venue, race.no);
+    const recNow = readRecords()[rk];
+    const got = (recNow && recNow["結果"]) || res.result || null;
+    if (umNow != null && umNow <= 0) {
+      const fb = el("button", "btn " + (got ? "secondary" : "primary") + " result-btn",
+        state.fetching ? "結果を取得中…" : got ? "レース結果を取り直す" : "レース結果を取得");
+      fb.disabled = !!state.fetching;
+      fb.onclick = () => fetchRaceResult(venue, race);
+      body.append(fb);
+      if (!got && umNow > -10) body.append(el("p", "note", "結果は確定してから（発走の10〜15分後ごろ）取れます"));
+    }
+    if (got) body.append(resultCard(got, res.info));
+  }
   const cond = el("button", "cond-line");
   cond.append(el("span", null, "AI への条件"), el("b", null, betSummary(betSettings()) + (promptTemplate() ? "・指示文は書き換え中" : "")), el("span", "go", "変更 ›"));
   cond.onclick = () => { state.back = "result"; showSettings(); };
@@ -1162,9 +1182,11 @@ const App = {
     // 同じレースを取り直したときは、前回の収集と比べたオッズの動きを残す
     const prev = c[ck];
     if (prev && prev.info) res.diff = { prevAt: prev.at.slice(11, 16), items: KS.diffRaces(prev.info, res.info) };
-    c[ck] = { at, text: res.text, info: res.info, diff: res.diff || null }; writeCache(c);
+    // 取得済みのレース結果は取り直しても残す
+    const entry = { at, text: res.text, info: res.info, diff: res.diff || null, result: (prev && prev.result) || null };
+    c[ck] = entry; writeCache(c);
     Native.copy(textFor(res));
-    showResult(job.venue, job.race, { at, text: res.text, info: res.info, diff: res.diff || null }, true);
+    showResult(job.venue, job.race, Object.assign({}, entry), true);
   },
   // 戻るボタン：一覧以外なら一覧へ戻して true、一覧なら false（アプリを閉じる）
   back() {
@@ -1520,8 +1542,67 @@ function fetchResults(keys) {
   if (state.screen === "records") renderRecords();
   Native.fetchResults(JSON.stringify(ids));
 }
+// 結果画面の「レース結果を取得」：このレースの結果ページを1回読む（記録が無くても読める）
+function fetchRaceResult(venue, race) {
+  const raceId = KS.raceIdOf(state.date, venue, race.no);
+  if (!raceId) { toast("この競馬場の結果ページが分かりません"); return; }
+  if (state.fetching) { toast("結果を取得中です"); return; }
+  state.resultTargets = state.resultTargets || {};
+  state.resultTargets[raceId] = cacheKey(state.date, venue, race.no);
+  state.fetching = { total: 1, done: 0, got: 0, single: true };
+  toast("結果を取得しています");
+  renderResult();
+  Native.fetchResults(JSON.stringify([raceId]));
+}
+// 結果のカード（着順と払戻）
+function resultCard(r, info) {
+  const c = el("div", "card result-card");
+  const h = el("h3", null, "レース結果");
+  if (r["取得時刻"]) h.append(el("span", "aside", `取得 ${r["取得時刻"].slice(11, 16)}`));
+  c.append(h);
+  const nameOf = (no) => ((info.horses || []).find((x) => String(parseInt(x.no, 10)) === String(no)) || {}).name || "";
+  const rows = Object.entries(r["着順"] || {}).sort((a, b) => {
+    const na = /^\d+$/.test(a[1]) ? +a[1] : 999, nb = /^\d+$/.test(b[1]) ? +b[1] : 999;
+    return na - nb || +a[0] - +b[0];
+  });
+  const tb = el("table", "rec-table");
+  const hr = el("tr"); for (const [t, cls] of [["着", "r"], ["馬"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+  rows.forEach(([no, rank], i) => {
+    const tr = el("tr", i < 3 && /^\d+$/.test(rank) ? "top3" : null);
+    tr.append(el("td", "r num", /^\d+$/.test(rank) ? rank : rank || "--"), el("td", null, `${no} ${nameOf(no)}`));
+    tb.append(tr);
+  });
+  c.append(tb);
+  const pay = r["払戻"] || {};
+  const order = ["単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複", "3連単", "枠単"];
+  const types = Object.keys(pay).sort((a, b) => (order.indexOf(a) + 99) % 99 - (order.indexOf(b) + 99) % 99);
+  if (types.length) {
+    const pt = el("table", "rec-table pay-table"); pt.style.marginTop = "10px";
+    const ph = el("tr"); for (const [t, cls] of [["払戻"], ["組み合わせ"], ["100円あたり", "r"]]) ph.append(el("th", cls || null, t)); pt.append(ph);
+    for (const t of types) {
+      Object.entries(pay[t]).forEach(([combo, yenv], i) => {
+        const tr = el("tr"); tr.append(el("td", null, i ? "" : t), el("td", "num", combo), el("td", "r num", yen(yenv))); pt.append(tr);
+      });
+    }
+    c.append(pt);
+  }
+  if (Array.isArray(r["注記"]) && r["注記"].length) c.append(el("p", "note", r["注記"].join("・")));
+  return c;
+}
 function onRaceResult(raceId, res) {
   if (state.fetching) state.fetching.done++;
+  // 結果画面から取ったレース：収集済みのデータにも結果を置く（記録が無くても表示できるように）
+  const ck = state.resultTargets && state.resultTargets[raceId];
+  if (ck) {
+    delete state.resultTargets[raceId];
+    if (res && KS.resultFinished(res)) {
+      const c = readCache();
+      const r1 = Object.assign({}, res, { "取得時刻": localStamp() });
+      if (c[ck]) { c[ck].result = r1; writeCache(c); }
+      if (state.result && cacheKey(state.date, state.result.venue, state.result.race.no) === ck) state.result.res.result = r1;
+      if (state.fetching) state.fetching.got = Math.max(state.fetching.got, 1);
+    }
+  }
   const recs = readRecords();
   const key = Object.keys(recs).find((k) => recs[k].race_id === raceId);
   if (key && res && KS.resultFinished(res)) {
@@ -1534,6 +1615,12 @@ function onRaceResult(raceId, res) {
 }
 function onResultsDone(err) {
   const f = state.fetching; state.fetching = null;
+  if (f && f.single && !err) {
+    toast(f.got ? "結果を取得しました" : "まだ結果が確定していません。少したってからもう一度押してください");
+    updateRecBadge();
+    if (state.screen === "result" && state.result) renderResult();
+    return;
+  }
   if (err === "busy") toast("ほかの読み込み中です。終わってからもう一度押してください");
   else if (err === "cancel") toast(f && f.got ? `結果の取得を途中でやめました（${f.got}件は取得済み）` : "結果の取得を取りやめました");
   else if (f) toast(f.got === f.total ? `結果を取得しました（${f.got}件）` : `結果を取得しました（${f.got}件。未確定 ${f.total - f.got}件はあとでもう一度）`);
@@ -1722,7 +1809,7 @@ function aiCard(venue, race) {
   } else {
     const ss = sinceStart(rec);
     if (ss != null && ss >= 15 && rec.race_id) {
-      const b = el("button", "btn secondary preview-btn", "結果を取得して答え合わせ"); b.onclick = () => fetchResults([key]); c.append(b);
+      c.append(el("p", "note", "上の「レース結果を取得」で答え合わせできます"));
     } else {
       let exact = true; try { exact = Native.exactAlarmAllowed(); } catch (e) {}
       const at = resultTimeOf(rec);
@@ -2319,7 +2406,7 @@ function mergeBackgroundResults() {
   for (const x of list) {
     const prev = c[x.key];
     const diff = prev && prev.info ? { prevAt: prev.at.slice(11, 16), items: KS.diffRaces(prev.info, x.info) } : null;
-    c[x.key] = { at: x.at, text: x.text, info: x.info, diff };
+    c[x.key] = { at: x.at, text: x.text, info: x.info, diff, result: (prev && prev.result) || null };
   }
   writeCache(c);
 }
