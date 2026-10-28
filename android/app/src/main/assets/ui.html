@@ -293,9 +293,11 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .venue .pat { font-size: 10.5px; font-weight: 700; margin-left: 6px; padding: 0 5px; border-radius: 6px; border: 1px solid var(--accent); color: var(--accent); }
 .venue[aria-selected="true"] .pat { border-color: var(--accent-ink); color: var(--accent-ink); }
 .pat-line { margin: -2px 2px 10px; font-size: 12.5px; color: var(--ink2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; }
-.ext-links { margin: -4px 2px 10px; display: flex; justify-content: flex-end; gap: 4px 16px; flex-wrap: wrap; }
-.ext-links button { color: var(--accent); font-weight: 700; font-size: 12.5px; white-space: nowrap; padding: 4px 0; min-height: 32px; }
-.chip.link { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.ext-row { margin: 0 0 12px; }
+.ext-row .btn { padding: 0 10px; }
+.btn.live-btn { border-color: var(--accent); }
+.live-btn.wide { width: 100%; margin: 8px 0 12px; min-height: 52px; font-size: 16px; }
+.live-btn small { font-size: 12px; font-weight: 400; color: var(--ink2); }
 .send-bar.with-pat { grid-template-columns: 1fr 58px 58px 58px; }
 .pat-line b { color: var(--accent); }
 .pat-line.none { color: var(--muted); }
@@ -647,12 +649,24 @@ const LIVE_TRACK = { "帯広": "obihiro", "帯広(ば)": "obihiro", "ばんえ�
   "名古屋": "nagoya", "園田": "sonoda", "姫路": "himeji", "高知": "kouchi", "佐賀": "saga" };
 function liveTrack(venue) { return LIVE_TRACK[String(venue || "").replace(/\s/g, "")] || ""; }
 function openLive(venue) { Native.openLive ? Native.openLive(liveTrack(venue)) : Native.openUrl("https://simple.keiba-lv-st.jp/"); }
-/** 「即PATを開く ›」「レース映像 ›」の行（発売の有無が分からなくても出す） */
+const ICON_PLAY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="2.5" y="4.5" width="19" height="15" rx="2.5"/><path d="M10 9v6l5-3z" fill="currentColor"/></svg>';
+const ICON_PAT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 12h8M13 9l3 3-3 3"/></svg>';
+/** 「レース映像」の大きなボタン（小窓で開く） */
+function liveButton(venue, cls) {
+  const b = el("button", `btn secondary live-btn ${cls || ""}`.trim());
+  b.innerHTML = ICON_PLAY;
+  b.append(document.createTextNode("レース映像"));
+  b.setAttribute("aria-label", `${venue || ""}のレース映像を小窓で開く`);
+  b.onclick = () => openLive(venue);
+  return b;
+}
+/** 「レース映像」「即PATを開く」の2つのボタン（発売の有無が分からなくても出す） */
 function extLinks(venue) {
-  const p = el("p", "ext-links");
-  const a = el("button", null, "即PATを開く ›"); a.onclick = openPat; p.append(a);
-  const b = el("button", null, "レース映像 ›"); b.onclick = () => openLive(venue); p.append(b);
-  return p;
+  const row = el("div", "btn-row ext-row");
+  const pat = el("button", "btn secondary"); pat.innerHTML = ICON_PAT; pat.append(document.createTextNode("即PATを開く"));
+  pat.onclick = openPat;
+  row.append(liveButton(venue), pat);
+  return row;
 }
 const patRangeText = (v) => (v.all ? "全R" : v.from != null ? `${v.from}〜${v.to}R` : v.text);
 
@@ -945,7 +959,6 @@ function renderResult() {
   const pi = patInfo(state.date, venue), onPat = patRace(pi, +race.no);
   if (onPat === true) chips.append(el("span", "chip pat", `${PAT_KIND[pi.kind]}で発売`));
   else if (onPat === false) chips.append(el("span", "chip", "即PAT・A-PAT は発売なし"));
-  const live = el("button", "chip link", "レース映像 ›"); live.onclick = () => openLive(venue); chips.append(live);
   body.append(chips);
 
   // 発走までの時間と、オッズを取ってからの時間
@@ -957,6 +970,9 @@ function renderResult() {
   alarm.onclick = () => openReserve(venue, r);
   row.append(again, alarm);
   body.append(row);
+  // レース映像は画面の上の方に大きく出す（小窓で開くので、見ながらこの画面を操作できる）
+  const lv = liveButton(venue, "wide"); lv.append(el("small", null, "小窓で開きます"));
+  body.append(lv);
   updateTimeLine();
   // 発走したら、結果ページを読んで着順と払戻を出す（記録があればそのまま答え合わせする）
   {
@@ -1110,7 +1126,7 @@ function renderResult() {
   // 投票の入口はいつも出す（発売カレンダーが手元にない・競馬場名が合わないときに消えないように）
   {
     const pat = el("button", "btn secondary sub");
-    pat.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 12h8M13 9l3 3-3 3"/></svg>';
+    pat.innerHTML = ICON_PAT;
     pat.append(document.createTextNode("即PAT"));
     pat.setAttribute("aria-label", "即PAT（地方競馬ネット投票）を開く");
     pat.onclick = openPat;

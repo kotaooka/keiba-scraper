@@ -35,7 +35,8 @@ import android.widget.FrameLayout
  * - 縦向き：ページをそのまま画面幅に合わせて表示
  * - 横向き：映像を画面いっぱいに広げ、ステータスバーなどを隠す
  * - 小窓（ピクチャー・イン・ピクチャー）：映像を小さな窓で流したまま、アプリの画面に戻って操作できる。
- *   「小窓にして操作」・戻る操作・ホームへ移る操作で小窓になり、小窓を閉じると映像の画面も終わる
+ *   アプリから開くと最初から小窓になる。小窓をタップすると大きくなり、
+ *   「小窓にして操作」・戻る操作・ホームへ移る操作でまた小窓になる。小窓を閉じると映像の画面も終わる
  * 映像専用版のページ以外へのリンクは、ブラウザで開く。
  * 小窓の間もアプリの画面を前に出せるよう、この画面はアプリの画面とは別のタスクで開く（AndroidManifest の taskAffinity）。
  */
@@ -47,15 +48,18 @@ class LiveActivity : Activity() {
     private lateinit var root: FrameLayout
     private lateinit var bar: LinearLayout
     private var track = ""
+    // 画面が出たら小窓にする（アプリから開いたとき）
+    private var pendingPip = false
 
     companion object {
         const val HOST = "simple.keiba-lv-st.jp"
         private const val EXTRA_TRACK = "track"
+        private const val EXTRA_PIP = "pip"
 
         /** 映像専用版の競馬場名（obihiro・kouchi など）。空なら競馬場を選ぶ一覧を開く */
         fun start(ctx: Context, track: String) {
             val t = if (Regex("^[a-z]{2,20}$").matches(track)) track else ""
-            ctx.startActivity(Intent(ctx, LiveActivity::class.java).putExtra(EXTRA_TRACK, t)
+            ctx.startActivity(Intent(ctx, LiveActivity::class.java).putExtra(EXTRA_TRACK, t).putExtra(EXTRA_PIP, true)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
         }
 
@@ -125,6 +129,7 @@ class LiveActivity : Activity() {
     }
 
     private fun load(i: Intent?) {
+        pendingPip = i?.getBooleanExtra(EXTRA_PIP, false) == true && canPip()
         track = i?.getStringExtra(EXTRA_TRACK).orEmpty()
         web.loadUrl("https://$HOST/" + if (track.isNotEmpty()) "?track=$track" else "")
     }
@@ -134,6 +139,7 @@ class LiveActivity : Activity() {
         super.onNewIntent(intent)
         val t = intent.getStringExtra(EXTRA_TRACK).orEmpty()
         if (t != track || t.isEmpty()) load(intent)
+        else pendingPip = intent.getBooleanExtra(EXTRA_PIP, false) && canPip()
     }
 
     private fun dp(v: Int) = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), resources.displayMetrics).toInt()
@@ -252,7 +258,15 @@ class LiveActivity : Activity() {
 
     // 裏に回ったら音も止める（戻ると続きから）。小窓の間は流し続ける
     override fun onPause() { if (!isInPictureInPictureMode) web.onPause(); super.onPause() }
-    override fun onResume() { super.onResume(); web.onResume() }
+    override fun onResume() {
+        super.onResume()
+        web.onResume()
+        // 開いた直後は小窓にして、アプリの画面へ戻す（画面が出てからでないと小窓にできない）
+        if (pendingPip && !isInPictureInPictureMode) {
+            pendingPip = false
+            root.post { if (!isFinishing && !isInPictureInPictureMode) toPip(showApp = true) }
+        }
+    }
 
     override fun onDestroy() {
         web.stopLoading()
