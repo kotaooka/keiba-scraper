@@ -33,7 +33,6 @@
   const EV_MIN = 1.2;
   // mode: "ev"=期待値重視 / "hit"=的中重視 / "both"=両方。hit_min（%）・hit_ev_min は的中重視の条件（PC版の BET_MODE・HIT_MIN・HIT_EV_MIN）
   const DEFAULT_SETTINGS = { budget: 1000, max_bets: 3, ev_min: EV_MIN, mode: "both", hit_min: 30, hit_ev_min: 0.9 };
-  const BET_MODES = { ev: "期待値重視", hit: "的中重視", both: "両方" };
 
   // AI への指示文（PC版の PROMPT_TEXT と同じ文面にそろえる）
   const PROMPT_TEXT = `
@@ -190,18 +189,6 @@
     return venues;
   }
 
-  // 発走前で最も早いレースの位置。全レース終了なら最終レース
-  function nextRaceIndex(races, raceDate) {
-    const now = jstNow();
-    const z = (n) => String(n).padStart(2, "0");
-    const today = `${now.getFullYear()}${z(now.getMonth() + 1)}${z(now.getDate())}`;
-    if (raceDate !== today) return 0;
-    for (let i = 0; i < races.length; i++) {
-      const m = races[i].time.match(/^(\d{1,2}):(\d{2})$/);
-      if (m && (+m[1] > now.getHours() || (+m[1] === now.getHours() && +m[2] > now.getMinutes()))) return i;
-    }
-    return races.length - 1;
-  }
 
   // ========== 出馬表 ==========
 
@@ -1838,12 +1825,12 @@
 
   global.KS = {
     buildWithInfo,
-    NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, BET_MODES, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
+    KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
     parsePatCalendar, parsePatRange,
     oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
     parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
-    parseRaceList, nextRaceIndex,
+    parseRaceList,
     parseShutuba, parseRaceInfo, parseKyakuType,
     keibagoUrl, parseKeibago,
     parseTanFuku, fmtOdds, tanfukuReady, extractCombos, topCombos, axisValues, parseNinkiSanren, comboSignature, comboChanged, selectAxis,

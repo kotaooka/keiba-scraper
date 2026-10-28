@@ -4,7 +4,6 @@
 // ===== 結果 =====
 const ICON_SEND = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><path d="M12 3v12"/><path d="m7 8 5-5 5 5"/></svg>';
 const ICON_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></svg>';
-const ICON_PICK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="6" cy="12" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="18" cy="18" r="2"/><path d="m8 11 8-4M8 13l8 4"/></svg>';
 
 function shareLabel() { try { return Native.shareTarget() || ""; } catch (e) { return ""; } }
 
@@ -65,7 +64,8 @@ function renderResult() {
   const cond = el("button", "cond-line");
   cond.append(el("span", null, "AI への条件"), el("b", null, betSummary(betSettings()) + (promptTemplate() ? "・指示文は書き換え中" : "")), el("span", "go", "変更 ›"));
   cond.onclick = () => { state.back = "result"; showSettings(); };
-  infoBox.append(cond);
+  // AI の回答を記録したあとは、条件が「AI の予想」欄に出るので、記録する前（送る前の確認）だけ出す
+  if (!(readRecords()[cacheKey(state.date, venue, race.no)] || {})["AI"]) infoBox.append(cond);
 
   // オッズの動き（取り直したとき）
   if (res.info.predicted) {
@@ -107,8 +107,6 @@ function renderResult() {
     const ul = el("ul"); for (const x of info.warnings) ul.append(el("li", null, x)); w.append(ul);
     w.append(el("p", "note", "欠損は AI への指示で「推測で補わず市場評価に寄せる」ように伝えています"));
     infoBox.append(w);
-  } else {
-    const ok = el("div", "card ok-card"); ok.append(el("h3", null, "✓ 欠損なし")); infoBox.append(ok);
   }
 
   // 各馬
@@ -197,9 +195,7 @@ function renderResult() {
   onPress(send, () => { markSent(venue, race); Native.share(textFor(res), false); }, () => { markSent(venue, race); Native.share(textFor(res), true); });
   const copy = el("button", "btn secondary sub"); copy.innerHTML = ICON_COPY; copy.append(document.createTextNode("コピー"));
   copy.onclick = () => { markSent(venue, race); Native.copy(textFor(res)); toast("コピーしました"); };
-  const pick = el("button", "btn secondary sub"); pick.innerHTML = ICON_PICK; pick.append(document.createTextNode("送り先"));
-  pick.onclick = () => { markSent(venue, race); Native.share(textFor(res), true); };
-  bar.append(send, copy, pick);
+  bar.append(send, copy);
   // 投票の入口はいつも出す（発売カレンダーが手元にない・競馬場名が合わないときに消えないように）
   {
     const pat = el("button", "btn secondary sub");
@@ -207,7 +203,6 @@ function renderResult() {
     pat.append(document.createTextNode("即PAT"));
     pat.setAttribute("aria-label", "即PAT（地方競馬ネット投票）を開く");
     pat.onclick = openPat;
-    bar.classList.add("with-pat");
     bar.append(pat);
   }
   body.append(bar);
@@ -501,7 +496,6 @@ function renderUpdateUi() {
 function fmtAt(iso) { const d = new Date(iso); return isNaN(d) ? "" : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; }
 
 function showAbout() {
-  closeMenu();
   showScreen("about");
   renderAbout();
   // 開いたら確認する（直前に確認していれば省く）
@@ -578,7 +572,7 @@ function renderAbout() {
     seg.append(b);
   }
   tc.append(seg);
-  tc.append(el("p", "note", "「自動」は端末のダークモードに合わせます。右上の丸いボタンでも切り替えられます"));
+  tc.append(el("p", "note", "「自動」は端末のダークモードに合わせます"));
   body.append(tc);
 
   // このビルド

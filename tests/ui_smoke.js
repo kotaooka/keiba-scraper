@@ -55,9 +55,10 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
       state.date = "20261025"; renderDate();
       App.onPatCalendar("202610", cal);
       App.onRaceList([{ name: "盛岡", races }, { name: "高知", races }]);
-      return { races: document.querySelectorAll("#raceArea .race").length, ext: document.querySelectorAll(".ext-row button").length, fold: !!document.querySelector(".past-fold") };
+      return { theme: !!document.getElementById("themeBtn"), races: document.querySelectorAll("#raceArea .race").length, ext: document.querySelectorAll(".ext-row button").length, fold: !!document.querySelector(".past-fold") };
     }, { cal, races });
     check(scheme, "一覧にレースが並ぶ", home.races > 0, JSON.stringify(home));
+    check(scheme, "見出しに表示切り替えのボタンを出さない（設定の「画面の色」に一本化）", !home.theme);
     check(scheme, "レース映像・即PAT のボタン", home.ext === 2);
     check(scheme, "発走済みのレースを畳む", home.fold);
     check(scheme, "一覧が横にはみ出さない", (await overflow()) <= 0);
@@ -79,13 +80,15 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
       return { steps, before, offer, recorded: !!(rec && rec["AI"]),
         nav: [...document.querySelectorAll(".sec-nav button")].map((b) => b.textContent),
         kpi: document.querySelectorAll("#sec-ai .bet-kpi").length,
+        cond: !!document.querySelector(".cond-line"),
         text: document.querySelector("#sec-text summary") ? document.querySelector("#sec-text summary").textContent : "" };
     }, { r1: buildRace("2026-10-25 13:28"), ai });
-    check(scheme, "結果画面の下のボタン4つ", res.before.bar === 4, JSON.stringify(res.before));
+    check(scheme, "結果画面の下のボタン3つ（送る・コピー・即PAT）", res.before.bar === 3, JSON.stringify(res.before));
     check(scheme, "AI の回答のコピーに気づいて記録を勧める", res.offer);
     check(scheme, "勧めから記録できる", res.recorded);
     check(scheme, "記録後は AI の予想が見出しの先頭（結果の次）", res.nav[0] === "AI予想", res.nav.join(","));
     check(scheme, "買い目が3列で出る", res.kpi > 0);
+    check(scheme, "記録後は「AI への条件」の行を出さない", !res.cond);
     check(scheme, "送るテキスト", /送るテキストを見る/.test(res.text));
     check(scheme, "結果画面が横にはみ出さない", (await overflow()) <= 0);
 

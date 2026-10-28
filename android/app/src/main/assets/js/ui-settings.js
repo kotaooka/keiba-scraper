@@ -42,7 +42,6 @@ function textFor(res) {
 }
 
 function showSettings() {
-  closeMenu();
   showScreen("settings");
   renderSettings();
 }
@@ -296,7 +295,7 @@ $("sheetScrim").onclick = closeSheet;
 function openFromNotification(p) {
   if (!p || !p.r) return;
   const r = p.r;
-  closeSheet(); closeMenu();
+  closeSheet();
   if (state.screen === "collect" && state.job) { Native.cancel(); state.job = null; }
   state.parent = null; state.fromRecords = false; state.back = null;
   // 答え合わせの通知：予想の記録を開く（取れていなければその場で取りに行く）
@@ -347,10 +346,7 @@ function toast(msg) {
   clearTimeout(toast.h); toast.h = setTimeout(() => t.classList.remove("show"), 1600);
 }
 
-// ===== メニュー =====
-// 以前のメニューの名残（呼ぶところが残っていても動くように）
-function closeMenu() { $("scrim").classList.add("hidden"); }
-$("scrim").onclick = closeMenu;
+// ===== 見出しのボタン =====
 $("prefsBtn").onclick = showPrefs;
 $("recordsTop").onclick = () => { state.parent = null; showRecords(); };
 // 収集用の WebView が開いているページを画面の下半分に出す（読み取れないときの確認用）
@@ -367,10 +363,6 @@ function renderPreviewBtn() {
 }
 $("previewClose").onclick = () => setPreview(false);
 $("updateBar").onclick = showAbout;
-$("themeBtn").onclick = () => {
-  const next = THEMES[(THEMES.indexOf(themePref) + 1) % THEMES.length];
-  setThemePref(next); toast(`表示：${THEME_LABEL[next]}`);
-};
 
 // ===== 設定の画面（トップの歯車から） =====
 function showPrefs() { state.parent = null; state.back = null; showScreen("prefs"); renderPrefs(); }

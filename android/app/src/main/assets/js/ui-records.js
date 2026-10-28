@@ -328,7 +328,7 @@ function aiCard(venue, race) {
   }
   const ai = rec["AI"], pred = ai["予想"] || {};
   const aiHelp = ["買い目ごとに、オッズ（複勝・ワイドは幅の下限）× AI の推定した当たる確率 ＝ 期待値 を出します。期待値が条件の下限以上なら緑、下回れば黄。記録のあとにオッズを取り直していれば「今」の値も並べます（締切前に期待値が下限を割っていないかの確認に）",
-    "「勝率から計算」は、AI の推定勝率から Harville 法で計算した複勝・ワイド・3連複の的中率です。AI の見積もりと大きく違うときは黄色で知らせます",
+    "「勝率から計算」は、AI の推定勝率から Harville 法で計算した複勝・ワイド・3連複の的中率です。AI の見積もりと大きく違うときだけ黄色で出します（AI の見積もりが自分の推定勝率と食い違っている印）",
     "「ケリー」は、推定的中率とオッズから出した最適な賭け金の割合 × 設定の割合（既定 1/4）× 資金 を100円単位にした目安です。1点ずつの計算なので、何点も買うときの合計は多めに出ます。割合と資金は「AI への条件」の画面で変えられます",
     "「どれかが当たる確率」は AI の見積もりです。複勝・ワイドや券種の違う買い目は同時に当たることがあるので、幅（いちばん高い確率〜足した確率）で出します"];
   { const t = String(ai["記録時刻"] || ""); h.append(el("span", "aside", t.length >= 16 ? `記録 ${+t.slice(5, 7)}/${+t.slice(8, 10)} ${t.slice(11, 16)}` : "")); }
@@ -422,9 +422,9 @@ function aiCard(venue, race) {
       const extra = [];
       if (recOk) extra.push(el("span", null, `当たれば ${yen(Math.floor(b["金額"] / 100) * Math.round(atRec.low * 100))}${wide ? "以上" : ""}`));
       const cp = calcProbOf(b);
-      if (cp != null && p != null) {
-        const far = Math.abs(p - cp) > Math.max(0.03, cp * 0.3);
-        extra.push(el("span", far ? "calc-far" : null, `勝率から計算 ${(cp * 100).toFixed(1)}%${far ? "（AI と差が大きい）" : ""}`));
+      // AI の推定勝率から計算した的中率は、AI の見積もりと大きく違うときだけ出す（同じくらいなら読む意味がないので）
+      if (cp != null && p != null && Math.abs(p - cp) > Math.max(0.03, cp * 0.3)) {
+        extra.push(el("span", "calc-far", `勝率から計算 ${(cp * 100).toFixed(1)}%（AI と差が大きい）`));
       }
       const ko = nowDiff ? now.low : recOk ? atRec.low : null;
       const ka = rec["結果"] ? null : kellyAmount(p, ko);
@@ -751,7 +751,7 @@ function openOwnSheet(venue, race) {
 }
 
 // ===== 記録と答え合わせの画面 =====
-function showRecords() { closeMenu(); state.back = null; showScreen("records"); renderRecords(); }
+function showRecords() { state.back = null; showScreen("records"); renderRecords(); }
 // ===== 回収率の推移と内訳 =====
 // 記録を発走の順（日付・発走時刻・競馬場・レース番号）に並べ、買った・買い目のあるレースだけで収支を足し上げる。
 // 期待値重視・的中重視の数え方は computeSummary（PC版の _bet_summary）と同じ
@@ -946,16 +946,19 @@ function renderRecords() {
     c2.append(el("p", "note", `AI − 市場 = ${br.diff >= 0 ? "+" : ""}${br.diff.toFixed(4)}（95%区間 ${br.ci[0] >= 0 ? "+" : ""}${br.ci[0].toFixed(4)}〜${br.ci[1] >= 0 ? "+" : ""}${br.ci[1].toFixed(4)}）`));
     if (br.n < 30) c2.append(el("p", "verdict", "まだ判断できません（30レース未満）"));
     else c2.append(el("p", "verdict", br.ci[1] < 0 ? "✓ AI の推定勝率は、市場（単勝オッズ）より当たっています" : br.ci[0] > 0 ? "! AI の推定勝率は、市場（単勝オッズ）より外れています" : "AI と市場の差は、このレース数では区別できません"));
-    const tb = el("table", "rec-table"); tb.style.marginTop = "10px";
+    // 推定○%の馬が実際に何%勝ったか（レース数が少ないうちは意味が薄いので畳んでおく）
+    const det = el("details", "breakdown"); keepOpen(det, "calib");
+    det.append(el("summary", null, "キャリブレーション（推定○%の馬が実際に何%勝ったか）"));
+    const tb = el("table", "rec-table"); tb.style.marginTop = "6px";
     const hr = el("tr"); for (const [t, cls] of [["推定勝率"], ["件数", "r"], ["AI推定", "r"], ["実際", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
     for (const [lo, hi, cnt, mp, act] of sm.calib_win.ai) {
       const tr = el("tr"); tr.append(el("td", null, `${lo}〜${hi}%`), el("td", "r", cnt), el("td", "r", `${mp.toFixed(1)}%`), el("td", "r", `${act.toFixed(1)}%`)); tb.append(tr);
     }
-    c2.append(tb);
-    c2.append(el("p", "note", `推定○%の馬が実際に何%勝ったか。推定複勝率のブライアスコア ${sm.calib_place.brier.toFixed(4)}`));
+    det.append(tb);
+    det.append(el("p", "note", `推定複勝率のブライアスコア ${sm.calib_place.brier.toFixed(4)}`));
+    c2.append(det);
   }
   if (sm.n_races && sm.n_races < 30) c2.append(el("p", "note", `※レース数が ${sm.n_races}件と少ないため、区間が広く結論は出せません。50レース以上たまってから判断してください`));
-  body.append(c2);
 
   // 一覧（新しい順）
   const list = el("div", "rec-list"); list.style.marginTop = "12px";
@@ -1012,4 +1015,6 @@ function renderRecords() {
   act.append(im);
   act.append(el("p", "note", "書き出したファイルは、機種変更や入れ直しのあとに「読み込む」で戻せます。PC へ移して run.bat import <ファイル> で取り込むと verify.bat でも集計できます"));
   body.append(act);
+  // 推定勝率の精度（判断は CLV と回収率で足りるので、いちばん下に置く）
+  body.append(c2);
 }
