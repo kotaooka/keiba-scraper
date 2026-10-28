@@ -117,24 +117,21 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     check(scheme, "AI なしの目安を記録に残す・金額は100円単位で予算以内", res.mkt.stored && res.mkt.picksOk, JSON.stringify(res.mkt));
     check(scheme, "結果画面が横にはみ出さない", (await overflow()) <= 0);
 
-    // 説明の「?」・買った馬券・即PAT 入力用の一覧
+    // 説明の「?」・買った馬券
     const own = await page.evaluate(() => {
       const help = document.querySelector("#sec-ai .help-btn"); help.click();
       const helpOpen = !document.querySelector("#sec-ai .help-box").classList.contains("hidden");
       [...document.querySelectorAll("#sec-own button")].find((x) => x.textContent.includes("期待値重視の買い目を入れる")).click();
       const bets = document.querySelectorAll("#sec-own .bet").length;
-      document.querySelector("#sec-own .pat-list-btn").click();
-      const rows = document.querySelectorAll("#sheet .pat-row").length;
-      closeSheet();
       [...document.querySelectorAll("#sec-own button")].find((x) => x.textContent === "1点ずつ入れる").click();
       const sheet = document.querySelector("#sheet h3").textContent;
       closeSheet();
-      return { helpOpen, bets, rows, sheet, helpKept: (renderResult(), !document.querySelector("#sec-ai .help-box").classList.contains("hidden")) };
+      return { helpOpen, bets, noPat: !document.querySelector(".pat-list-btn"), sheet, helpKept: (renderResult(), !document.querySelector("#sec-ai .help-box").classList.contains("hidden")) };
     });
     check(scheme, "説明の「?」が開く", own.helpOpen);
     check(scheme, "描き直しても説明が開いたまま", own.helpKept);
     check(scheme, "AI の買い目を買った馬券に写せる", own.bets > 0, JSON.stringify(own));
-    check(scheme, "即PAT 入力用の一覧", own.rows > 0);
+    check(scheme, "即PAT 入力用の一覧は出さない", own.noPat);
     check(scheme, "買った馬券を1点ずつ入れる画面", own.sheet === "買った馬券を入れる");
 
     // 通知の「AI へ送る」・自動バックアップ

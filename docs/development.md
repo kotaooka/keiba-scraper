@@ -16,7 +16,7 @@ android/                  Android版
   app/src/main/assets/js/          画面の動き（ui-core → ui-result → ui-records → ui-settings の順に読む）
     ui-core.js       表示テーマ・Kotlin とのやり取り・日付・発売カレンダー・開催一覧・収集の進み具合
     ui-result.js     結果画面・見出しのナビ・Kotlin から呼ばれる App・AI の回答の読み込み・更新
-    ui-records.js    AI の予想欄・買った馬券・即PAT 入力用の一覧・記録の画面・収支の推移・CLV
+    ui-records.js    AI の予想欄・買った馬券・AI なしの目安・記録の画面・収支の推移・CLV
     ui-settings.js   予想の条件・ケリー基準・通知と自動収集の予約・設定の画面・起動時の処理
   app/src/main/java/.../           Kotlin（下表）
 tests/                    テスト（下の「テスト」）
@@ -64,7 +64,7 @@ docs/                     説明書と画面例（記録の形式は record-form
 |---|---|
 | `test_parity.py` | PC版（`keiba_scraper.py`）とアプリ版（`scraper.js`）に同じ入力（`fixtures/` のページ・記録・AI の回答）を渡し、解析・AI へ送るテキスト・指示文・Harville 法・集計（回収率・精度・CLV）・記録用ブロックの読み取りが一致するか比べる |
 | `test_config.py` | PC版・アプリ・Kotlin の同じ名前の設定値が一致するか確かめる |
-| `ui_smoke.js` | アプリの画面を Chromium（幅360px、ライトとダーク）で開き、一覧 → 収集 → 結果 → AI の回答の読み込み → 買った馬券 → 即PAT 入力用の一覧 → 記録の画面 → 設定 → エラーの記録 → 動作確認と操作して、画面のエラー・横へのはみ出し・主な要素を確かめる |
+| `ui_smoke.js` | アプリの画面を Chromium（幅360px、ライトとダーク）で開き、一覧 → 収集 → 結果 → AI の回答の読み込み → 買った馬券 → 記録の画面 → 設定 → エラーの記録 → 動作確認と操作して、画面のエラー・横へのはみ出し・主な要素を確かめる |
 
 手元で動かすときは次のとおり（Python の beautifulsoup4・playwright と Node.js が要る）。
 

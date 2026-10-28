@@ -1,4 +1,4 @@
-// 予想の記録と答え合わせ：AI の予想欄・買った馬券・即PAT 入力用の一覧・記録の画面・収支の推移と内訳・CLV
+// 予想の記録と答え合わせ：AI の予想欄・買った馬券・AI なしの目安・記録の画面・収支の推移と内訳・CLV
 // ui.html から順に読み込む（ふつうの <script> なので、上のファイルの const や function はそのまま使える）。
 // 読み込む順番に意味がある（ui-core → ui-result → ui-records → ui-settings）。起動時の処理は ui-settings.js の最後
 // ===== 予想の記録と答え合わせ =====
@@ -545,7 +545,6 @@ function aiCard(venue, race) {
   if (!(hasHit && rec["買い方"] === "hit")) c.append(betSection(ctx, "買い目", "オッズ", hasHit ? "期待値重視" : "", `期待値 ${KS.fmtEv(evMin0)} 以上`, evMin0));
   if (hasHit) c.append(betSection(ctx, "的中買い目", "的中オッズ", "的中重視", `的中率 ${hitMin0}%以上・期待値 ${KS.fmtEv(hitEv0)} 以上`, hitEv0));
   if (ai["総評"]) c.append(el("p", "ai-comment", `「${ai["総評"]}」`));
-  if (!rec["結果"]) c.append(patListButton(venue, race));
   c.append(aiResultNote(rec));
   const tb = aiCompareTable(rec, info, pred);
   if (tb) {
@@ -677,7 +676,6 @@ function ownCard(venue, race) {
     }
   }
   if (!rec || !rec["結果"]) {
-    if (own.length) c.append(patListButton(venue, race, "own"));
     const row = el("div", "own-actions");
     const ai = rec && rec["AI"];
     const copy = (k, label) => {
@@ -700,99 +698,6 @@ function ownCard(venue, race) {
   return c;
 }
 // 1点ずつ入れるシート（券種・馬番・金額）
-// ===== 即PAT 入力用の買い目一覧 =====
-// 即PAT の券種の並び（単勝・複勝・枠連・馬連・ワイド・馬単・3連複・3連単）で、券種ごとにまとめて出す。
-// 同じ券種・組み合わせが重なっていれば金額を足す。入力し終えた行はタップで印を付けられる（画面の中だけ）
-const PAT_ORDER = ["単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複", "3連単", "枠単"];
-function patSources(rec) {
-  const out = [];
-  if (!rec) return out;
-  const own = ownBetsOf(rec), ai = rec["AI"];
-  if (own.length) out.push({ id: "own", label: "買った馬券", bets: own });
-  if (ai && Array.isArray(ai["買い目"]) && ai["買い目"].length) out.push({ id: "ev", label: hasHitOf(rec) ? "期待値重視" : "AI の買い目", bets: ai["買い目"] });
-  if (ai && hasHitOf(rec) && Array.isArray(ai["的中買い目"]) && ai["的中買い目"].length) out.push({ id: "hit", label: "的中重視", bets: ai["的中買い目"] });
-  if (ai && out.filter((x) => x.id !== "own").length === 2) {
-    out.push({ id: "both", label: "AI 両方", bets: ai["買い目"].concat(ai["的中買い目"]) });
-  }
-  return out;
-}
-function patGroups(bets) {
-  const map = new Map();
-  for (const b of bets) {
-    const k = `${b["券種"]}|${b["組み合わせ"]}`;
-    const x = map.get(k) || { type: b["券種"], combo: b["組み合わせ"], amount: 0 };
-    x.amount += +b["金額"] || 0;
-    map.set(k, x);
-  }
-  const cmpCombo = (a, b) => { const x = a.split("-").map(Number), y = b.split("-").map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
-  const rank = (t) => { const i = PAT_ORDER.indexOf(t); return i < 0 ? 99 : i; };
-  const rows = [...map.values()].sort((a, b) => rank(a.type) - rank(b.type) || cmpCombo(a.combo, b.combo));
-  const groups = [];
-  for (const r of rows) { const g = groups[groups.length - 1]; if (g && g.type === r.type) g.rows.push(r); else groups.push({ type: r.type, rows: [r] }); }
-  return groups;
-}
-function patListButton(venue, race, prefer) {
-  const b = el("button", "btn secondary pat-list-btn");
-  b.innerHTML = ICON_PAT;
-  b.append(document.createTextNode("即PAT 入力用の一覧"));
-  b.onclick = () => openPatSheet(venue, race, prefer);
-  return b;
-}
-function patListText(venue, race, src) {
-  const lines = [`${venue} ${race.no}R ${src.label}`];
-  for (const g of patGroups(src.bets)) for (const r of g.rows) lines.push(`${r.type} ${r.combo} ${yen(r.amount)}`);
-  lines.push(`合計 ${yen(src.bets.reduce((t, b) => t + (+b["金額"] || 0), 0))}`);
-  return lines.join("\n");
-}
-function openPatSheet(venue, race, prefer) {
-  const key = cacheKey(state.date, venue, race.no);
-  const info = state.result.res.info;
-  const srcs = patSources(readRecords()[key]);
-  if (!srcs.length) { toast("買い目がありません"); return; }
-  let cur = (srcs.find((x) => x.id === prefer) || srcs[0]).id;
-  const done = new Set();
-  const nameOf = (n) => ((info.horses || []).find((x) => String(parseInt(x.no, 10)) === n) || {}).name || "";
-  const sh = $("sheet");
-  function render() {
-    const src = srcs.find((x) => x.id === cur);
-    sh.replaceChildren();
-    sh.append(el("div", "grip"), el("h3", null, "即PAT 入力用の一覧"), el("p", "sub", `${venue} ${race.no}R ${race.title || ""}・入力した行はタップで印を付けられます`));
-    if (srcs.length > 1) {
-      const tg = el("div", "chips-pick");
-      for (const x of srcs) { const b = el("button", null, x.label); b.setAttribute("aria-pressed", String(x.id === cur)); b.onclick = () => { cur = x.id; done.clear(); render(); }; tg.append(b); }
-      sh.append(tg);
-    }
-    const groups = patGroups(src.bets);
-    for (const g of groups) {
-      const sum = g.rows.reduce((t, r) => t + r.amount, 0);
-      const h = el("h4", "pat-type"); h.append(el("b", null, g.type), el("span", null, `${g.rows.length}点・${yen(sum)}`));
-      sh.append(h);
-      const list = el("div", "pat-rows");
-      for (const r of g.rows) {
-        const k = `${r.type}|${r.combo}`;
-        const row = el("button", "pat-row" + (done.has(k) ? " done" : ""));
-        const names = r.type.startsWith("枠") ? "" : r.combo.split("-").map(nameOf).filter(Boolean).join("・");
-        const left = el("span", "pat-what"); left.append(el("b", "num", r.combo)); if (names) left.append(el("small", null, names));
-        const right = el("span", "pat-amt"); right.append(el("b", "num", yen(r.amount)), el("small", null, `${r.amount / 100}口`));
-        row.append(el("span", "pat-check", done.has(k) ? "✓" : ""), left, right);
-        row.onclick = () => { if (done.has(k)) done.delete(k); else done.add(k); render(); };
-        list.append(row);
-      }
-      sh.append(list);
-    }
-    const total = src.bets.reduce((t, b) => t + (+b["金額"] || 0), 0);
-    const points = groups.reduce((t, g) => t + g.rows.length, 0);
-    sh.append(el("p", "pat-total", `合計 ${points}点・${yen(total)}${done.size ? `（入力済み ${done.size}/${points}）` : ""}`));
-    const row = el("div", "btn-row");
-    const open = el("button", "btn primary"); open.innerHTML = ICON_PAT; open.append(document.createTextNode("即PATを開く")); open.onclick = openPat;
-    const copy = el("button", "btn secondary", "コピー"); copy.onclick = () => { Native.copy(patListText(venue, race, src)); toast("コピーしました"); };
-    row.append(open, copy);
-    sh.append(row);
-  }
-  render();
-  sh.classList.remove("hidden"); $("sheetScrim").classList.remove("hidden");
-}
-
 function openOwnSheet(venue, race) {
   const info = state.result.res.info;
   const horses = (info.horses || []).filter((x) => !x.cancel);
