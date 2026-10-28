@@ -549,7 +549,8 @@ function renderDeviceTest() {
   item("2. 締切前のオッズの確認", aiRec ? `約1分後に、${aiRec[1]["競馬場"]} ${aiRec[1]["レース番号"]}R を裏で収集し直し、「締切前のオッズ」か「見送り推奨あり」の通知が出ます（収集に30秒〜1分）` : "AI の回答を記録したレースがないので試せません",
     "1分後に動かす", () => {
       const [k, r] = aiRec;
-      const um = (KS.CONFIG.PRECHECK_MINUTES + 1) * 60000;
+      // 締切前の確認は「取り直す時刻まで1分を切っていれば予約しない」ので、1分ちょうどではなく少し余裕を持たせる
+      const um = (KS.CONFIG.PRECHECK_MINUTES + 1) * 60000 + 15000;
       const ok = Native.schedulePreCheck(JSON.stringify({ key: k, race_id: r.race_id, date: r["日付"], venue: r["競馬場"], no: r["レース番号"],
         title: `${r["レース名"] || ""}（動作確認）`, time: r["発走"], start: Date.now() + um,
         bets: r["買い方"] === "hit" ? [] : r["AI"]["買い目"] || [], hit_bets: hasHitOf(r) ? (r["AI"]["的中買い目"] || []) : [],
