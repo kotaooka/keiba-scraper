@@ -2507,8 +2507,9 @@ def run_import(path):
             # AI なしの目安は、見送り（空の配列）も記録なので、手元に無ければ足す
             if "市場買い目" not in cur and isinstance(r.get("市場買い目"), list):
                 cur["市場買い目"] = r["市場買い目"]
-                if r.get("市場記録時刻"):
-                    cur["市場記録時刻"] = r["市場記録時刻"]
+                for f in ("市場記録時刻", "市場データ"):
+                    if r.get(f):
+                        cur[f] = r[f]
                 changed = True
             if changed:
                 save_record(cur)

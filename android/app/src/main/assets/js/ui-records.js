@@ -143,7 +143,7 @@ function ensureDataRecord(date, venue, no, res, title) {
   if (!rec["結果"] && (um == null || um > 0)) {
     try {
       const mp = KS.marketPicks(res.info, betSettings());
-      if (mp.computed) { rec["市場買い目"] = mp.bets; rec["市場記録時刻"] = res.at || ""; }
+      if (mp.computed) { rec["市場買い目"] = mp.bets; rec["市場記録時刻"] = res.at || ""; rec["市場データ"] = KS.marketSnapshot(res.info); }
     } catch (e) { logError("AI なしの目安", e); }
   }
   recs[key] = rec; writeRecords(recs);

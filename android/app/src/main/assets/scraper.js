@@ -1666,6 +1666,19 @@
     return out;
   }
 
+  // AI なしの目安を出したときの市場のデータ（記録に残し、あとで条件を変えて計算し直せるように）。
+  // {勝率: {馬番: 市場勝率(%)}, 複勝: {馬番: "1.4 - 2.0"}, ワイド: {組: "3.6 - 5.0"}, 3連複: {組: "12.3"}}（ワイド・3連複は人気上位10組）
+  function marketSnapshot(info) {
+    const runners = ((info && info.horses) || []).filter((h) => !h.cancel);
+    const no = (h) => String(parseInt(h.no, 10));
+    const combos = (t) => Object.fromEntries((((info && info.combos) || {})[t] || []).map((c) => [c.key, String(c.odds)]));
+    return {
+      "勝率": Object.fromEntries(runners.filter((h) => h.prob != null).map((h) => [no(h), h.prob])),
+      "複勝": Object.fromEntries(runners.filter((h) => h.fuku).map((h) => [no(h), String(h.fuku)])),
+      "ワイド": combos("ワイド"), "3連複": combos("3連複"),
+    };
+  }
+
   function oddsLow(text) {
     const m = String(text == null ? "" : text).replace(/,/g, "").match(/\d+(?:\.\d+)?/);
     return m ? parseFloat(m[0]) : null;
@@ -1972,7 +1985,7 @@
     KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
     parsePatCalendar, parsePatRange,
     oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
-    CONFIG, RECORD_SCHEMA, migrateRecord, parseAiBlock, raceIdOf, newRecord, betOddsFromInfo, betProbOf, recheckBets, harvilleDiscounted, marketPicks, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
+    CONFIG, RECORD_SCHEMA, migrateRecord, parseAiBlock, raceIdOf, newRecord, betOddsFromInfo, betProbOf, recheckBets, harvilleDiscounted, marketPicks, marketSnapshot, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList,
     parseShutuba, parseRaceInfo, parseKyakuType,

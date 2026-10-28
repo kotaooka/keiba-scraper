@@ -97,7 +97,8 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
           ensureDataRecord("20271025", "盛岡", 7, Object.assign({}, state.result.res), "");
           const dr = readRecords()["20271025|盛岡|7"];
           const past = readRecords()["20261025|盛岡|7"];
-          return { card: !!document.querySelector(".market-card"), computed: mp.computed, cands: mp.cands.length, same, sum3, stored: !!dr && Array.isArray(dr["市場買い目"]) && !!dr["市場記録時刻"] && !("市場買い目" in past),
+          return { card: !!document.querySelector(".market-card"), computed: mp.computed, cands: mp.cands.length, same, sum3, stored: !!dr && Array.isArray(dr["市場買い目"]) && !!dr["市場記録時刻"] && !("市場買い目" in past)
+            && Object.keys(dr["市場データ"]["勝率"]).length > 0 && Object.keys(dr["市場データ"]["複勝"]).length > 0 && Object.keys(dr["市場データ"]["ワイド"]).length > 0,
             picksOk: mp.bets.every((b) => b["金額"] >= 100 && b["金額"] % 100 === 0) && mp.bets.reduce((t, b) => t + b["金額"], 0) <= betSettings().budget };
         })(),
         text: document.querySelector("#sec-text summary") ? document.querySelector("#sec-text summary").textContent : "" };
