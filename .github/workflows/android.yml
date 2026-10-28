@@ -1,4 +1,4 @@
-# android/ 以下が変わったら、デバッグ版 APK をビルドし、
+# android/ 以下が変わったら、テスト（tests.yml）を通してからデバッグ版 APK をビルドし、
 # リリース android-latest の APK を差し替える（Artifacts にも置く）
 name: Android APK
 
@@ -16,7 +16,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ビルドの前に、計算の一致と画面を確かめる（失敗したら APK を出さない）
+  test:
+    uses: ./.github/workflows/tests.yml
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: write  # タグとリリースの更新に必要

@@ -12,3 +12,7 @@ __pycache__/
 # 実行時の生成物（スクレイピング結果）
 output/
 debug_output/
+
+# テストの依存（tests/ で npm install）
+tests/node_modules/
+tests/package-lock.json

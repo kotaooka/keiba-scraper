@@ -1,0 +1,45 @@
+# PC版とアプリ版の計算が一致するか、アプリの画面が壊れていないかを確かめる。
+# PC版・アプリの画面・テストを変えたとき、および Android 版のビルドの前（android.yml から呼ぶ）に動く
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "keiba_scraper.py"
+      - "tests/**"
+      - "android/app/src/main/assets/**"
+      - ".github/workflows/tests.yml"
+  pull_request:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # keiba_scraper.py は起動時に playwright と beautifulsoup4 を読み込む（テストではブラウザは使わない）
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install test packages
+        working-directory: tests
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: PC版とアプリ版の計算の一致
+        run: python tests/test_parity.py
+
+      - name: アプリの画面
+        run: node tests/ui_smoke.js

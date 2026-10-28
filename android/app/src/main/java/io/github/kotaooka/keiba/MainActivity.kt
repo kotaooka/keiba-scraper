@@ -77,6 +77,8 @@ class MainActivity : Activity() {
         work = WebView(this)
         ui = WebView(this).apply {
             settings.javaScriptEnabled = true
+            // 端末の文字サイズの設定に合わせる（大きすぎるとボタンの文字が折り返して崩れるので 85〜115% に収める）
+            settings.textZoom = Math.round(resources.configuration.fontScale * 100).coerceIn(85, 115)
             settings.domStorageEnabled = true  // 収集済みの記録（localStorage）に使う
             settings.allowFileAccess = false
             setBackgroundColor(Color.TRANSPARENT)
