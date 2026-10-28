@@ -241,20 +241,19 @@ function renderVenues() {
 }
 
 // 発走までの分（レース日と "HH:MM" から。発走時刻が無ければ null）
-// このレースの直前から数えて、発走して2分以上たったレースの数（当日の傾向に使う前のレースの結果を読む範囲。分からなければ -1）
-function prevStartedOf(venue, no) {
+// このレースより前で、発走して2分以上たったいちばん新しいレースの番号（当日の傾向に使う結果をここから前へ読む）。
+// 1つもなければ 0、分からなければ -1。次の次のレースを収集するときも、まだ発走していない間のレースは飛ばす
+function lastStartedOf(venue, no) {
   if (state.date < todayStr()) return no - 1;
   if (state.date > todayStr()) return 0;
   const v = (state.venues || []).find((x) => x.name === venue);
   if (!v) return -1;
-  let n = 0;
   for (let k = no - 1; k >= 1; k--) {
     const r = v.races.find((x) => +x.no === k);
     const u = r ? untilMin(state.date, r.time) : null;
-    if (u == null || u > -2) break;
-    n++;
+    if (u != null && u <= -2) return k;
   }
-  return n;
+  return 0;
 }
 function untilMin(date, time) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(time || "");
@@ -462,7 +461,7 @@ function startCollect(venue, race) {
   actions.append(cancel);
   body.append(actions);
 
-  Native.collect(venue, state.date, race.no, prevStartedOf(venue, race.no));
+  Native.collect(venue, state.date, race.no, lastStartedOf(venue, race.no));
 }
 
 function setStep(key, s, detail) {

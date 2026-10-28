@@ -1535,12 +1535,15 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
 def scrape_day_results(page, code, race_date, race_no):
     """同じ日・同じ競馬場で、このレースより前の確定済みレースの結果を読む（新しい順に最大 DAY_RESULTS_MAX レース）。
     確定した結果は output/results/ に置いて使い回す。未来の日付は読まない。
-    まだ確定していないレースが2つ続いたら、それより前も走っていないとみなしてやめる"""
+    まだ発走していない・確定していないレースは飛ばして前へ読む（次の次のレースを収集するときも読めるように）。
+    確定した結果が見つかったあとに未確定が2つ続くか、サイトから読んだページが DAY_RESULTS_MAX + 2 を超えたらやめる"""
     if race_date > datetime.now().strftime("%Y%m%d"):
         return []
     cache = OUTPUT_DIR / "results"
-    out, misses = [], 0
-    for n in range(race_no - 1, max(0, race_no - 1 - DAY_RESULTS_MAX), -1):
+    out, misses, fetched = [], 0, 0
+    for n in range(race_no - 1, 0, -1):
+        if len(out) >= DAY_RESULTS_MAX or fetched >= DAY_RESULTS_MAX + 2:
+            break
         rid = f"{race_date[:4]}{code}{race_date[4:8]}{n:02d}"
         f = cache / f"{rid}.json"
         res = None
@@ -1550,6 +1553,7 @@ def scrape_day_results(page, code, race_date, race_no):
             except (OSError, ValueError):
                 res = None
         if res is None:
+            fetched += 1
             res = scrape_result(page, rid)
             if res:
                 cache.mkdir(parents=True, exist_ok=True)
@@ -1557,7 +1561,7 @@ def scrape_day_results(page, code, race_date, race_no):
         if res:
             out.append({"レース番号": n, "結果": res})
             misses = 0
-        else:
+        elif out:
             misses += 1
             if misses >= 2:
                 break

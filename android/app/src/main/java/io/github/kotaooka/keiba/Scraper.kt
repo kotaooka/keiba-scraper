@@ -270,10 +270,11 @@ class Scraper(
 
     /**
      * 同じ日・同じ競馬場で、このレースより前の確定済みレースの結果を新しい順に最大 Config.DAY_RESULTS_MAX レース読む（PC版の scrape_day_results）。
-     * prevStarted は、このレースの直前から数えて発走済みのレース数（画面の一覧の発走時刻から。-1 は分からない）。
-     * 確定した結果は端末に置いて使い回す（3日で消す）。まだ確定していないレースが2つ続いたらやめる
+     * lastStarted は、このレースより前で発走済みのいちばん新しいレース番号（画面の一覧の発走時刻から。0 はなし、-1 は分からない）。
+     * まだ発走していないレース・確定していないレースは飛ばして前へ読む。確定した結果が見つかったあとに未確定が2つ続くか、
+     * サイトから読んだページが DAY_RESULTS_MAX + 2 を超えたらやめる。確定した結果は端末に置いて使い回す（3日で消す）
      */
-    private suspend fun fetchDayResults(code: String, raceDate: String, raceNo: Int, prevStarted: Int): String {
+    private suspend fun fetchDayResults(code: String, raceDate: String, raceNo: Int, lastStarted: Int): String {
         step("today", "run", "")
         val t0 = SystemClock.elapsedRealtime()
         val dir = dayResultsDir()
@@ -281,26 +282,29 @@ class Scraper(
         val old = System.currentTimeMillis() - 3L * 24 * 3600 * 1000
         dir.listFiles()?.forEach { if (it.lastModified() < old) it.delete() }
         val today = Jst.format("yyyyMMdd")
-        val limit = when {
+        val top = when {
             raceDate > today -> 0
-            prevStarted >= 0 -> minOf(prevStarted, Config.DAY_RESULTS_MAX)
-            else -> Config.DAY_RESULTS_MAX
+            lastStarted >= 0 -> minOf(lastStarted, raceNo - 1)
+            else -> raceNo - 1
         }
         val out = JSONArray()
         var misses = 0
-        for (n in (raceNo - 1) downTo maxOf(1, raceNo - limit)) {
+        var fetched = 0
+        for (n in top downTo 1) {
+            if (out.length() >= Config.DAY_RESULTS_MAX || fetched >= Config.DAY_RESULTS_MAX + 2) break
             val rid = "${raceDate.substring(0, 4)}$code${raceDate.substring(4, 8)}${"%02d".format(n)}"
             val f = java.io.File(dir, "$rid.json")
             var res: JSONObject? = if (f.exists()) runCatching { JSONObject(f.readText()) }.getOrNull() else null
             if (res == null) {
                 step("today", "run", "${n}R")
+                fetched++
                 // 確定していれば fetchResult が f に書く
                 if (fetchResult(rid) != null && f.exists()) res = runCatching { JSONObject(f.readText()) }.getOrNull()
             }
             if (res != null) {
                 out.put(JSONObject().put("レース番号", n).put("結果", res))
                 misses = 0
-            } else if (++misses >= 2) break
+            } else if (out.length() > 0 && ++misses >= 2) break
         }
         log("  当日の結果: 確定済み ${out.length()}レース（${(SystemClock.elapsedRealtime() - t0) / 1000}秒）")
         step("today", if (out.length() > 0) "ok" else "skip", if (out.length() > 0) "${out.length()}レース" else "なし")
@@ -319,14 +323,14 @@ class Scraper(
      * 1レース分を集めて AI 貼り付け用テキストを作る。段階ごとに step(キー, 状態, 詳細) を呼ぶ。
      * キーは ui.html の STEPS と同じ。状態は run / ok / warn / ng / skip。
      */
-    suspend fun collectRace(keibajo: String, raceDate: String, raceNo: Int, prevStarted: Int = -1): Outcome {
+    suspend fun collectRace(keibajo: String, raceDate: String, raceNo: Int, lastStarted: Int = -1): Outcome {
         val code = KEIBA_CODES[keibajo] ?: return Outcome(null, "未対応の競馬場です: $keibajo")
         val raceId = "${raceDate.substring(0, 4)}$code${raceDate.substring(4, 8)}${"%02d".format(raceNo)}"
         val oddsUrl = "$NETKEIBA/odds/?race_id=$raceId&type="
         log("収集対象: $keibajo ${raceDate.substring(0, 4)}/${raceDate.substring(4, 6)}/${raceDate.substring(6)} ${raceNo}R（race_id: $raceId）")
 
         // ---- 当日の結果（当日の傾向に使う。オッズをなるべく新しくするため、オッズより先に読む） ----
-        val dayResults = fetchDayResults(code, raceDate, raceNo, prevStarted)
+        val dayResults = fetchDayResults(code, raceDate, raceNo, lastStarted)
 
         // ---- 出馬表 ----
         step("shutuba", "run", "")
