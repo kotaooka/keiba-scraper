@@ -293,7 +293,9 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .venue .pat { font-size: 10.5px; font-weight: 700; margin-left: 6px; padding: 0 5px; border-radius: 6px; border: 1px solid var(--accent); color: var(--accent); }
 .venue[aria-selected="true"] .pat { border-color: var(--accent-ink); color: var(--accent-ink); }
 .pat-line { margin: -2px 2px 10px; font-size: 12.5px; color: var(--ink2); display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 6px; }
-.pat-line .open { margin-left: auto; color: var(--accent); font-weight: 700; white-space: nowrap; }
+.ext-links { margin: -4px 2px 10px; display: flex; justify-content: flex-end; gap: 4px 16px; flex-wrap: wrap; }
+.ext-links button { color: var(--accent); font-weight: 700; font-size: 12.5px; white-space: nowrap; padding: 4px 0; min-height: 32px; }
+.chip.link { border-color: var(--accent); color: var(--accent); font-weight: 700; }
 .send-bar.with-pat { grid-template-columns: 1fr 58px 58px 58px; }
 .pat-line b { color: var(--accent); }
 .pat-line.none { color: var(--muted); }
@@ -634,9 +636,19 @@ function patRace(info, no) {
   if (info.v.from == null) return null;
   return no >= info.v.from && no <= info.v.to;
 }
-// 即PAT・A-PAT で地方競馬を買う入口（地方競馬ネット投票）。レースを指定して開く方法は公開されていないので、入口を開くだけ
-const PAT_URL = "https://n.ipat.jra.go.jp/";
+// 即PAT・A-PAT で地方競馬を買う入口（地方競馬ネット投票）。レースを指定して開く方法は公開されていないので、入口を開くだけ。
+// 即PAT・A-PAT はスマホ版のログイン画面、レース映像は地方競馬ライブ（スマホ版）を開く
+const PAT_URL = "https://n.ipat.jra.go.jp/sp/index.cgi";
+const LIVE_URL = "https://keiba-lv-st.jp/sp/";
 function openPat() { Native.openUrl(PAT_URL); }
+function openLive() { Native.openUrl(LIVE_URL); }
+/** 「即PATを開く ›」「地方競馬ライブ ›」の行（発売の有無が分からなくても出す） */
+function extLinks() {
+  const p = el("p", "ext-links");
+  const a = el("button", null, "即PATを開く ›"); a.onclick = openPat; p.append(a);
+  const b = el("button", null, "地方競馬ライブ ›"); b.onclick = openLive; p.append(b);
+  return p;
+}
 const patRangeText = (v) => (v.all ? "全R" : v.from != null ? `${v.from}〜${v.to}R` : v.text);
 
 // ===== 開催一覧 =====
@@ -767,13 +779,14 @@ function renderRaces() {
   if (pi.status === "sold") {
     const pl = el("p", "pat-line");
     pl.append(el("b", null, `${PAT_KIND[pi.kind]}で発売`), el("span", null, `${patRangeText(pi.v)}${pi.time ? `・${pi.time}` : ""}`));
-    const op = el("button", "open", "即PATを開く ›"); op.onclick = openPat; pl.append(op);
     area.append(pl);
   } else if (pi.status === "none") {
     area.append(el("p", "pat-line none", `この日の${v.name}は、即PAT・A-PAT での発売はありません`));
   } else if (pi.status === "failed") {
     area.append(el("p", "pat-line none", "即PAT・A-PAT の発売カレンダーを読めませんでした（引っ張って読み直せます）"));
   }
+  // 発売カレンダーを読めていなくても、投票とレース映像の入口はいつも出す
+  area.append(extLinks());
 
   const list = el("div", "races");
   v.races.forEach((r, i) => {
@@ -927,6 +940,7 @@ function renderResult() {
   const pi = patInfo(state.date, venue), onPat = patRace(pi, +race.no);
   if (onPat === true) chips.append(el("span", "chip pat", `${PAT_KIND[pi.kind]}で発売`));
   else if (onPat === false) chips.append(el("span", "chip", "即PAT・A-PAT は発売なし"));
+  const live = el("button", "chip link", "地方競馬ライブ ›"); live.onclick = openLive; chips.append(live);
   body.append(chips);
 
   // 発走までの時間と、オッズを取ってからの時間
@@ -1088,8 +1102,8 @@ function renderResult() {
   const pick = el("button", "btn secondary sub"); pick.innerHTML = ICON_PICK; pick.append(document.createTextNode("送り先"));
   pick.onclick = () => Native.share(textFor(res), true);
   bar.append(send, copy, pick);
-  // そのレースを即PAT・A-PAT で売っているときだけ、投票の入口を開くボタンを出す
-  if (patRace(patInfo(state.date, venue), +race.no) === true) {
+  // 投票の入口はいつも出す（発売カレンダーが手元にない・競馬場名が合わないときに消えないように）
+  {
     const pat = el("button", "btn secondary sub");
     pat.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M8 12h8M13 9l3 3-3 3"/></svg>';
     pat.append(document.createTextNode("即PAT"));
