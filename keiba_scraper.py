@@ -250,6 +250,33 @@ def fetch_page(page, url, wait_selector=None, timeout=TIMEOUT_PAGE):
     return None
 
 
+_CHARSET_RE = re.compile(r"charset\s*=\s*[\"']?([A-Za-z0-9_\-]+)", re.I)
+
+
+def decode_html(body, content_type=""):
+    """HTML のバイト列を文字にする。文字コードは応答ヘッダ → ページの meta の順に探し、無ければ EUC-JP（netkeiba の地方版）"""
+    m = _CHARSET_RE.search(content_type or "") or _CHARSET_RE.search(body[:4096].decode("latin-1"))
+    try:
+        return body.decode(m.group(1) if m else "euc_jp", errors="replace")
+    except LookupError:
+        return body.decode("euc_jp", errors="replace")
+
+
+def fetch_html(page, url):
+    """ページを描画せずに HTML だけを取る（広告やスクリプトを読まないので速い）。
+    結果ページのように、HTML の時点で中身が入っているページだけに使う。アクセス間隔は fetch_page と同じく守る。失敗時は None"""
+    for attempt in range(1, RETRY + 1):
+        try:
+            wait_interval()
+            resp = page.request.get(url, timeout=TIMEOUT_PAGE)
+            if resp.ok:
+                return decode_html(resp.body(), resp.headers.get("content-type", ""))
+            print(f"  ページ取得失敗（{attempt}/{RETRY}回目）: HTTP {resp.status}")
+        except Exception as e:
+            print(f"  ページ取得失敗（{attempt}/{RETRY}回目）: {type(e).__name__}")
+    return None
+
+
 # ========== 開催一覧 ==========
 
 def fetch_race_list(page, race_date):
@@ -2031,14 +2058,18 @@ def parse_result(html):
 
 def scrape_result(page, race_id):
     url = f"{NETKEIBA}/race/result.html?race_id={race_id}"
-    html = fetch_page(page, url)
-    if not html:
-        return None
-    try:
-        page.wait_for_function(_RESULT_READY_JS, timeout=TIMEOUT_SELECTOR)
-        html = page.content()
-    except PlaywrightTimeout:
-        pass  # 未確定のときは表が出ない。取れた分で判定する
+    # 結果ページは HTML に表が入っているので、描画せずに HTML を取って解析する（未確定でも待たずに判定できる）
+    html = fetch_html(page, url)
+    if html is None:
+        # 取れないときだけ、これまでどおりブラウザで開いて表が出るのを待つ
+        html = fetch_page(page, url)
+        if not html:
+            return None
+        try:
+            page.wait_for_function(_RESULT_READY_JS, timeout=TIMEOUT_SELECTOR)
+            html = page.content()
+        except PlaywrightTimeout:
+            pass  # 未確定のときは表が出ない。取れた分で判定する
     res = parse_result(html)
     finished = any(v.isdigit() for v in res["着順"].values())
     if not finished or "単勝" not in res["払戻"]:

@@ -38,6 +38,7 @@ docs/                     説明書と画面例（記録の形式は record-form
 - 解析を直すときは、`keiba_scraper.py` と `scraper.js` の両方を同じように直す。予想の条件の既定値（`BUDGET`・`MAX_BETS`・`EV_MIN`・`BET_MODE`・`HIT_MIN`・`HIT_EV_MIN` ↔ `DEFAULT_SETTINGS`）・競馬場コード・アクセス間隔（`REQUEST_INTERVAL`）も両方にある
 - 予想の記録と答え合わせも両方にある（PC版の `parse_ai_block`・`parse_result`・`settle_bets`・`horse_rows`・`compute_summary` ↔ `scraper.js` の `parseAiBlock`・`parseResult`・`settleBets`・`horseRows`・`computeSummary`）。95%区間のブートストラップは、`scraper.js` に Python の `random.Random` と同じ乱数（MT19937）を移植しているので、同じ記録なら同じ値になる。記録の形式も同じなので、Android版の書き出しを PC版の `import` で取り込める
 - オッズの注記（`odds_notes` ↔ `oddsNotes`）も両方にある
+- 結果ページは HTML の時点で着順と払戻の表が入っているので、描画せずに HTML だけを取って解析する（PC版 `fetch_html`・`decode_html` ↔ `Scraper.kt` の `fetchHtml`・`decodeHtml`。取れないときだけブラウザで開く）。出馬表・オッズのページはスクリプトで表を描くので、これまでどおりブラウザで開く。どちらもアクセス間隔（`REQUEST_INTERVAL`）は守る
 - 小数の結果を両方で同じにするための約束
   - 足し算は先頭から順に足す（PC版は `_sum`。Python 3.12 以降の `sum` は誤差を補正するので使わない）。馬は馬番の順に並べてから足す
   - 小数の表示は Python の `f"{x:.1f}"` と同じ丸め（ちょうど半分は偶数へ）。`scraper.js` では `toFixed` ではなく `pyFixed` を使う

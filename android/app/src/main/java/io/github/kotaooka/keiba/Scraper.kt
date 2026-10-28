@@ -8,12 +8,17 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.net.HttpURLConnection
+import java.net.URL
+import java.nio.charset.Charset
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -51,6 +56,17 @@ class Scraper(
             "園田" to "50", "姫路" to "51", "高知" to "54", "佐賀" to "55",
             "帯広(ば)" to "65",
         )
+
+        private val CHARSET_RE = Regex("""charset\s*=\s*["']?([A-Za-z0-9_\-]+)""", RegexOption.IGNORE_CASE)
+
+        /** HTML のバイト列を文字にする。文字コードは応答ヘッダ → ページの meta の順に探し、無ければ EUC-JP（netkeiba の地方版） */
+        fun decodeHtml(bytes: ByteArray, contentType: String?): String {
+            val name = contentType?.let { CHARSET_RE.find(it)?.groupValues?.get(1) }
+                ?: CHARSET_RE.find(String(bytes, 0, minOf(bytes.size, 4096), Charsets.ISO_8859_1))?.groupValues?.get(1)
+                ?: "EUC-JP"
+            val cs = runCatching { Charset.forName(name) }.getOrElse { Charset.forName("EUC-JP") }
+            return String(bytes, cs)
+        }
     }
 
     // 読み込み完了の通知。成功は空文字、失敗はエラー内容
@@ -121,6 +137,44 @@ class Scraper(
         return false
     }
 
+    /**
+     * ページを描画せずに HTML だけを取る（広告やスクリプトを読まないので速い）。
+     * 結果ページのように、HTML の時点で中身が入っているページだけに使う。アクセス間隔は load と同じく守る。失敗したら null
+     */
+    private suspend fun fetchHtml(url: String): String? {
+        for (attempt in 1..RETRY) {
+            waitInterval()
+            val html = withContext(Dispatchers.IO) {
+                runCatching {
+                    val con = (URL(url).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = TIMEOUT_PAGE.toInt()
+                        readTimeout = TIMEOUT_PAGE.toInt()
+                        setRequestProperty("User-Agent", UA)
+                        setRequestProperty("Accept-Language", "ja")
+                    }
+                    try {
+                        if (con.responseCode != 200) error("HTTP ${con.responseCode}")
+                        decodeHtml(con.inputStream.use { it.readBytes() }, con.contentType)
+                    } finally {
+                        con.disconnect()
+                    }
+                }
+            }
+            html.onSuccess { return it }
+            log("  ページ取得失敗（$attempt/${RETRY}回目）: ${html.exceptionOrNull()?.message}")
+        }
+        return null
+    }
+
+    /** まだ何も開いていなければ空のページを開く（JavaScript を動かす場所を作る。通信はしない） */
+    private suspend fun ensurePage() {
+        if (web.url != null) return
+        val done = CompletableDeferred<String>()
+        pageLoaded = done
+        web.loadUrl("about:blank")
+        try { withTimeoutOrNull(5_000) { done.await() } } finally { pageLoaded = null }
+    }
+
     /** JavaScript を実行し、結果を JSON 文字列のまま返す（evaluateJavascript の仕様） */
     private suspend fun evalRaw(script: String): String = suspendCancellableCoroutine { cont ->
         web.evaluateJavascript(script) { cont.resume(it ?: "null") }
@@ -181,14 +235,36 @@ class Scraper(
 
     // ========== レース結果（答え合わせ用） ==========
 
-    /** 結果ページの着順・払戻を JSON の文字列で返す。開けなければ null（未確定でも読めた分を返す） */
+    /**
+     * 結果ページの着順・払戻を JSON の文字列で返す。開けなければ null（未確定でも読めた分を返す）。
+     * 結果ページは HTML に表が入っているので、描画せずに HTML を取って解析する。取れないときだけ WebView で開く。
+     * 確定した結果は当日の傾向用に端末に置く（自動の答え合わせや記録の画面で取った結果も、次の収集で使い回せるように）
+     */
     suspend fun fetchResult(raceId: String): String? {
-        if (!load("$NETKEIBA/race/result.html?race_id=$raceId")) return null
-        // 着順表と払戻表が描画されるまで待つ（未確定のときは出ないので、待ちきれずに読めた分で判定する）
-        waitFor("KS.resultReady(document)")
-        val raw = call("KS.parseResult(document)")
-        return if (raw.startsWith("{") && !raw.contains("\"__error\"")) raw else null
+        val url = "$NETKEIBA/race/result.html?race_id=$raceId"
+        var raw: String? = null
+        val html = fetchHtml(url)
+        if (html != null) {
+            ensurePage()
+            val r = call("KS.parseResult(new DOMParser().parseFromString(${q(html)}, 'text/html'))")
+            if (r.startsWith("{") && !r.contains("\"__error\"")) raw = r
+            else log("  結果ページを解析できず、画面で開き直します: ${r.take(120)}")
+        }
+        if (raw == null) {
+            if (!load(url)) return null
+            // 着順表と払戻表が描画されるまで待つ（未確定のときは出ないので、待ちきれずに読めた分で判定する）
+            waitFor("KS.resultReady(document)")
+            val r = call("KS.parseResult(document)")
+            if (!r.startsWith("{") || r.contains("\"__error\"")) return null
+            raw = r
+        }
+        val out: String = raw ?: return null
+        if (call("KS.resultFinished($out)").trim() == "true") runCatching { java.io.File(dayResultsDir(), "$raceId.json").writeText(out) }
+        return out
     }
+
+    /** 確定した結果を置く場所（3日より古いものは fetchDayResults で消す） */
+    private fun dayResultsDir() = java.io.File(web.context.filesDir, "day_results").apply { mkdirs() }
 
     // ========== 当日の結果 ==========
 
@@ -199,7 +275,8 @@ class Scraper(
      */
     private suspend fun fetchDayResults(code: String, raceDate: String, raceNo: Int, prevStarted: Int): String {
         step("today", "run", "")
-        val dir = java.io.File(web.context.filesDir, "day_results").apply { mkdirs() }
+        val t0 = SystemClock.elapsedRealtime()
+        val dir = dayResultsDir()
         // 古い結果を消す
         val old = System.currentTimeMillis() - 3L * 24 * 3600 * 1000
         dir.listFiles()?.forEach { if (it.lastModified() < old) it.delete() }
@@ -217,18 +294,15 @@ class Scraper(
             var res: JSONObject? = if (f.exists()) runCatching { JSONObject(f.readText()) }.getOrNull() else null
             if (res == null) {
                 step("today", "run", "${n}R")
-                val raw = fetchResult(rid)
-                if (raw != null && call("KS.resultFinished($raw)").trim() == "true") {
-                    res = runCatching { JSONObject(raw) }.getOrNull()
-                    if (res != null) runCatching { f.writeText(raw) }
-                }
+                // 確定していれば fetchResult が f に書く
+                if (fetchResult(rid) != null && f.exists()) res = runCatching { JSONObject(f.readText()) }.getOrNull()
             }
             if (res != null) {
                 out.put(JSONObject().put("レース番号", n).put("結果", res))
                 misses = 0
             } else if (++misses >= 2) break
         }
-        log("  当日の結果: 確定済み ${out.length()}レース")
+        log("  当日の結果: 確定済み ${out.length()}レース（${(SystemClock.elapsedRealtime() - t0) / 1000}秒）")
         step("today", if (out.length() > 0) "ok" else "skip", if (out.length() > 0) "${out.length()}レース" else "なし")
         return out.toString()
     }
