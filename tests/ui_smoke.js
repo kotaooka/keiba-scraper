@@ -87,6 +87,19 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
         nav: [...document.querySelectorAll(".sec-nav button")].map((b) => b.textContent),
         kpi: document.querySelectorAll("#sec-ai .bet-kpi").length,
         cond: !!document.querySelector(".cond-line"),
+        mkt: (() => {
+          const info = state.result.res.info, mp = KS.marketPicks(info, betSettings());
+          const probs = {}; info.horses.filter((h) => !h.cancel).forEach((h) => { probs[String(+h.no)] = h.prob / 100; });
+          const a1 = KS.harville(probs), b1 = KS.harvilleDiscounted(probs, 1, 1), b2 = KS.harvilleDiscounted(probs, 0.81, 0.65);
+          const same = Object.keys(a1.trio).every((k) => Math.abs(a1.trio[k] - b1.trio[k]) < 1e-12);
+          const sum3 = Object.values(b2.top3).reduce((t, x) => t + x, 0);
+          // 発走前の収集なら残す（テストのレースは過去の日付なので、翌年の同じレースとして記録してみる）
+          ensureDataRecord("20271025", "盛岡", 7, Object.assign({}, state.result.res), "");
+          const dr = readRecords()["20271025|盛岡|7"];
+          const past = readRecords()["20261025|盛岡|7"];
+          return { card: !!document.querySelector(".market-card"), computed: mp.computed, cands: mp.cands.length, same, sum3, stored: !!dr && Array.isArray(dr["市場買い目"]) && !!dr["市場記録時刻"] && !("市場買い目" in past),
+            picksOk: mp.bets.every((b) => b["金額"] >= 100 && b["金額"] % 100 === 0) && mp.bets.reduce((t, b) => t + b["金額"], 0) <= betSettings().budget };
+        })(),
         text: document.querySelector("#sec-text summary") ? document.querySelector("#sec-text summary").textContent : "" };
     }, { r1: buildRace("2026-10-25 13:28"), ai });
     check(scheme, "結果画面の下のボタン3つ（送る・コピー・即PAT）", res.before.bar === 3, JSON.stringify(res.before));
@@ -99,6 +112,9 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     check(scheme, "買い目が3列で出る", res.kpi > 0);
     check(scheme, "記録後は「AI への条件」の行を出さない", !res.cond);
     check(scheme, "送るテキスト", /送るテキストを見る/.test(res.text));
+    check(scheme, "AI なしの目安のカード", res.mkt.card && res.mkt.computed && res.mkt.cands > 0, JSON.stringify(res.mkt));
+    check(scheme, "補正なし（λ=1）は Harville 法と同じ・補正しても3着内の確率の合計は3", res.mkt.same && Math.abs(res.mkt.sum3 - 3) < 1e-9, JSON.stringify(res.mkt));
+    check(scheme, "AI なしの目安を記録に残す・金額は100円単位で予算以内", res.mkt.stored && res.mkt.picksOk, JSON.stringify(res.mkt));
     check(scheme, "結果画面が横にはみ出さない", (await overflow()) <= 0);
 
     // 説明の「?」・買った馬券・即PAT 入力用の一覧
@@ -145,6 +161,7 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     }, records);
     check(scheme, "収支の推移", rec.h.some((t) => t.startsWith("収支の推移")), rec.h.join(","));
     check(scheme, "CLV", rec.h.some((t) => t.startsWith("締切オッズとの比較")));
+    check(scheme, "回収率：AI なしの目安", rec.h.some((t) => t === "回収率：AI なしの目安"), rec.h.join(","));
     check(scheme, "記録の一覧が並ぶ", rec.items > 0, String(rec.items));
     check(scheme, "精度のカードと書き出しのボタン", rec.brier && rec.ex === 3, String(rec.ex));
     check(scheme, "記録の画面が横にはみ出さない", (await overflow()) <= 0);

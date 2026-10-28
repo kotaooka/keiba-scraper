@@ -2091,7 +2091,8 @@ def settle_bets(record, key="買い目"):
     scratched = {no for no, rank in res["着順"].items() if rank in ("取消", "除外")}
     rows = []
     # key="購入" は自分で実際に買った馬券（AI の回答とは別に記録する）
-    for b in (record.get("購入") if key == "購入" else ai.get(key)) or []:
+    # key="市場買い目" は Android版が収集したときに市場の歪みから出した「AI なしの目安」
+    for b in (record.get(key) if key in ("購入", "市場買い目") else ai.get(key)) or []:
         # 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
         if not b["券種"].startswith("枠") and set(b["組み合わせ"].split("-")) & scratched:
             ret, status = b["金額"], "返還"
@@ -2172,13 +2173,17 @@ def compute_summary(records):
         "n_no_ai": sum(1 for r in records if not r.get("AI")),
         "n_no_result": sum(1 for r in records if r.get("AI") and not r.get("結果")),
         "bets": None, "bet_rows": [], "hit_bets": None, "hit_bet_rows": [],
-        "own_bets": None, "own_bet_rows": [],
+        "own_bets": None, "own_bet_rows": [], "market_bets": None, "market_bet_rows": [],
         "brier": None, "calib_win": None, "calib_place": None, "clv": None,
     }
     # 自分で買った馬券（AI の回答が無いレースも含む）
     own_races = sorted((r for r in records if r.get("結果") and isinstance(r.get("購入"), list) and r["購入"]), key=_race_order)
     if own_races:
         out["own_bets"], out["own_bet_rows"] = _bet_summary(own_races, "購入")
+    # AI なしの目安（Android版が収集したときに市場の歪みから出した買い目。見送りのレースも数える）
+    market_races = sorted((r for r in records if r.get("結果") and isinstance(r.get("市場買い目"), list)), key=_race_order)
+    if market_races:
+        out["market_bets"], out["market_bet_rows"] = _bet_summary(market_races, "市場買い目")
     if not races:
         return out
 
@@ -2373,10 +2378,11 @@ def format_summary(sm):
     lines.append(f"対象: 結果まで記録済みのレース {sm['n_races']}件"
                  f"（AI 回答なし {sm['n_no_ai']}件・結果未取得 {sm['n_no_result']}件は除外）")
     own = sm.get("own_bets")
-    if not sm["n_races"] and not own:
+    if not sm["n_races"] and not own and not sm.get("market_bets"):
         return "\n".join(lines)
 
-    for title, b in (("【回収率：自分で買った馬券】", own), ("【回収率：AI の買い目（期待値重視）】", sm["bets"]), ("【回収率：AI の買い目（的中重視）】", sm.get("hit_bets"))):
+    for title, b in (("【回収率：自分で買った馬券】", own), ("【回収率：AI の買い目（期待値重視）】", sm["bets"]), ("【回収率：AI の買い目（的中重視）】", sm.get("hit_bets")),
+                     ("【回収率：AI なしの目安（Android版が市場の歪みから出した買い目）】", sm.get("market_bets"))):
         if not b:
             continue
         lines += ["", title,
@@ -2498,6 +2504,12 @@ def run_import(path):
                     for f in extra:
                         if r.get(f) is not None:
                             cur[f] = r[f]
+            # AI なしの目安は、見送り（空の配列）も記録なので、手元に無ければ足す
+            if "市場買い目" not in cur and isinstance(r.get("市場買い目"), list):
+                cur["市場買い目"] = r["市場買い目"]
+                if r.get("市場記録時刻"):
+                    cur["市場記録時刻"] = r["市場記録時刻"]
+                changed = True
             if changed:
                 save_record(cur)
                 merged += 1

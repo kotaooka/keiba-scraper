@@ -47,6 +47,10 @@
     TEXT_ZOOM_MIN: 85,         // 文字の大きさ（端末の設定に合わせる範囲、%）
     TEXT_ZOOM_MAX: 115,
     SENT_HOURS: 3,             // AI へ送ってから、クリップボードの回答を探す時間
+    MARKET_EV_MIN: 1.05,       // AI なしの目安：選ぶ期待値（市場計算の的中率 × オッズの下限）の下限
+    MARKET_PROB_MIN: 0.05,     // AI なしの目安：選ぶ的中率の下限（低い確率ほど計算が当てにならないため）
+    HARVILLE_L2: 0.81,         // AI なしの目安：2着・3着の確率の補正（Benter 1994 の値。1 なら補正なし）
+    HARVILLE_L3: 0.65,
   };
 
   // 買い目の条件の既定値（PC版の BUDGET・MAX_BETS・EV_MIN と同じ）。アプリでは設定画面で変えられる
@@ -1144,7 +1148,7 @@
     const scratched = new Set(Object.entries(res["着順"]).filter(([, r]) => r === "取消" || r === "除外").map(([n]) => n));
     const rows = [];
     // key="購入" は自分で実際に買った馬券（AI の回答とは別に記録する。PC版と同じ）
-    for (const b of (key === "購入" ? record["購入"] : ai[key || "買い目"]) || []) {
+    for (const b of (key === "購入" || key === "市場買い目" ? record[key] : ai[key || "買い目"]) || []) {
       let ret, status;
       // 枠連・枠単の組み合わせは枠番なので、取消の馬番とは照らさない
       if (!b["券種"].startsWith("枠") && b["組み合わせ"].split("-").some((n) => scratched.has(n))) { ret = b["金額"]; status = "返還"; }
@@ -1292,12 +1296,15 @@
       n_no_ai: records.filter((r) => !r["AI"]).length,
       n_no_result: records.filter((r) => r["AI"] && !r["結果"]).length,
       bets: null, bet_rows: [], hit_bets: null, hit_bet_rows: [],
-      own_bets: null, own_bet_rows: [],
+      own_bets: null, own_bet_rows: [], market_bets: null, market_bet_rows: [],
       brier: null, calib_win: null, calib_place: null, clv: null,
     };
     // 自分で買った馬券（AI の回答が無いレースも含む）
     const ownRaces = sortRaces(records.filter((r) => r["結果"] && Array.isArray(r["購入"]) && r["購入"].length));
     if (ownRaces.length) [out.own_bets, out.own_bet_rows] = betSummary(ownRaces, "購入");
+    // AI なしの目安（収集したときに市場の歪みから出した買い目。見送りのレースも数える）
+    const mktRaces = sortRaces(records.filter((r) => r["結果"] && Array.isArray(r["市場買い目"])));
+    if (mktRaces.length) [out.market_bets, out.market_bet_rows] = betSummary(mktRaces, "市場買い目");
     if (!races.length) return out;
 
     // 回収率（期待値重視の買い目。的中重視の買い目は、それを記録したレースだけで別に。PC版の _bet_summary）
@@ -1586,6 +1593,79 @@
     for (const h of running) probs[String(parseInt(h["馬番"], 10))] = h["市場勝率"] / 100;
     return harville(probs);
   }
+  // Harville 法は人気馬の2・3着を多めに見積もるので、2着は勝率^λ2、3着は勝率^λ3 に比例するとして補正したもの
+  // （Benter 1994。λ2 = λ3 = 1 なら harville と同じ）。返り値の形は harville と同じ
+  function harvilleDiscounted(probs, l2, l3) {
+    const keys = Object.keys(probs).filter((k) => probs[k] != null && probs[k] > 0);
+    const tot = sumOf(keys.map((k) => probs[k]));
+    if (keys.length < 3 || tot <= 0) return null;
+    const p = {};
+    for (const k of keys) p[k] = probs[k] / tot;
+    const powNorm = (lam) => { const s = sumOf(keys.map((k) => Math.pow(p[k], lam))); const o = {}; for (const k of keys) o[k] = Math.pow(p[k], lam) / s; return o; };
+    const q = powNorm(l2), r = powNorm(l3);
+    const top2 = {}, top3 = {}, pair = {}, trio = {};
+    for (const k of keys) { top2[k] = 0; top3[k] = 0; }
+    const ck = (...ns) => ns.slice().sort((a, b) => +a - +b).join("-");
+    for (const i of keys) {
+      if (1 - q[i] <= 0) continue;
+      for (const j of keys) {
+        if (j === i) continue;
+        const pij = p[i] * q[j] / (1 - q[i]);
+        top2[i] += pij; top2[j] += pij;
+        const rest = 1 - r[i] - r[j];
+        if (rest <= 0) continue;
+        for (const k of keys) {
+          if (k === i || k === j) continue;
+          const x = pij * r[k] / rest;
+          top3[i] += x; top3[j] += x; top3[k] += x;
+          for (const [a, b] of [[i, j], [i, k], [j, k]]) { const key = ck(a, b); pair[key] = (pair[key] || 0) + x; }
+          const key3 = ck(i, j, k); trio[key3] = (trio[key3] || 0) + x;
+        }
+      }
+    }
+    return { top2, top3, pair, trio };
+  }
+
+  // AI なしの目安：単勝オッズの市場勝率から（補正した Harville 法で）複勝・ワイド・3連複の的中率を出し、
+  // 的中率 × オッズの下限（期待値）が MARKET_EV_MIN 以上・的中率が MARKET_PROB_MIN 以上の組を、期待値の高い順に最大 max_bets 点選ぶ。
+  // 単勝と複勝などは別々に売られるので、オッズが計算より高い（売れ残った）組があれば拾う。予想ではない。
+  // info は buildWithInfo の info、s は予想の条件（budget・max_bets）。
+  // 返り値: {cands: [{券種, 組み合わせ, p, odds, low, ev, pick}]（期待値の高い順）, bets: [{券種, 組み合わせ, 金額, 的中率}], reason, computed（計算できたか）}
+  function marketPicks(info, s) {
+    const out = { cands: [], bets: [], reason: "", computed: false };
+    if (!info) { out.reason = "データがありません"; return out; }
+    if (info.predicted) { out.reason = "単勝が発売前の予想オッズなので出しません"; return out; }
+    const running = (info.horses || []).filter((h) => !h.cancel);
+    if (running.length < 3 || running.some((h) => h.prob == null)) { out.reason = "単勝オッズが欠けている馬がいるので出しません"; return out; }
+    const probs = {};
+    for (const h of running) probs[String(parseInt(h.no, 10))] = h.prob / 100;
+    const hv = harvilleDiscounted(probs, CONFIG.HARVILLE_L2, CONFIG.HARVILLE_L3);
+    if (!hv) { out.reason = "計算できませんでした"; return out; }
+    const placeKey = running.length >= 8 ? "top3" : "top2";
+    const all = [];
+    const add = (type, key, p, oddsText) => {
+      const low = oddsLow(oddsText);
+      if (p == null || !low) return;
+      all.push({ "券種": type, "組み合わせ": key, p, odds: String(oddsText), low, ev: p * low, pick: false });
+    };
+    for (const h of running) { const no = String(parseInt(h.no, 10)); add("複勝", no, hv[placeKey][no], h.fuku); }
+    for (const c of (info.combos || {})["ワイド"] || []) add("ワイド", c.key, hv.pair[c.key], c.odds);
+    for (const c of (info.combos || {})["3連複"] || []) add("3連複", c.key, hv.trio[c.key], c.odds);
+    all.sort((a, b) => b.ev - a.ev || b.p - a.p);
+    const ok = (c) => Math.round(c.ev * 100) / 100 >= CONFIG.MARKET_EV_MIN - 1e-9 && c.p >= CONFIG.MARKET_PROB_MIN &&
+      !((c["券種"] === "複勝" || c["券種"] === "ワイド") && c.low <= CONFIG.PAYBACK_MAX_ODDS);
+    const budget = (s && s.budget) || DEFAULT_SETTINGS.budget;
+    const picks = all.filter(ok).slice(0, Math.max(1, Math.min((s && s.max_bets) || DEFAULT_SETTINGS.max_bets, Math.floor(budget / 100))));
+    const each = Math.max(100, Math.floor(budget / Math.max(1, picks.length) / 100) * 100);
+    for (const c of picks) c.pick = true;
+    out.bets = picks.map((c) => ({ "券種": c["券種"], "組み合わせ": c["組み合わせ"], "金額": each, "的中率": Math.round(c.p * 1000) / 10 }));
+    out.cands = all.filter((c, i) => i < 6 || c.pick);
+    out.computed = all.length > 0;
+    if (!all.length) out.reason = "複勝・ワイド・3連複のオッズがありません";
+    else if (!picks.length) out.reason = `期待値 ${fmtEv(CONFIG.MARKET_EV_MIN)} 以上・的中率 ${CONFIG.MARKET_PROB_MIN * 100}%以上の組はありません（見送り）`;
+    return out;
+  }
+
   function oddsLow(text) {
     const m = String(text == null ? "" : text).replace(/,/g, "").match(/\d+(?:\.\d+)?/);
     return m ? parseFloat(m[0]) : null;
@@ -1892,7 +1972,7 @@
     KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
     parsePatCalendar, parsePatRange,
     oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
-    CONFIG, RECORD_SCHEMA, migrateRecord, parseAiBlock, raceIdOf, newRecord, betOddsFromInfo, betProbOf, recheckBets, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
+    CONFIG, RECORD_SCHEMA, migrateRecord, parseAiBlock, raceIdOf, newRecord, betOddsFromInfo, betProbOf, recheckBets, harvilleDiscounted, marketPicks, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList,
     parseShutuba, parseRaceInfo, parseKyakuType,

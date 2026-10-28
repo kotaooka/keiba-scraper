@@ -131,14 +131,23 @@ function pasteAiAnswer(given) {
 function ensureDataRecord(date, venue, no, res, title) {
   const key = cacheKey(date, venue, no);
   const recs = readRecords();
-  const cur = recs[key];
-  if (cur && (cur["AI"] || ownBetsOf(cur).length || cur["結果"])) return;
-  let rec;
-  try { rec = Object.assign(KS.newRecord(date, venue, no, res), { "発走": (res.info && res.info.start) || "" }); } catch (e) { return; }
-  if (!rec.race_id) return;
-  if (res.info && res.info.predicted) rec["予想オッズ"] = true;
+  let rec = recs[key];
+  const isNew = !(rec && (rec["AI"] || ownBetsOf(rec).length || rec["結果"]));
+  if (isNew) {
+    try { rec = Object.assign(KS.newRecord(date, venue, no, res), { "発走": (res.info && res.info.start) || "" }); } catch (e) { logError("データの記録", e); return; }
+    if (!rec.race_id) return;
+    if (res.info && res.info.predicted) rec["予想オッズ"] = true;
+  }
+  // AI なしの目安：発走前の収集なら、そのときのオッズで出し直して残す（結果が出たあとは変えない）
+  const um = untilMin(date, rec["発走"]);
+  if (!rec["結果"] && (um == null || um > 0)) {
+    try {
+      const mp = KS.marketPicks(res.info, betSettings());
+      if (mp.computed) { rec["市場買い目"] = mp.bets; rec["市場記録時刻"] = res.at || ""; }
+    } catch (e) { logError("AI なしの目安", e); }
+  }
   recs[key] = rec; writeRecords(recs);
-  scheduleResultCheck(key, rec, { title: title || "" });
+  if (isNew) scheduleResultCheck(key, rec, { title: title || "" });
 }
 const isDataOnly = (r) => !!r && !r["AI"] && !ownBetsOf(r).length;
 
@@ -565,6 +574,46 @@ function aiRecordButtons(key, race) {
   return row;
 }
 
+// ===== AI なしの目安（市場の歪み） =====
+// 単勝オッズの市場勝率から計算した的中率と、複勝・ワイド・3連複のオッズのずれから出す買い目。予想ではない
+function marketCard(venue, race, info) {
+  const c = el("div", "card market-card");
+  c.append(el("h3", null, "AI なしの目安"));
+  const rec = readRecords()[cacheKey(state.date, venue, race.no)];
+  const mp = KS.marketPicks(info, betSettings());
+  c.append(el("p", "ai-cond", `市場計算の的中率 ${KS.CONFIG.MARKET_PROB_MIN * 100}%以上・期待値 ${KS.fmtEv(KS.CONFIG.MARKET_EV_MIN)} 以上`));
+  if (mp.cands.length) {
+    const tb = el("table", "rec-table"); tb.style.marginTop = "6px";
+    const hr = el("tr"); for (const [t, cls] of [["買い目"], ["的中率", "r"], ["オッズ", "r"], ["期待値", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+    for (const x of mp.cands) {
+      const tr = el("tr");
+      const name = el("td");
+      if (x.pick) name.append(el("span", "buy-mark", "選"));
+      name.append(document.createTextNode(`${x["券種"]} ${x["組み合わせ"]}`));
+      tr.append(name, el("td", "r", `${(x.p * 100).toFixed(1)}%`), el("td", "r", x.odds), el("td", "r " + (x.pick ? "up" : ""), KS.fmtEv(x.ev)));
+      tb.append(tr);
+    }
+    c.append(tb);
+  }
+  if (mp.bets.length) c.append(el("p", "bet-total", `選んだ組：${mp.bets.map((b) => `${b["券種"]} ${b["組み合わせ"]} ${yen(b["金額"])}`).join("・")}`));
+  if (mp.reason) c.append(el("p", "ai-skip", mp.reason));
+  // 結果が出たら、収集したときに残した買い目で答え合わせ
+  if (rec && rec["結果"] && Array.isArray(rec["市場買い目"])) {
+    let rows = null;
+    try { rows = KS.settleBets(rec, "市場買い目"); } catch (e) { logError("AI なしの目安の答え合わせ", e); }
+    if (rows && rows.length) {
+      const spent = rows.reduce((t, x) => t + x["金額"], 0), ret = rows.reduce((t, x) => t + x["払戻"], 0);
+      const v = el("p", "verdict"); v.append(document.createTextNode(`記録した目安（${String(rec["市場記録時刻"] || "").slice(11, 16)} のオッズ）の収支 `), el("b", ret - spent >= 0 ? "up" : "down", `${ret - spent >= 0 ? "+" : ""}${yen(ret - spent)}`));
+      c.append(v);
+    } else if (rows) c.append(el("p", "note", "記録した目安は見送りでした"));
+  }
+  return addHelp(c, "market", [
+    "AI を使わずに、オッズだけから出す目安です。単勝オッズから出した各馬の勝率（市場勝率）をもとに、複勝・ワイド・3連複が当たる確率を計算し、その券種の実際のオッズ（複勝・ワイドは幅の下限）を掛けて期待値を出します。単勝と複勝などは別々に売られているので、計算より高いオッズのまま残っている組があれば、ここに出ます",
+    "予想ではありません。単勝の市場の見立てをそのまま使うので、単勝は選びません。計算には、勝率から2・3着の確率を出す Harville 法を、人気馬の2・3着を多めに見積もるくせを抑えるよう補正して使っています",
+    "発走前に収集するたびに、そのときのオッズで出し直して記録に残し、結果が出たら自動で答え合わせします。効くかどうかは、記録の画面の「回収率：AI なしの目安」で、レースがたまってから判断してください（締切までにオッズは動きます）",
+  ]);
+}
+
 // ===== 買った馬券（自分で実際に買ったもの。AI の買い目とは別に記録して答え合わせする） =====
 function ownBetsOf(r) { return r && Array.isArray(r["購入"]) ? r["購入"] : []; }
 // 買った馬券を保存する（記録が無ければ、収集したデータから記録を作る）
@@ -927,12 +976,12 @@ function renderRecords() {
   if (bar) body.append(...bar);
   const sm = safeSummary(all);
   // 回収率（自分の馬券・AI の期待値重視・AI の的中重視は別々に）
-  if (!sm.own_bets && !sm.bets && !sm.hit_bets) {
+  if (!sm.own_bets && !sm.bets && !sm.hit_bets && !sm.market_bets) {
     const c0 = el("div", "card"); c0.append(el("h3", null, "回収率"), el("p", "note", "結果まで記録したレースがまだありません")); body.append(c0);
   }
   // 収支の推移（発走の順に足し上げる）
   { const tc = trendCard(all); if (tc) body.append(tc); }
-  for (const [bb, title, rowsAll] of [[sm.own_bets, "回収率：自分で買った馬券", sm.own_bet_rows], [sm.bets, sm.hit_bets ? "回収率：AI 期待値重視" : sm.own_bets ? "回収率：AI の買い目" : "回収率", sm.bet_rows], [sm.hit_bets, "回収率：AI 的中重視", sm.hit_bet_rows]]) {
+  for (const [bb, title, rowsAll] of [[sm.own_bets, "回収率：自分で買った馬券", sm.own_bet_rows], [sm.bets, sm.hit_bets ? "回収率：AI 期待値重視" : sm.own_bets ? "回収率：AI の買い目" : "回収率", sm.bet_rows], [sm.hit_bets, "回収率：AI 的中重視", sm.hit_bet_rows], [sm.market_bets, "回収率：AI なしの目安", sm.market_bet_rows]]) {
     if (bb) body.append(roiCard(bb, title, rowsAll, sm));
   }
   // 締切オッズとの比較（CLV）

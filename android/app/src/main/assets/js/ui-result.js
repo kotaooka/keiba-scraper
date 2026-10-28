@@ -30,13 +30,14 @@ function renderResult() {
   const hasAi = !!(recNow0 && recNow0["AI"]);
   const ai = aiCard(venue, race); ai.id = "sec-ai";
   const own = ownCard(venue, race); own.id = "sec-own";
+  const mkt = marketCard(venue, race, info);
   const pc = el("details", "card preview"); pc.id = "sec-text";
   keepOpen(pc, "text");
   const sendText = textFor(res);
   pc.append(el("summary", null, `送るテキストを見る（${sendText.split("\n").length}行）`));
   pc.append(el("pre", null, sendText));
   const textNote = el("p", "note", `ワイド上位 ${info.wide}組・三連複上位 ${info.sanren}組も送ります。収集 ${res.at}` + (fresh ? "（テキストはコピー済み）" : ""));
-  const order = hasAi ? [resBox, ai, own, infoBox, hc, speedCard, pc, textNote] : [resBox, infoBox, hc, speedCard, ai, own, pc, textNote];
+  const order = hasAi ? [resBox, ai, own, mkt, infoBox, hc, speedCard, pc, textNote] : [resBox, infoBox, mkt, hc, speedCard, ai, own, pc, textNote];
   // 見出しのナビ（押すとその場所へ。画面の上に固定）
   const navItems = [["sec-res", "結果", resBox.childElementCount > 0], ["sec-ai", "AI予想", true], ["sec-own", "馬券", true], ["sec-horses", "出走馬", true], ["sec-time", "タイム", !!speedCard], ["sec-text", "テキスト", true]]
     .filter((x) => x[2]).sort((a, b) => order.findIndex((n) => n && n.id === a[0]) - order.findIndex((n) => n && n.id === b[0]));
