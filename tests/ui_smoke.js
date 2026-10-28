@@ -68,16 +68,22 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
       let clip = "", stamp = 1;
       Native.readClipboard = () => clip; Native.clipStamp = () => stamp;
       Native.copy = (t) => { clip = t; stamp++; }; Native.share = () => {};
+      window.__pre = []; Native.schedulePreCheck = (j) => { window.__pre.push(JSON.parse(j)); return true; };
       startCollect("盛岡", state.venues[0].races[6]);
       const steps = document.querySelectorAll(".steps li, .step-row, [data-step]").length;
       App.onResult(r1);
+      const dataRec = readRecords()["20261025|盛岡|7"];
+      const dataOnly = !!dataRec && !dataRec["AI"] && isDataOnly(dataRec);
       const before = { nav: [...document.querySelectorAll(".sec-nav button")].map((b) => b.textContent), bar: document.querySelectorAll(".send-bar button").length };
       document.querySelectorAll(".send-bar button")[1].click();  // コピー
       clip = ai; stamp = 50; App.onFocus();
       const offer = !!document.getElementById("clipOffer");
       if (offer) document.querySelector("#clipOffer .btn.primary").click();
       const rec = readRecords()["20261025|盛岡|7"];
-      return { steps, before, offer, recorded: !!(rec && rec["AI"]),
+      const pre = window.__pre.slice(-1)[0] || null;
+      const recheck = KS.recheckBets(state.result.res.info, rec["AI"]["買い目"], rec["AI"]["的中買い目"], rec["AI"]["予想"], 1.2, 0.9);
+      return { steps, before, offer, dataOnly, pre: pre && { bets: pre.bets.length, hit: pre.hit_bets.length, start: pre.start > Date.now() },
+        recheck: recheck.map((x) => [x.group, x["券種"], x.ev != null, x.ok]), recorded: !!(rec && rec["AI"]),
         nav: [...document.querySelectorAll(".sec-nav button")].map((b) => b.textContent),
         kpi: document.querySelectorAll("#sec-ai .bet-kpi").length,
         cond: !!document.querySelector(".cond-line"),
@@ -86,6 +92,9 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     check(scheme, "結果画面の下のボタン3つ（送る・コピー・即PAT）", res.before.bar === 3, JSON.stringify(res.before));
     check(scheme, "AI の回答のコピーに気づいて記録を勧める", res.offer);
     check(scheme, "勧めから記録できる", res.recorded);
+    check(scheme, "収集しただけのレースもデータとして記録する", res.dataOnly);
+    check(scheme, "AI の回答を記録したら締切5分前の取り直しを予約する", !!res.pre && res.pre.bets > 0 && res.pre.start, JSON.stringify(res.pre));
+    check(scheme, "締切前の点検で買い目ごとに期待値を出す", res.recheck.length > 0 && res.recheck.some((x) => x[2]), JSON.stringify(res.recheck));
     check(scheme, "記録後は AI の予想が見出しの先頭（結果の次）", res.nav[0] === "AI予想", res.nav.join(","));
     check(scheme, "買い目が3列で出る", res.kpi > 0);
     check(scheme, "記録後は「AI への条件」の行を出さない", !res.cond);
@@ -112,6 +121,22 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     check(scheme, "即PAT 入力用の一覧", own.rows > 0);
     check(scheme, "買った馬券を1点ずつ入れる画面", own.sheet === "買った馬券を入れる");
 
+    // 通知の「AI へ送る」・自動バックアップ
+    const misc = await page.evaluate(() => {
+      let shared = null; Native.share = (t, choose) => { shared = { len: t.length, choose }; };
+      App.openFromNotification({ type: "send", r: { key: "20261025|盛岡|7", date: "20261025", venue: "盛岡", no: 7, title: "C2", time: "14:40" } });
+      let backup = null; Native.autoBackup = (json, name) => { backup = { n: JSON.parse(json).length, name }; };
+      store.set("keiba-backup", {}); maybeAutoBackup();
+      App.onAutoBackup(true, "ダウンロード/keiba-backup/x.json");
+      showRecords();
+      const line = document.querySelector(".backup-line") ? document.querySelector(".backup-line").textContent : "";
+      const dataNote = [...document.querySelectorAll(".rec-list .note")].some((x) => x.textContent.includes("データとして記録"));
+      return { shared, backup, line, dataNote };
+    });
+    check(scheme, "通知の「AI へ送る」で前回の送り先へ送る", !!misc.shared && misc.shared.choose === false && misc.shared.len > 100, JSON.stringify(misc.shared));
+    check(scheme, "自動バックアップ（週1回）", !!misc.backup && misc.backup.n > 0 && /^keiba-backup-\d{8}-\d{4}\.json$/.test(misc.backup.name), JSON.stringify(misc.backup));
+    check(scheme, "記録の画面に自動バックアップの状態", /最終/.test(misc.line), misc.line);
+
     // 記録の画面（収支の推移・CLV）
     const rec = await page.evaluate((records) => {
       const o = readRecords(); records.forEach((r, i) => { o[`${r["日付"]}|${r["競馬場"]}|${r["レース番号"]}|${i}`] = r; }); writeRecords(o);
@@ -125,11 +150,13 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     // 設定・予想の条件
     const st = await page.evaluate(() => {
       showPrefs(); const prefs = document.querySelectorAll(".pref-row").length;
+      const pre = [...document.querySelectorAll(".pref-row")].some((x) => x.textContent.includes("締切5分前"));
       showSettings(); const kelly = [...document.querySelectorAll(".card h3")].some((x) => x.textContent.includes("ケリー"));
-      return { prefs, kelly };
+      return { prefs, kelly, pre };
     });
     check(scheme, "設定の画面", st.prefs > 3);
     check(scheme, "ケリー基準の設定", st.kelly);
+    check(scheme, "締切5分前の確認のオン・オフ", st.pre);
     check(scheme, "設定の画面が横にはみ出さない", (await overflow()) <= 0);
 
     check(scheme, "画面のエラーなし", errs.length === 0, errs.join(" / "));

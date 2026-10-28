@@ -312,7 +312,12 @@ function openFromNotification(p) {
   const race = { no: r.no, title: r.title, time: r.time };
   const c = readCache()[r.key];
   if (p.type === "collect" && !c) { startCollect(r.venue, race); return; }
-  if (c) { showResult(r.venue, race, c); return; }
+  if (c) {
+    showResult(r.venue, race, c);
+    // 通知の「AI へ送る」：開いてそのまま、前回の送り先へ送る
+    if (p.type === "send") { markSent(r.venue, race); Native.share(textFor(c), false); }
+    return;
+  }
   goHome(); renderVenues();
 }
 
@@ -328,6 +333,8 @@ function mergeBackgroundResults() {
     c[x.key] = { at: x.at, text: x.text, info: x.info, diff, result: (prev && prev.result) || null };
   }
   writeCache(c);
+  // 裏で集めたレースもデータとして記録する（キーは 日付|競馬場|レース番号）
+  for (const x of list) { const [d, v, n] = String(x.key).split("|"); if (d && v && n) ensureDataRecord(d, v, +n, c[x.key], ""); }
 }
 
 function goHome() {
@@ -403,6 +410,16 @@ function renderPrefs() {
     : "未許可。時刻になったら通知だけを出します（タップで収集・答え合わせ）",
     el("span", "val" + (exact ? "" : " warn"), exact ? "許可済み" : "未許可"),
     exact ? null : () => { try { Native.openExactAlarmSettings(); } catch (e) {} });
+  {
+    const on = preCheckOn();
+    const sw2 = el("span", "switch" + (on ? " on" : ""));
+    const r2 = el("button", "pref-row");
+    const tx = el("div", "tx");
+    tx.append(el("b", null, "締切5分前にオッズを確かめる"), el("small", null, "AI の回答を記録したレースを発走5分前に裏で取り直し、期待値が下がった買い目を通知します（アラームとリマインダーの許可が要る）"));
+    r2.append(tx, sw2); r2.setAttribute("aria-pressed", String(on));
+    r2.onclick = () => { setPreCheck(!on); renderPrefs(); toast(!on ? "締切5分前に確かめます" : "締切前の確認をやめました"); };
+    g3.append(r2);
+  }
 
   // 取れないとき
   const g4 = group("取れないとき");
@@ -472,6 +489,53 @@ setInterval(() => {
   });
 })();
 
+// ===== 記録の自動バックアップ =====
+// 週に1回、記録をすべて「ダウンロード/keiba-backup」に書く（新しい3件だけ残す）。中身は「書き出す」と同じなので「読み込む」で戻せる。
+// 失敗したら1日は試さない
+const BACKUP_KEY = "keiba-backup";
+const BACKUP_EVERY = 7 * 24 * 3600 * 1000;
+function backupInfo() { return store.get(BACKUP_KEY, {}); }
+function runBackup(manual) {
+  const recs = Object.values(readRecords());
+  if (!recs.length) { if (manual) toast("記録がありません"); return; }
+  if (!Native.autoBackup) return;
+  const d = jstNow(), z = (n) => String(n).padStart(2, "0");
+  const name = `keiba-backup-${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}.json`;
+  state.backupManual = !!manual;
+  store.set(BACKUP_KEY, Object.assign(backupInfo(), { tried: Date.now() }));
+  Native.autoBackup(JSON.stringify(recs, null, 1), name);
+}
+function maybeAutoBackup() {
+  const b = backupInfo();
+  if (!Object.keys(readRecords()).length) return;
+  if (b.at && Date.now() - b.at < BACKUP_EVERY) return;
+  if (b.tried && !b.ok && Date.now() - b.tried < 24 * 3600 * 1000) return;
+  runBackup(false);
+}
+App.onAutoBackup = (ok, info) => {
+  const b = backupInfo();
+  store.set(BACKUP_KEY, ok ? { at: Date.now(), ok: true, file: info, tried: Date.now() } : Object.assign(b, { ok: false, err: info, tried: Date.now() }));
+  if (state.backupManual) toast(ok ? "バックアップしました" : `バックアップできませんでした（${info}）`);
+  state.backupManual = false;
+  if (state.screen === "records") renderRecords();
+};
+
+// ===== 締切前のオッズの取り直し（オン・オフ） =====
+const PRECHECK_KEY = "keiba-precheck";
+function preCheckOn() { return store.get(PRECHECK_KEY, true) !== false; }
+function setPreCheck(on) {
+  store.set(PRECHECK_KEY, !!on);
+  // 発走前の AI の記録について、予約を入れ直すか消す
+  const recs = readRecords();
+  for (const [k, r] of Object.entries(recs)) {
+    if (!r["AI"] || r["結果"]) continue;
+    const um = untilMin(r["日付"], r["発走"]);
+    if (um == null || um <= 6) continue;
+    if (on) scheduleResultCheck(k, r, { title: r["レース名"] || "" });
+    else { try { Native.cancelPreCheck(k); } catch (e) {} }
+  }
+}
+
 renderDate();
 applyTheme();
 mergeBackgroundResults();
@@ -481,6 +545,7 @@ renderUpdateUi();
 updateRecBadge();
 if (window.Android) {
   loadRaceList();
+  setTimeout(maybeAutoBackup, 3000);
   // 起動時の更新確認は6時間に1回まで（お知らせ帯に出すだけで、勝手には更新しない）
   if (!upd.at || Date.now() - new Date(upd.at) > 6 * 3600 * 1000) setTimeout(checkUpdate, 1500);
 }

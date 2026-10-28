@@ -16,6 +16,15 @@ class AlarmReceiver : BroadcastReceiver() {
         val title = Reservations.titleOf(r)
         val time = r.optString("time")
 
+        if (kind == "precheck") {
+            // 発走5分前のオッズの取り直し。始められなければ何もしない（時刻を過ぎてからでは役に立たないので）
+            runCatching {
+                ctx.startForegroundService(Intent(ctx, CollectService::class.java)
+                    .putExtra("mode", "precheck").putExtra("reservation", r.toString()))
+            }
+            return
+        }
+
         if (kind == "result") {
             // 結果の自動取得：正確な時刻で起きたときだけ裏で読める。だめなら「タップで答え合わせ」の通知にする
             val fallback = {
@@ -60,6 +69,7 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == "android.intent.action.MY_PACKAGE_REPLACED") {
             Reservations.rescheduleAll(ctx)
             ResultChecks.rescheduleAll(ctx)
+            PreChecks.rescheduleAll(ctx)
         }
     }
 }

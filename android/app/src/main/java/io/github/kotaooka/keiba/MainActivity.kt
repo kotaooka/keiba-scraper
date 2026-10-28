@@ -139,6 +139,7 @@ class MainActivity : Activity() {
         // 「アラームとリマインダー」を許可して戻ってきたときなどに、予約を正確な時刻で登録し直す
         Reservations.rescheduleAll(this)
         ResultChecks.rescheduleAll(this)
+        PreChecks.rescheduleAll(this)
         if (pageReady) js("App.onResume()")
     }
 
@@ -412,7 +413,26 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun cancelResultCheck(key: String) = ResultChecks.remove(this@MainActivity, key)
+        fun cancelResultCheck(key: String) {
+            ResultChecks.remove(this@MainActivity, key)
+            PreChecks.remove(this@MainActivity, key)
+        }
+
+        /** 発走5分前のオッズの取り直しを予約する（AI の回答を記録したとき）。予約できたら true */
+        @JavascriptInterface
+        fun schedulePreCheck(json: String): Boolean = runCatching { PreChecks.set(this@MainActivity, JSONObject(json)) }.getOrDefault(false)
+
+        @JavascriptInterface
+        fun cancelPreCheck(key: String) = PreChecks.remove(this@MainActivity, key)
+
+        /** 記録を「ダウンロード/keiba-backup」に書く。終わったら App.onAutoBackup(ok, 場所かエラー) */
+        @JavascriptInterface
+        fun autoBackup(json: String, name: String) {
+            scope.launch {
+                val r = withContext(Dispatchers.IO) { runCatching { Backup.write(this@MainActivity, json, name) } }
+                js("App.onAutoBackup(${r.isSuccess}, ${JSONObject.quote(r.getOrElse { it.message ?: "エラー" })})")
+            }
+        }
 
         @JavascriptInterface
         fun takeRaceResults(): String = RaceResults.take(this@MainActivity)

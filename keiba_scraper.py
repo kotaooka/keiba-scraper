@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 try:
@@ -97,6 +97,7 @@ PROMPT_TEXT = """
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
 ・オッズが「--」の馬の単勝・複勝と、オッズを取得できなかった券種は選ばないでください。
+・複勝・ワイドで、オッズの幅の下限が1.1倍以下の組は選ばないでください（当たっても払戻がほぼ元返しで、回収にならないため）。
 ・単勝が発売前の予想オッズ（「データの欠損」に書いてあります）のときは、期待値は参考値として計算し、その旨を【前提】に書いてください。
 
 ■ 手順
@@ -2442,7 +2443,10 @@ def run_verify():
         start = now.replace(hour=int(m.group(1)), minute=int(m.group(2)), second=0, microsecond=0)
         return (now - start).total_seconds() >= 15 * 60
 
-    pending = [r for r in recs if (r.get("AI") or r.get("購入")) and not r.get("結果") and started(r)]
+    # AI の回答や買った馬券がないレースも、あとで分析に使えるよう結果まで記録する（古いものは30日まで）
+    month_ago = (now - timedelta(days=30)).strftime("%Y%m%d")
+    pending = [r for r in recs if not r.get("結果") and started(r)
+               and (r.get("AI") or r.get("購入") or str(r.get("日付", "")) >= month_ago)]
     if pending:
         print(f"\n結果を取得します: {len(pending)}件")
         with sync_playwright() as p:
@@ -2450,8 +2454,17 @@ def run_verify():
             page = browser.new_context(user_agent=UA).new_page()
             try:
                 for r in pending:
-                    label = f"{r['日付']} {r['競馬場']} {r['レース番号']}R"
-                    res = scrape_result(page, r["race_id"])
+                    label = f"{r['日付']} {r['競馬場']} {r['レース番号']}R" + ("" if (r.get("AI") or r.get("購入")) else "（データのみ）")
+                    # 当日の傾向のために読んだ結果があれば、それを使う（同じページを読み直さない）
+                    cached = OUTPUT_DIR / "results" / f"{r['race_id']}.json"
+                    res = None
+                    if cached.exists():
+                        try:
+                            res = json.loads(cached.read_text(encoding="utf-8"))
+                        except (OSError, ValueError):
+                            res = None
+                    if not res:
+                        res = scrape_result(page, r["race_id"])
                     if not res:
                         print(f"  {label}: 結果未確定または取得できず（あとで再実行してください）")
                         continue

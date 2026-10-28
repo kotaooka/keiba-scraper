@@ -67,9 +67,11 @@ function recOrder(r) {
   return String(r["収集時刻"] || (r["AI"] && r["AI"]["記録時刻"]) || fromDate);
 }
 function writeRecords(recs) {
-  // 新しい順に 500件まで残す
-  const keys = Object.keys(recs).sort((a, b) => recOrder(recs[b]).localeCompare(recOrder(recs[a]))).slice(0, 500);
-  const out = {}; for (const k of keys) out[k] = recs[k];
+  // AI の回答か買った馬券のある記録は新しい順に 500件、データだけの記録（AI なし）は新しい順に 300件まで残す
+  // （端末の保存の上限を超えないように。全部の控えは自動バックアップと書き出しにある）
+  const keys = Object.keys(recs).sort((a, b) => recOrder(recs[b]).localeCompare(recOrder(recs[a])));
+  const main = keys.filter((k) => !isDataOnly(recs[k])).slice(0, 500), data = keys.filter((k) => isDataOnly(recs[k])).slice(0, 300);
+  const out = {}; for (const k of keys) if (main.includes(k) || data.includes(k)) out[k] = recs[k];
   store.set(REC_KEY, out);
 }
 function saveAiText(key, text) {
@@ -119,6 +121,22 @@ function pasteAiAnswer(given) {
   renderResult(); updateRecBadge();
 }
 
+// AI の回答や買った馬券がないレースも、収集したら記録を作り、結果まで残す（あとで分析に使うデータ。通知はしない）。
+// AI の回答・買った馬券・結果のある記録はそのまま。データだけの記録は、取り直したら新しいオッズで作り直す
+function ensureDataRecord(date, venue, no, res, title) {
+  const key = cacheKey(date, venue, no);
+  const recs = readRecords();
+  const cur = recs[key];
+  if (cur && (cur["AI"] || ownBetsOf(cur).length || cur["結果"])) return;
+  let rec;
+  try { rec = Object.assign(KS.newRecord(date, venue, no, res), { "発走": (res.info && res.info.start) || "" }); } catch (e) { return; }
+  if (!rec.race_id) return;
+  if (res.info && res.info.predicted) rec["予想オッズ"] = true;
+  recs[key] = rec; writeRecords(recs);
+  scheduleResultCheck(key, rec, { title: title || "" });
+}
+const isDataOnly = (r) => !!r && !r["AI"] && !ownBetsOf(r).length;
+
 // 発走の15分後に結果を自動で1回取り、的中・不的中を通知する（アプリを閉じていても。Kotlin の Reservations）
 function scheduleResultCheck(key, rec, race) {
   const um = untilMin(rec["日付"], rec["発走"]);
@@ -130,6 +148,17 @@ function scheduleResultCheck(key, rec, race) {
       hit_bets: hasHitOf(rec) ? (rec["AI"]["的中買い目"] || []) : null,
       own_bets: ownBetsOf(rec).length ? rec["購入"] : null,
       mode: rec["AI"] ? (rec["買い方"] || "ev") : "none" }));
+  } catch (e) { /* 予約できなくても記録は残る */ }
+  // 発走5分前にオッズを取り直して、買い目の期待値を確かめる（AI の回答を記録したレースだけ）
+  try {
+    if (rec["AI"] && preCheckOn() && Native.schedulePreCheck) {
+      const bs = betSettings();
+      Native.schedulePreCheck(JSON.stringify({ key, race_id: rec.race_id, date: rec["日付"], venue: rec["競馬場"], no: rec["レース番号"],
+        title: rec["レース名"] || race.title || "", time: rec["発走"], start: Math.round(Date.now() + um * 60000),
+        bets: rec["買い方"] === "hit" ? [] : rec["AI"]["買い目"] || [], hit_bets: hasHitOf(rec) ? (rec["AI"]["的中買い目"] || []) : [],
+        pred: rec["AI"]["予想"] || {}, ev_min: rec["EV_MIN"] != null ? rec["EV_MIN"] : bs.ev_min,
+        hit_ev_min: rec["HIT_EV_MIN"] != null ? rec["HIT_EV_MIN"] : bs.hit_ev_min }));
+    }
   } catch (e) { /* 予約できなくても記録は残る */ }
 }
 // アプリを閉じている間に自動で取った結果を、記録へ入れる
@@ -426,7 +455,10 @@ function aiCard(venue, race) {
       if (cp != null && p != null && Math.abs(p - cp) > Math.max(0.03, cp * 0.3)) {
         extra.push(el("span", "calc-far", `勝率から計算 ${(cp * 100).toFixed(1)}%（AI と差が大きい）`));
       }
-      const ko = nowDiff ? now.low : recOk ? atRec.low : null;
+      // 複勝・ワイドで下限が1.1倍以下は、当たってもほぼ元返し（指示文でも選ばないよう伝えている）
+      const lowNow = nowDiff ? now.low : recOk ? atRec.low : null;
+      if ((b["券種"] === "複勝" || b["券種"] === "ワイド") && lowNow != null && lowNow <= 1.1) extra.push(el("span", "calc-far", "元返しに近い（当たっても増えない）"));
+      const ko = lowNow;
       const ka = rec["結果"] ? null : kellyAmount(p, ko);
       if (ka != null) { extra.push(el("span", "kelly", ka > 0 ? `ケリー${kellyLabel()} ${yen(ka)}` : `ケリー${kellyLabel()} 見送り`)); kellyTotal += ka; kellyN++; }
       if (extra.length) { const d = el("div", "bet-extra"); extra.forEach((x, j) => { if (j) d.append(el("span", "sep", "・")); d.append(x); }); row.append(d); }
@@ -879,17 +911,21 @@ function renderRecords() {
   body.append(el("h2", "race-title", "予想の記録と答え合わせ"));
   const recs = readRecords();
   const all = Object.values(recs);
-  body.append(el("p", "race-sub", `記録 ${all.length}件・答え合わせ済み ${all.filter((r) => r["AI"] && r["結果"]).length}件`));
+  body.append(el("p", "race-sub", `記録 ${all.filter((r) => !isDataOnly(r)).length}件・答え合わせ済み ${all.filter((r) => r["AI"] && r["結果"]).length}件`));
 
   const pend = pendingResults();
+  // データだけの記録（AI の回答なし）で結果がまだのもの。ふだんは裏で取るが、取れなかった分はここでまとめて取る
+  const dataPend = Object.entries(recs).filter(([, r]) => isDataOnly(r) && !r["結果"] && r.race_id && (sinceStart(r) ?? 0) >= 15 && (sinceStart(r) ?? 0) < 3 * 24 * 60);
   if (state.fetching) {
     const c = el("div", "card"); c.append(el("h3", null, `結果を取得中… ${state.fetching.done} / ${state.fetching.total}`));
     const bar = el("div", "bar"); const f = el("i"); f.style.width = `${state.fetching.done / state.fetching.total * 100}%`; bar.append(f); c.append(bar);
     body.append(c);
-  } else if (pend.length) {
+  } else if (pend.length || dataPend.length) {
     const b = el("button", "update-bar");
-    b.append(el("span", null, "結果待ち "), el("b", "num", `${pend.length}件`), el("span", "go", "結果を取得 ›"));
-    b.onclick = () => fetchResults(pend.map(([k]) => k));
+    b.append(el("span", null, "結果待ち "), el("b", "num", `${pend.length + dataPend.length}件`));
+    if (dataPend.length) b.append(el("span", null, `（データ ${dataPend.length}件）`));
+    b.append(el("span", "go", "結果を取得 ›"));
+    b.onclick = () => fetchResults(pend.concat(dataPend).map(([k]) => k));
     body.append(b);
     body.append(el("p", "note", "結果ページを1レースにつき1回、2秒おきに読みます"));
   }
@@ -963,7 +999,9 @@ function renderRecords() {
   // 一覧（新しい順）
   const list = el("div", "rec-list"); list.style.marginTop = "12px";
   const cache = readCache();
-  const entries = Object.entries(recs).sort((a, b) => recOrder(b[1]).localeCompare(recOrder(a[1])));
+  const entries = Object.entries(recs).filter(([, r]) => !isDataOnly(r)).sort((a, b) => recOrder(b[1]).localeCompare(recOrder(a[1])));
+  const dataRecs = Object.values(recs).filter(isDataOnly);
+  if (dataRecs.length) list.append(el("p", "note", `ほかに、データとして記録したレース ${dataRecs.length}件（結果あり ${dataRecs.filter((r) => r["結果"]).length}件）。AI の回答がないレースも結果まで残し、書き出しと自動バックアップに入ります（あとで分析に使うため）`));
   for (const [key, r] of entries.slice(0, 100)) {
     const it = el("button", "rec-item");
     it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
@@ -1004,6 +1042,17 @@ function renderRecords() {
 
   // 書き出し
   const act = el("div", "end-actions");
+  // 自動バックアップの状態
+  {
+    const b = backupInfo();
+    const t = b.at ? (() => { const d = jstOf(b.at); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })() : null;
+    const box = el("div", "backup-line");
+    box.append(el("b", null, "自動バックアップ"), el("span", null, t ? `最終 ${t}（週1回・ダウンロード/keiba-backup に新しい3件）` : "まだありません（週1回・ダウンロード/keiba-backup に新しい3件）"));
+    if (b.ok === false) box.append(el("span", "warn", `前回は失敗：${b.err || ""}`));
+    act.append(box);
+    const now = el("button", "btn secondary", "今すぐバックアップ"); now.onclick = () => runBackup(true);
+    act.append(now);
+  }
   const ex = el("button", "btn secondary", "書き出す（PC版の verify にかける）");
   ex.onclick = () => {
     const d = jstNow(); const z = (n) => String(n).padStart(2, "0");

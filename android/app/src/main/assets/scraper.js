@@ -45,6 +45,7 @@
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
 ・オッズが「--」の馬の単勝・複勝と、オッズを取得できなかった券種は選ばないでください。
+・複勝・ワイドで、オッズの幅の下限が1.1倍以下の組は選ばないでください（当たっても払戻がほぼ元返しで、回収にならないため）。
 ・単勝が発売前の予想オッズ（「データの欠損」に書いてあります）のときは、期待値は参考値として計算し、その旨を【前提】に書いてください。
 
 ■ 手順
@@ -1748,6 +1749,45 @@
     return lines.map((l) => l.replace(/\s+$/, "")).join("\n");
   }
 
+  // ========== 締切前のオッズでの点検（Android版の発走5分前の取り直しで使う） ==========
+  // 収集した info（buildWithInfo の info）から、買い目のオッズ（単勝・複勝は馬の表、ワイド・3連複は人気上位10組）
+  function betOddsFromInfo(b, info) {
+    if (!info) return null;
+    const nums = String(b["組み合わせ"] || "").split("-");
+    const lowOf = (t) => { const m = /\d+(\.\d+)?/.exec(String(t || "")); return m ? parseFloat(m[0]) : null; };
+    if (b["券種"] === "単勝" || b["券種"] === "複勝") {
+      const h = (info.horses || []).find((x) => String(parseInt(x.no, 10)) === nums[0]);
+      const t = h && (b["券種"] === "単勝" ? h.odds : h.fuku);
+      const low = lowOf(t);
+      return low ? { text: String(t), low } : null;
+    }
+    const c = ((info.combos || {})[b["券種"]] || []).find((x) => x.key === b["組み合わせ"]);
+    const low = c && lowOf(c.odds);
+    return low ? { text: c.odds, low } : null;
+  }
+  // 記録した買い目を今のオッズで点検する。p は #BET の推定的中率（無ければ単勝は推定勝率・複勝は推定複勝率）。
+  // 返り値: [{group: "期待値重視"|"的中重視", 券種, 組み合わせ, odds, ev, ok}]（オッズが分からない買い目は ev: null）
+  function recheckBets(info, bets, hitBets, pred, evMin, hitEvMin) {
+    const out = [];
+    const probOf = (b) => {
+      if (typeof b["的中率"] === "number" && b["的中率"] > 0) return b["的中率"] / 100;
+      const a = (pred || {})[b["組み合わせ"]];
+      if (!a) return null;
+      if (b["券種"] === "単勝") return a["勝率"] / 100;
+      if (b["券種"] === "複勝") return a["複勝率"] / 100;
+      return null;
+    };
+    for (const [group, list, min] of [["期待値重視", bets || [], evMin], ["的中重視", hitBets || [], hitEvMin]]) {
+      for (const b of list) {
+        const o = betOddsFromInfo(b, info), p = probOf(b);
+        const ev = o && p != null ? p * o.low : null;
+        out.push({ group, "券種": b["券種"], "組み合わせ": b["組み合わせ"], odds: o ? o.text : null,
+          ev, ok: ev == null ? null : Math.round(ev * 100) / 100 >= min - 1e-9 });
+      }
+    }
+    return out;
+  }
+
   // 収集した部品から AI 貼り付け用テキストを作る（PC版 collect_race の後半）
   // parts: {keibajo, race_date, race_no, shutuba:{horses,race_info}, keibago:{}, tan_fuku:{}, wide:[], sanren:[], sanren_note}
   function build(parts) {
@@ -1828,7 +1868,7 @@
     KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
     parsePatCalendar, parsePatRange,
     oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
-    parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
+    parseAiBlock, raceIdOf, newRecord, betOddsFromInfo, recheckBets, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList,
     parseShutuba, parseRaceInfo, parseKyakuType,

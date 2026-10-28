@@ -152,19 +152,29 @@ object Notifier {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
-    fun post(ctx: Context, id: Int, title: String, text: String, tap: PendingIntent) {
+    /** actions は通知の下に並べるボタン（文字と、押したときの PendingIntent） */
+    fun post(ctx: Context, id: Int, title: String, text: String, tap: PendingIntent,
+             actions: List<Pair<String, PendingIntent>> = emptyList()) {
         if (!allowed(ctx)) return
         ensureChannels(ctx)
-        val n = android.app.Notification.Builder(ctx, CHANNEL)
+        val b = android.app.Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_notify)
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(android.app.Notification.BigTextStyle().bigText(text))
             .setContentIntent(tap)
             .setAutoCancel(true)
-            .build()
-        ctx.getSystemService(NotificationManager::class.java).notify(id, n)
+        for ((label, pi) in actions) {
+            @Suppress("DEPRECATION")
+            b.addAction(android.app.Notification.Action.Builder(null, label, pi).build())
+        }
+        ctx.getSystemService(NotificationManager::class.java).notify(id, b.build())
     }
+
+    /** 即PAT（地方競馬ネット投票のスマホ版）をブラウザで開く PendingIntent */
+    fun patIntent(ctx: Context): PendingIntent = PendingIntent.getActivity(ctx, "pat".hashCode(),
+        Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://n.ipat.jra.go.jp/sp/index.cgi")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 }
 
 /** 一時ファイルに書いてから置き換える（書き込みの途中で落ちても前の中身が残る） */
@@ -294,6 +304,76 @@ object ResultChecks {
         val pi = intent(ctx, r.getString("key"), r, exact)
         if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
         else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi)
+    }
+}
+
+/**
+ * 発走5分前のオッズの取り直しの予約。AI の回答を記録したレースについて、発走の BEFORE 前に裏で収集し直し、
+ * 記録した買い目を今のオッズで点検して通知する（期待値が下限を割った買い目を知らせる）。
+ * 1件は {key, race_id, date, venue, no, title, time, start(ミリ秒), bets, hit_bets, pred, ev_min, hit_ev_min}
+ */
+object PreChecks {
+    private const val PREFS = "pre_checks"
+    private const val KEY_LIST = "list"
+    const val BEFORE = 5 * 60_000L
+
+    private fun list(ctx: Context): List<JSONObject> {
+        val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LIST, "[]") ?: "[]"
+        val arr = runCatching { JSONArray(raw) }.getOrDefault(JSONArray())
+        return (0 until arr.length()).map { arr.getJSONObject(it) }.filter { it.optLong("start") > System.currentTimeMillis() }
+    }
+
+    private fun save(ctx: Context, items: List<JSONObject>) {
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_LIST, JSONArray(items).toString()).apply()
+    }
+
+    /** 予約する（同じ key は置き換え）。取り直す時刻まで1分を切っていれば予約しない */
+    @Synchronized
+    fun set(ctx: Context, r: JSONObject): Boolean {
+        val key = r.getString("key")
+        val others = list(ctx).filter { it.optString("key") != key }
+        val at = r.getLong("start") - BEFORE
+        cancelAlarm(ctx, key)
+        if (at < System.currentTimeMillis() + 60_000L) { save(ctx, others); return false }
+        save(ctx, others + r)
+        schedule(ctx, r, at)
+        return true
+    }
+
+    @Synchronized
+    fun remove(ctx: Context, key: String) {
+        cancelAlarm(ctx, key)
+        save(ctx, list(ctx).filter { it.optString("key") != key })
+    }
+
+    @Synchronized
+    fun rescheduleAll(ctx: Context) {
+        val now = System.currentTimeMillis()
+        val items = list(ctx).filter { it.getLong("start") - BEFORE > now }
+        save(ctx, items)
+        for (r in items) schedule(ctx, r, r.getLong("start") - BEFORE)
+    }
+
+    private fun intent(ctx: Context, key: String, r: JSONObject?): PendingIntent {
+        val i = Intent(ctx, AlarmReceiver::class.java).apply {
+            action = "io.github.kotaooka.keiba.PRECHECK"
+            putExtra("key", key)
+            putExtra("kind", "precheck")
+            putExtra("exact", true)
+            if (r != null) putExtra("reservation", r.toString())
+        }
+        return PendingIntent.getBroadcast(ctx, "$key|precheck".hashCode(), i, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    }
+
+    private fun cancelAlarm(ctx: Context, key: String) {
+        ctx.getSystemService(AlarmManager::class.java).cancel(intent(ctx, key, null))
+    }
+
+    // 時刻どおりでないと意味がないので、正確なアラームを使えるときだけ予約する
+    private fun schedule(ctx: Context, r: JSONObject, at: Long) {
+        if (!Reservations.exactAllowed(ctx)) return
+        ctx.getSystemService(AlarmManager::class.java)
+            .setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent(ctx, r.getString("key"), r))
     }
 }
 

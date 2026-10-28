@@ -343,6 +343,7 @@ const App = {
     // 取得済みのレース結果は取り直しても残す
     const entry = { at, text: res.text, info: res.info, diff: res.diff || null, result: (prev && prev.result) || null };
     c[ck] = entry; writeCache(c);
+    ensureDataRecord(state.date, job.venue, job.race.no, entry, job.race.title);
     Native.copy(textFor(res));
     showResult(job.venue, job.race, Object.assign({}, entry), true);
   },
@@ -399,6 +400,7 @@ const App = {
   onResume() {
     followToday();
     mergeBackgroundResults(); mergeRaceResults(); loadReservations(); updateRecBadge();
+    maybeAutoBackup();
     if (state.screen === "home" && !state.loading) renderRaces();
     if (state.screen === "result" && state.result) renderResult();
     if (state.screen === "records" && !state.fetching) renderRecords();

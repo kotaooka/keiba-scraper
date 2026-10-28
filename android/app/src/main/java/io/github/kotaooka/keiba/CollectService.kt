@@ -36,13 +36,15 @@ class CollectService : Service() {
         Notifier.ensureChannels(this)
         val r = runCatching { JSONObject(intent?.getStringExtra("reservation") ?: "") }.getOrNull()
         val title = r?.let { Reservations.titleOf(it) } ?: ""
-        val resultMode = intent?.getStringExtra("mode") == "result"
+        val mode = intent?.getStringExtra("mode") ?: ""
+        val resultMode = mode == "result"
+        val preMode = mode == "precheck"
 
         // startForegroundService で起こされたら、何もしないときでも先に startForeground を呼ぶ（呼ばないと落とされる）
         val ongoing = Notification.Builder(this, Notifier.CHANNEL_RUN)
             .setSmallIcon(R.drawable.ic_notify)
-            .setContentTitle(if (resultMode) "答え合わせ中：$title" else "自動収集中：$title")
-            .setContentText(if (resultMode) "レースの結果を取得しています" else "出馬表・オッズ・過去5走を集めています")
+            .setContentTitle(if (resultMode) "答え合わせ中：$title" else if (preMode) "締切前のオッズを確認中：$title" else "自動収集中：$title")
+            .setContentText(if (resultMode) "レースの結果を取得しています" else if (preMode) "オッズを取り直して、買い目の期待値を確かめています" else "出馬表・オッズ・過去5走を集めています")
             .setOngoing(true)
             .build()
         // 常駐の通知は1つの番号を使い回す（レースごとに変えると、止めたときに前の通知が残る）
@@ -56,7 +58,11 @@ class CollectService : Service() {
         wake.acquire(6 * 60_000L)
         scope.launch {
             try {
-                if (resultMode) checkResult(r, title) else collect(r, title)
+                when {
+                    resultMode -> checkResult(r, title)
+                    preMode -> preCheck(r, title)
+                    else -> collect(r, title)
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -116,8 +122,8 @@ class CollectService : Service() {
             val obj = JSONObject(outcome.json)
             BackgroundResults.add(this, key, obj)
             Notifier.post(this, "$key|done".hashCode(), "収集しました：$title",
-                "${r.optString("time")} 発走。オッズは ${obj.optString("at").takeLast(5)} 時点。タップで開いて AI へ送れます",
-                Notifier.openIntent(this, "open", r))
+                "${r.optString("time")} 発走。オッズは ${obj.optString("at").takeLast(5)} 時点。「AI へ送る」でそのまま送れます",
+                Notifier.openIntent(this, "open", r), listOf("AI へ送る" to Notifier.openIntent(this, "send", r)))
         } else {
             Notifier.post(this, "$key|done".hashCode(), "自動収集できませんでした：$title",
                 "${outcome.error ?: ""}。タップすると開いて収集します", Notifier.openIntent(this, "collect", r))
@@ -134,6 +140,8 @@ class CollectService : Service() {
             return
         }
         var message: String? = null
+        // AI の回答も買った馬券もないレース（データとして結果まで記録するだけ）は、結果を残すだけで通知しない
+        val silent = r.optString("mode") == "none" && (!r.has("own_bets") || r.isNull("own_bets"))
         try {
             message = withScraper { scraper ->
                 val res = withTimeoutOrNull(2 * 60_000L) { scraper.fetchResult(raceId) } ?: return@withScraper null
@@ -176,13 +184,62 @@ class CollectService : Service() {
 
         if (message != null) {
             ResultChecks.remove(this, key)
-            Notifier.post(this, "$key|result".hashCode(), "答え合わせ：$title", "$message。タップで予想の記録を開きます",
+            if (!silent) Notifier.post(this, "$key|result".hashCode(), "答え合わせ：$title", "$message。タップで予想の記録を開きます",
                 Notifier.openIntent(this, "records", r))
-        } else if (ResultChecks.has(this, key) && !ResultChecks.retry(this, key)) {
+        } else if (ResultChecks.has(this, key) && !ResultChecks.retry(this, key) && !silent) {
             // 3回読んでも確定しなかった（途中で記録が消された・画面で結果を取ったときは何も出さない）
             Notifier.post(this, "$key|result".hashCode(), "答え合わせ：$title",
                 "結果を自動で取得できませんでした。タップすると取得します", Notifier.openIntent(this, "fetch", r))
         }
+    }
+
+    /**
+     * 発走5分前：収集し直して（取った結果は画面にも反映）、記録した買い目を今のオッズで点検し、通知する。
+     * 期待値が下限を割った買い目があれば先に書く
+     */
+    private suspend fun preCheck(r: JSONObject, title: String) {
+        val key = r.optString("key")
+        if (!lockOrNull(CollectLock.mutex, 90_000L)) return
+        var text: String? = null
+        var drops = 0
+        try {
+            text = withScraper { scraper ->
+                val out = withTimeoutOrNull(3 * 60_000L) {
+                    scraper.collectRace(r.optString("venue"), r.optString("date"), r.optInt("no"), 0)
+                } ?: return@withScraper null
+                val json = out.json ?: return@withScraper null
+                val obj = JSONObject(json)
+                BackgroundResults.add(this, key, obj)
+                val rows = JSONArray(scraper.evalKs("KS.recheckBets(${obj.getJSONObject("info")}, ${r.optJSONArray("bets") ?: JSONArray()}, " +
+                    "${r.optJSONArray("hit_bets") ?: JSONArray()}, ${r.optJSONObject("pred") ?: JSONObject()}, ${r.optDouble("ev_min", 1.2)}, ${r.optDouble("hit_ev_min", 0.9)})"))
+                val bad = mutableListOf<String>(); val good = mutableListOf<String>()
+                for (i in 0 until rows.length()) {
+                    val x = rows.getJSONObject(i)
+                    val name = "${x.optString("券種")} ${x.optString("組み合わせ")}"
+                    if (x.isNull("ev")) continue
+                    val ev = "%.2f".format(x.getDouble("ev"))
+                    if (x.optBoolean("ok")) good += "$name $ev" else bad += "$name 期待値$ev"
+                }
+                drops = bad.size
+                when {
+                    rows.length() == 0 -> "AI の買い目は見送りです。オッズは ${obj.optString("at").takeLast(5)} 時点"
+                    bad.isNotEmpty() -> "期待値が下限を割った買い目 ${bad.size}点：${bad.joinToString("・")}" +
+                        (if (good.isNotEmpty()) "／条件どおり：${good.joinToString("・")}" else "")
+                    good.isNotEmpty() -> "買い目はすべて条件どおりです：${good.joinToString("・")}"
+                    else -> "今のオッズが読めない買い目があります。タップで確認してください"
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            // 取れなかったときは何も出さない（時刻を過ぎてからでは役に立たないので）
+        } finally {
+            CollectLock.mutex.unlock()
+        }
+        PreChecks.remove(this, key)
+        val msg = text ?: return
+        Notifier.post(this, "$key|precheck".hashCode(), (if (drops > 0) "見送り推奨あり：" else "締切前のオッズ：") + title,
+            "$msg。${r.optString("time")} 発走", Notifier.openIntent(this, "open", r), listOf("即PAT を開く" to Notifier.patIntent(this)))
     }
 
     /** 通知の文：「的中 +1,440円」「不的中 −1,000円」「見送り」 */

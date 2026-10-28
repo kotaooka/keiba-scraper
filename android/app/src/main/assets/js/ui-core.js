@@ -40,7 +40,7 @@ const Native = window.Android || {
   setReservation(j) { return JSON.stringify({ ok: true, exact: false, notif: true }); }, removeReservation() {},
   takeBackgroundResults() { return "[]"; }, exactAlarmAllowed() { return false; }, openExactAlarmSettings() {},
   notificationsAllowed() { return true; }, requestNotifications() {},
-  readClipboard() { return ""; }, clipStamp() { return -1; }, fetchResults() {}, exportRecords() {}, importRecords() {}, scheduleResultCheck() { return "{}"; }, cancelResultCheck() {}, takeRaceResults() { return "[]"; }
+  readClipboard() { return ""; }, clipStamp() { return -1; }, autoBackup() {}, schedulePreCheck() { return false; }, cancelPreCheck() {}, fetchResults() {}, exportRecords() {}, importRecords() {}, scheduleResultCheck() { return "{}"; }, cancelResultCheck() {}, takeRaceResults() { return "[]"; }
 };
 
 const $ = (id) => document.getElementById(id);

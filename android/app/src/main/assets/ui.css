@@ -512,3 +512,6 @@ button.pref-row:active { background: var(--grid); }
 .clip-offer { position: fixed; left: 12px; right: 12px; bottom: 84px; z-index: 30; background: var(--surface); border: 2px solid var(--accent); border-radius: 16px; padding: 14px 16px 12px; box-shadow: 0 8px 28px rgba(0,0,0,.28); }
 .clip-offer b { color: var(--accent); font-size: 15px; }
 .clip-offer p { margin: 4px 0 10px; font-size: 13.5px; color: var(--ink2); }
+.backup-line { display: flex; flex-direction: column; gap: 2px; font-size: 13px; color: var(--ink2); margin: 4px 2px 6px; }
+.backup-line b { color: var(--ink); }
+.backup-line .warn { color: var(--warn); }
