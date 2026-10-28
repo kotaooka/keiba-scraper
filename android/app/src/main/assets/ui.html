@@ -461,6 +461,9 @@ button.pref-row:active { background: var(--grid); }
 .toast { position: fixed; left: 50%; bottom: 96px; transform: translate(-50%, 20px); opacity: 0; background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 20px; font-size: 14px; transition: all .25s; z-index: 40; pointer-events: none; white-space: nowrap; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .btn.pat-list-btn { width: 100%; margin-top: 10px; }
+.bet-extra { font-size: 12px; color: var(--ink2); margin-top: 2px; }
+.bet-extra .calc-far { color: var(--warn); font-weight: 700; }
+.bet-extra .kelly { color: var(--accent); font-weight: 700; }
 .pat-type { display: flex; justify-content: space-between; align-items: baseline; margin: 14px 0 6px; }
 .pat-type b { font-size: 15px; color: var(--ink); }
 .pat-type span { font-size: 12.5px; color: var(--ink2); font-weight: 400; }
@@ -579,6 +582,7 @@ const WEEK = ["日", "月", "火", "水", "木", "金", "土"];
 
 // 収集の段階（Scraper.kt の step キーと同じ）
 const STEPS = [
+  ["today", "当日の結果", "netkeiba・前のレース"],
   ["shutuba", "出馬表", "netkeiba"],
   ["keibago", "馬柱・過去5走", "keiba.go.jp"],
   ["tanfuku", "単勝・複勝オッズ", "netkeiba"],
@@ -752,6 +756,21 @@ function renderVenues() {
 }
 
 // 発走までの分（レース日と "HH:MM" から。発走時刻が無ければ null）
+// このレースの直前から数えて、発走して2分以上たったレースの数（当日の傾向に使う前のレースの結果を読む範囲。分からなければ -1）
+function prevStartedOf(venue, no) {
+  if (state.date < todayStr()) return no - 1;
+  if (state.date > todayStr()) return 0;
+  const v = (state.venues || []).find((x) => x.name === venue);
+  if (!v) return -1;
+  let n = 0;
+  for (let k = no - 1; k >= 1; k--) {
+    const r = v.races.find((x) => +x.no === k);
+    const u = r ? untilMin(state.date, r.time) : null;
+    if (u == null || u > -2) break;
+    n++;
+  }
+  return n;
+}
 function untilMin(date, time) {
   const m = /^(\d{1,2}):(\d{2})$/.exec(time || "");
   if (!m) return null;
@@ -945,7 +964,7 @@ function startCollect(venue, race) {
   actions.append(cancel);
   body.append(actions);
 
-  Native.collect(venue, state.date, race.no);
+  Native.collect(venue, state.date, race.no, prevStartedOf(venue, race.no));
 }
 
 function setStep(key, s, detail) {
@@ -1835,6 +1854,26 @@ function aiCard(venue, race) {
   const hitEv0 = rec["HIT_EV_MIN"] != null ? rec["HIT_EV_MIN"] : betSettings().hit_ev_min;
   const hitMin0 = rec["HIT_MIN"] != null ? rec["HIT_MIN"] : betSettings().hit_min;
   if (rec["予算"]) c.append(el("p", "ai-cond", `予算 ${yen(rec["予算"])}` + (hasHit && rec["買い方"] !== "hit" ? "（期待値重視・的中重視それぞれ）" : "")));
+  // AI の推定勝率から Harville 法で計算した的中率（複勝・ワイド・3連複の見積もりと比べる）
+  const hvAi = (() => {
+    const probs = {};
+    for (const h of (info.horses || []).filter((x) => !x.cancel)) {
+      const a = pred[String(parseInt(h.no, 10))];
+      if (!a) return null;
+      probs[String(parseInt(h.no, 10))] = a["勝率"] / 100;
+    }
+    return KS.harville(probs);
+  })();
+  const placeN = (info.horses || []).filter((x) => !x.cancel).length >= 8 ? "top3" : "top2";
+  const calcProbOf = (b) => {
+    if (!hvAi) return null;
+    const key = String(b["組み合わせ"]).split("-").map((n) => String(parseInt(n, 10))).sort((x, y) => +x - +y).join("-");
+    if (b["券種"] === "複勝") return hvAi[placeN][key] ?? null;
+    if (b["券種"] === "ワイド") return hvAi.pair[key] ?? null;
+    if (b["券種"] === "3連複") return hvAi.trio[key] ?? null;
+    return null;
+  };
+
   // 期待値重視（#BET）を出す。的中重視（#HIT）を記録していれば続けて出す（的中重視だけのときは期待値重視を省く）
   if (!(hasHit && rec["買い方"] === "hit")) c.append(betSection("買い目", "オッズ", hasHit ? "期待値重視" : "", `期待値 ${KS.fmtEv(evMin0)} 以上`, evMin0));
   if (hasHit) c.append(betSection("的中買い目", "的中オッズ", "的中重視", `的中率 ${hitMin0}%以上・期待値 ${KS.fmtEv(hitEv0)} 以上`, hitEv0));
@@ -1851,7 +1890,7 @@ function aiCard(venue, race) {
   if (!bets.length) c.append(el("p", "ai-skip", "見送り（条件を満たす買い目なし）"));
   else {
     const list = el("div", "bet-list");
-    let total = 0;
+    let total = 0, kellyTotal = 0, kellyN = 0;
     bets.forEach((b, i) => {
       total += b["金額"];
       const s = settled && settled[i];
@@ -1890,11 +1929,23 @@ function aiCard(venue, race) {
       if (atRec && atRec.low > 0) odds1.append(el("span", "bet-pay", `当たれば ${yen(Math.floor(b["金額"] / 100) * Math.round(atRec.low * 100))}${wide ? "以上" : ""}`));
       row.append(odds1);
       if (now && (!atRec || !(atRec.low > 0) || now.text !== atRec.text)) row.append(line(now, "今 "));
+      // 3行目：AI の推定勝率から計算した的中率（Harville 法）と、ケリー基準の金額の目安
+      const extra = [];
+      const cp = calcProbOf(b);
+      if (cp != null && p != null) {
+        const far = Math.abs(p - cp) > Math.max(0.03, cp * 0.3);
+        extra.push(el("span", far ? "calc-far" : null, `勝率から計算 ${(cp * 100).toFixed(1)}%${far ? "（AI の見積もりと差が大きい）" : ""}`));
+      }
+      const ko = now && now.low > 0 ? now.low : atRec && atRec.low > 0 ? atRec.low : null;
+      const ka = rec["結果"] ? null : kellyAmount(p, ko);
+      if (ka != null) { extra.push(el("span", "kelly", ka > 0 ? `ケリー${kellyLabel()}なら ${yen(ka)}` : `ケリー${kellyLabel()}では買わない`)); kellyTotal += ka; kellyN++; }
+      if (extra.length) { const d = el("div", "bet-extra"); extra.forEach((x, j) => { if (j) d.append(document.createTextNode("　")); d.append(x); }); row.append(d); }
       list.append(row);
     });
     c.append(list);
     const sum = el("p", "bet-total");
     sum.append(document.createTextNode(`合計 ${yen(total)}`));
+    if (kellyN) sum.append(el("span", "note", `ケリー${kellyLabel()}の目安の合計 ${yen(kellyTotal)}（資金 ${yen(kellySettings().bankroll)}。1点ずつの計算なので、何点も買うときは多めに出ます）`));
     // どれかが当たる確率（AI の見積もり）。同じ券種の別の組み合わせ（単勝どうし・三連複どうしなど）は同時に当たらないので足せる。
     // 複勝・ワイドや券種が混ざると同時に当たることがあるので、幅（いちばん高い確率〜足した確率）で出す
     const ps = bets.map((b) => betProbOf(b, pred));
@@ -2284,6 +2335,32 @@ function trendCard(records) {
   c.append(el("p", "note", "買ったレース（AI は買い目のあったレース）だけを発走の順に並べ、収支を足し上げています。30レース未満は偶然の当たり外れで大きく動くので、傾向の判断には使えません"));
   return c;
 }
+// 締切オッズとの比較（CLV）のカード（PC版の format_clv と同じ内容）
+function clvCard(clv) {
+  const c = el("div", "card");
+  c.append(el("h3", null, "締切オッズとの比較（CLV）"));
+  if (clv.n) {
+    const big = el("div", "big-num " + (clv.ratio >= 1 ? "up" : "down"), `${clv.ratio.toFixed(3)}倍`);
+    if (clv.ci) big.append(el("small", null, `95%区間 ${clv.ci[0].toFixed(3)}〜${clv.ci[1].toFixed(3)}`));
+    c.append(big);
+    c.append(el("p", "note", `AI の買い目に入った馬 ${clv.n}頭（${clv.n_races}レース）の、記録時の単勝オッズ ÷ 確定オッズの平均。` +
+      `記録のあとに人気を集めた馬 ${(clv.up * 100).toFixed(0)}%・人気を落とした馬 ${(clv.down * 100).toFixed(0)}%`));
+  }
+  for (const [k, label] of [["hi", "高く"], ["lo", "低く"]]) {
+    const x = clv[k];
+    if (x.n) c.append(el("p", "note", `AI が市場より2ポイント以上${label}見た馬 ${x.n}頭：締切までに市場勝率が平均 ${x.move >= 0 ? "+" : ""}${x.move.toFixed(2)}ポイント`));
+  }
+  if (clv.n) {
+    const v = clv.n_races < 30 || !clv.ci ? "まだ判断できません（30レース未満）"
+      : clv.ci[0] > 1 ? "✓ AI の買った馬は記録のあとに人気を集めています（市場より先に評価できている可能性があります）"
+      : clv.ci[1] < 1 ? "! AI の買った馬は記録のあとに人気を落としています（記録時のオッズで出した期待値は高めに出ています）"
+      : "記録時と締切の差は、このレース数では区別できません";
+    c.append(el("p", "verdict", v));
+  }
+  c.append(el("p", "note", "1倍より大きいほど、記録したときのオッズが締切より有利だったことを示します。回収率より少ないレース数で、予想に腕があるかが見える指標です。結果ページの確定単勝オッズを読めたレース（この版から）で数えます"));
+  return c;
+}
+
 // 内訳の表（競馬場別・月別など）。rows は computeSummary の bet_rows（買い目1点ずつ）
 function breakdownTable(label, rows, keyOf) {
   const groups = new Map();
@@ -2366,6 +2443,9 @@ function renderRecords() {
   }
   body.append(c1);
   }
+
+  // 締切オッズとの比較（CLV）
+  if (sm.clv) body.append(clvCard(sm.clv));
 
   // AI と市場の精度
   const c2 = el("div", "card");
@@ -2556,6 +2636,33 @@ function renderSettings() {
   }
   body.append(card);
 
+  // 賭け金の目安（ケリー基準）：AI の予想欄に、買い目ごとの金額の目安を出す
+  const kc = el("div", "card");
+  kc.append(el("h3", null, "賭け金の目安（ケリー基準）"));
+  const k = kellySettings();
+  kc.append(el("p", "note", "AI の推定的中率とオッズから、資金を長く増やすのに最適な賭け金の割合（ケリー基準）を出し、その一部だけ賭けた金額を AI の予想欄に並べます。推定がずれていると賭けすぎになるので、1/4 以下をおすすめします"));
+  const kf1 = el("div", "field");
+  kf1.append(el("label", null, "ケリーの何分の1を賭けるか"));
+  const kseg = el("div", "seg3 wide");
+  for (const [v, label] of [[0, "なし"], [0.125, "1/8"], [0.25, "1/4"], [0.5, "1/2"]]) {
+    const x = el("button", k.frac === v ? "on" : null, label); x.onclick = () => saveKelly("frac", v); kseg.append(x);
+  }
+  kf1.append(kseg); kc.append(kf1);
+  if (k.frac > 0) {
+    const kf2 = el("div", "field");
+    kf2.append(el("label", null, "資金"), el("p", "hint", "競馬に使ってよいお金の総額。賭け金の目安はこの額に対する割合から出します"));
+    const stepK = k.bankroll >= 100000 ? 10000 : k.bankroll >= 20000 ? 5000 : 1000;
+    kf2.append(stepper(yen(k.bankroll), k.bankroll <= 1000, k.bankroll >= 10000000,
+      () => saveKelly("bankroll", Math.max(1000, k.bankroll - stepK)), () => saveKelly("bankroll", k.bankroll + stepK)));
+    const kp = el("div", "chips-pick");
+    for (const v of [10000, 30000, 50000, 100000, 300000]) {
+      const x = el("button", null, yen(v)); x.setAttribute("aria-pressed", String(k.bankroll === v)); x.onclick = () => saveKelly("bankroll", v); kp.append(x);
+    }
+    kf2.append(kp); kc.append(kf2);
+  }
+  body.append(kc);
+  function saveKelly(key, v) { const cur = store.get(KELLY_KEY, {}); cur[key] = v; store.set(KELLY_KEY, cur); renderSettings(); }
+
   // 指示文のうち条件が入る行
   const pc = el("div", "card");
   pc.append(el("h3", null, "指示文に入る文"));
@@ -2594,6 +2701,26 @@ function renderSettings() {
   body.append(reset);
   body.append(el("p", "note", "既定値は、買い方：両方・予算 1,000円・最大3点・期待値 1.2・的中重視の推定的中率 30%以上・的中重視の期待値 0.9 です（PC版の BET_MODE・BUDGET・MAX_BETS・EV_MIN・HIT_MIN・HIT_EV_MIN と同じ）。指示文の書き換えは戻りません"));
 }
+// ===== 賭け金の目安（ケリー基準） =====
+// 1点だけ買うときの最適な割合 f = (p×o − 1) ÷ (o − 1)（p=的中率、o=オッズ。複勝・ワイドは下限）。
+// その frac 倍を資金に掛け、100円単位に切り捨てる。同時に何点も買うときは本来もっと小さくなるので、合計も並べる
+const KELLY_KEY = "keiba-kelly";
+const KELLY_DEFAULT = { frac: 0.25, bankroll: 30000 };
+function kellySettings() {
+  const k = Object.assign({}, KELLY_DEFAULT, store.get(KELLY_KEY, {}));
+  if (![0, 0.125, 0.25, 0.5].includes(k.frac)) k.frac = KELLY_DEFAULT.frac;
+  if (!(k.bankroll >= 1000)) k.bankroll = KELLY_DEFAULT.bankroll;
+  return k;
+}
+function kellyAmount(p, odds) {
+  const k = kellySettings();
+  if (!(k.frac > 0) || p == null || !(odds > 1)) return null;
+  const f = (p * odds - 1) / (odds - 1);
+  if (f <= 0) return 0;
+  return Math.floor(k.bankroll * k.frac * f / 100) * 100;
+}
+function kellyLabel() { const k = kellySettings(); return { 0.125: "1/8", 0.25: "1/4", 0.5: "1/2" }[k.frac] || ""; }
+
 function stepper(label, minDisabled, maxDisabled, dec, inc) {
   const w = el("div", "stepper");
   const m = el("button", null, "−"); m.disabled = minDisabled; m.onclick = dec; m.setAttribute("aria-label", "減らす");

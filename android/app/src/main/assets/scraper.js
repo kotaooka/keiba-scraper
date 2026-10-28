@@ -50,7 +50,7 @@
 
 ■ 手順
 1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
-2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。
+2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。「当日の傾向」があれば、逃げ・先行の残りやすさや内外の有利不利の参考にする（レース数が少ないときは強く頼らない）。
 3. 各馬の評価：次の観点で、市場評価より上か下かを判断する。
    ・人気と着順：過去走で人気より上の着順に来ているか（人気以上に走る馬か、人気を裏切る馬か）
    ・負け幅：着順より「差」を重視する。頭数が少ないレースの着順は割り引いて見る
@@ -61,7 +61,7 @@
    ・前走間隔：中1週以内や3か月以上は割り引いて考える
    ・騎手：乗り替わりの有無と騎手コンビ成績
    ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
-4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
+4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。複勝・ワイド・三連複の推定的中率は、自分の推定勝率・推定複勝率と矛盾しないように付ける（表の「市場計算」は、市場勝率から同じ考え方で計算した目安）。
 {BET_STEP}
 
 ■ 出力フォーマット（この順で出力）
@@ -1059,9 +1059,23 @@
     return hasOrder && hasPay;
   }
 
-  // 結果ページから着順と払戻を読む（PC版の parse_result）
+  // コーナー通過順位の文字から {馬番: 何番手}（PC版の parse_corner）。かっこの中は同じ番手
+  function parseCorner(text) {
+    const pos = {};
+    let ahead = 0;
+    for (const m of String(text || "").matchAll(/\(([^)]*)\)|(\d+)/g)) {
+      const nums = m[1] !== undefined ? (m[1].match(/\d+/g) || []) : [m[2]];
+      for (const n of nums) pos[String(parseInt(n, 10))] = ahead + 1;
+      ahead += nums.length;
+    }
+    return pos;
+  }
+
+  // 結果ページから着順と払戻を読む（PC版の parse_result）。
+  // 確定単勝は締切オッズとの比較（CLV）に、枠・人気・4角・条件は当日の傾向に使う
   function parseResult(doc) {
     const order = {}, notes = [];
+    const odds = {}, waku = {}, ninki = {};
     const cellTexts = (tr) => [...tr.querySelectorAll("th, td")].map((c) => raw(c).replace(/\s+/g, ""));
     for (const table of doc.querySelectorAll("table")) {
       const rows = [...table.querySelectorAll("tr")];
@@ -1070,12 +1084,20 @@
       const headers = cellTexts(head);
       if (!headers.includes("着順") || !headers.includes("馬番")) continue;
       const iRank = headers.indexOf("着順"), iNo = headers.indexOf("馬番");
+      const col = {};
+      for (const k of ["枠", "単勝オッズ", "人気"]) if (headers.includes(k)) col[k] = headers.indexOf(k);
       for (const tr of rows) {
         const tds = tr.querySelectorAll("td");
         if (tds.length <= Math.max(iRank, iNo)) continue;
         const no = toHalf(raw(tds[iNo])).replace(/\D/g, "");
         const rank = raw(tds[iRank]).replace(/\s+/g, "");
-        if (no) order[String(parseInt(no, 10))] = rank;
+        if (no) {
+          const key = String(parseInt(no, 10));
+          order[key] = rank;
+          if ("枠" in col && tds.length > col["枠"]) { const w = toHalf(raw(tds[col["枠"]])).replace(/\D/g, ""); if (w) waku[key] = w; }
+          if ("単勝オッズ" in col && tds.length > col["単勝オッズ"]) { const m = toHalf(raw(tds[col["単勝オッズ"]])).replace(/,/g, "").match(/\d+(?:\.\d+)?/); if (m) odds[key] = m[0]; }
+          if ("人気" in col && tds.length > col["人気"]) { const n = toHalf(raw(tds[col["人気"]])).replace(/\D/g, ""); if (n) ninki[key] = n; }
+        }
       }
       if (Object.keys(order).length) break;
     }
@@ -1098,7 +1120,25 @@
       const table = payouts[betType] || (payouts[betType] = {});
       combos.forEach((c, i) => { table[comboKey(betType, c)] = pays[i]; });
     }
-    return { "着順": order, "払戻": payouts, "注記": notes };
+    // 4コーナーの通過順（無ければいちばん後ろのコーナー）
+    const corners = [];
+    for (const tr of doc.querySelectorAll("table.Corner_Num tr")) {
+      const th = tr.querySelector("th"), td = tr.querySelector("td");
+      if (th && td) corners.push([raw(th).trim(), raw(td)]);
+    }
+    const c4 = corners.find(([h]) => h.startsWith("4"));
+    const cornerText = c4 ? c4[1] : (corners.length ? corners[corners.length - 1][1] : "");
+    const cond = [];
+    const rd = doc.querySelector(".RaceData01");
+    if (rd) {
+      const t = raw(rd).replace(/\s+/g, " ");
+      const m = t.match(/(芝|ダ|障)\s*(\d{3,4})m/);
+      if (m) cond.push(`${m[1]}${m[2]}m`);
+      const mb = t.match(/馬場[:：]\s*(良|稍重|稍|重|不良|不)/);
+      if (mb) cond.push(COND_MAP[mb[1]] || mb[1]);
+    }
+    return { "着順": order, "払戻": payouts, "注記": notes, "確定単勝": odds, "枠": waku, "人気": ninki,
+      "4角": parseCorner(cornerText), "条件": cond.join(" ") };
   }
 
   // 確定した結果か（1頭でも着順の数字があり、単勝の払戻が読めた）
@@ -1261,7 +1301,7 @@
       n_no_result: records.filter((r) => r["AI"] && !r["結果"]).length,
       bets: null, bet_rows: [], hit_bets: null, hit_bet_rows: [],
       own_bets: null, own_bet_rows: [],
-      brier: null, calib_win: null, calib_place: null,
+      brier: null, calib_win: null, calib_place: null, clv: null,
     };
     // 自分で買った馬券（AI の回答が無いレースも含む）
     const ownRaces = sortRaces(records.filter((r) => r["結果"] && Array.isArray(r["購入"]) && r["購入"].length));
@@ -1275,6 +1315,77 @@
     const hitRaces = races.filter((r) => Array.isArray(r["AI"]["的中買い目"]) || ["hit", "both"].includes(r["買い方"]));
     if (hitRaces.length) [out.hit_bets, out.hit_bet_rows] = betSummary(hitRaces, "的中買い目");
     accuracySummary(races, out);
+    clvSummary(races, out);
+    return out;
+  }
+
+  // AI の買い目（期待値重視・的中重視）に入った馬番（PC版の _bet_horses）
+  function betHorses(record) {
+    const nos = [], ai = record["AI"] || {};
+    for (const key of ["買い目", "的中買い目"]) {
+      for (const b of ai[key] || []) {
+        if (String(b["券種"] || "").startsWith("枠")) continue;
+        for (const m of String(b["組み合わせ"] || "").match(/\d+/g) || []) {
+          const n = String(parseInt(m, 10));
+          if (!nos.includes(n)) nos.push(n);
+        }
+      }
+    }
+    return nos;
+  }
+
+  // 締切オッズとの比較（CLV。PC版の _clv_summary）
+  function clvSummary(races, out) {
+    const perRace = [], hiMoves = [], loMoves = [];
+    const byNum = (a, b) => { const x = /^\d+$/.test(a), y = /^\d+$/.test(b); return x && y ? +a - +b : x ? -1 : y ? 1 : (a < b ? -1 : a > b ? 1 : 0); };
+    for (const r of races) {
+      const close = (r["結果"] || {})["確定単勝"];
+      if (!close || typeof close !== "object" || !Object.keys(close).length || r["予想オッズ"]) continue;
+      const cf = {};
+      for (const [k, v] of Object.entries(close)) {
+        const x = parseFloat(v);
+        if (/^\s*\d+(\.\d+)?\s*$/.test(String(v)) && x > 0) cf[String(k)] = x;
+      }
+      const nums = Object.keys(cf).sort(byNum);
+      if (!nums.length) continue;
+      const tot = sumOf(nums.map((k) => 1 / cf[k]));
+      const closeMp = {};
+      for (const k of nums) closeMp[k] = 1 / cf[k] / tot * 100;
+      const horses = r["馬"] || {};
+      const logs = [];
+      for (const n of betHorses(r)) {
+        const v = (horses[n] || {})["単勝"];
+        const x = parseFloat(v);
+        if (!/^\s*\d+(\.\d+)?\s*$/.test(String(v))) continue;
+        if (x > 0 && n in cf) logs.push(Math.log(x / cf[n]));
+      }
+      if (logs.length) perRace.push(logs);
+      const pred = (r["AI"] || {})["予想"] || {};
+      for (const n of Object.keys(horses).sort(byNum)) {
+        const mp = (horses[n] || {})["市場勝率"];
+        if (mp == null || !(n in closeMp) || !(n in pred)) continue;
+        const d = pred[n]["勝率"] - mp;
+        if (d >= 2) hiMoves.push(closeMp[n] - mp);
+        else if (d <= -2) loMoves.push(closeMp[n] - mp);
+      }
+    }
+    if (!perRace.length && !hiMoves.length && !loMoves.length) return out;
+    const clv = { n_races: perRace.length, n: 0, ratio: null, ci: null, up: null, down: null,
+      hi: { n: hiMoves.length, move: hiMoves.length ? sumOf(hiMoves) / hiMoves.length : null },
+      lo: { n: loMoves.length, move: loMoves.length ? sumOf(loMoves) / loMoves.length : null } };
+    if (perRace.length) {
+      const flat = perRace.flat();
+      clv.n = flat.length;
+      clv.ratio = Math.exp(sumOf(flat) / flat.length);
+      clv.up = flat.filter((x) => x > 0).length / flat.length;
+      clv.down = flat.filter((x) => x < 0).length / flat.length;
+      const [lo, hi] = bootstrapCi((idx) => {
+        const c = idx.reduce((t, i) => t + perRace[i].length, 0);
+        return c ? sumOf(idx.map((i) => sumOf(perRace[i]))) / c : null;
+      }, perRace.length);
+      clv.ci = lo !== null ? [Math.exp(lo), Math.exp(hi)] : null;
+    }
+    out.clv = clv;
     return out;
   }
 
@@ -1445,7 +1556,82 @@
     return lines;
   }
 
-  function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt, settings) {
+  // 各馬の勝率から Harville 法で、2着内・3着内・ワイド（2頭が3着内）・三連複（3頭が3着内）の確率（PC版の harville）
+  function harville(probs) {
+    const keys = Object.keys(probs).filter((k) => probs[k] != null && probs[k] > 0);
+    const tot = sumOf(keys.map((k) => probs[k]));
+    if (keys.length < 3 || tot <= 0) return null;
+    const p = {};
+    for (const k of keys) p[k] = probs[k] / tot;
+    const top2 = {}, top3 = {}, pair = {}, trio = {};
+    for (const k of keys) { top2[k] = 0; top3[k] = 0; }
+    const ck = (...ns) => ns.slice().sort((a, b) => +a - +b).join("-");
+    for (const i of keys) {
+      if (1 - p[i] <= 0) continue;
+      for (const j of keys) {
+        if (j === i) continue;
+        const pij = p[i] * p[j] / (1 - p[i]);
+        top2[i] += pij; top2[j] += pij;
+        const rest = 1 - p[i] - p[j];
+        if (rest <= 0) continue;
+        for (const k of keys) {
+          if (k === i || k === j) continue;
+          const q = pij * p[k] / rest;
+          top3[i] += q; top3[j] += q; top3[k] += q;
+          for (const [a, b] of [[i, j], [i, k], [j, k]]) { const key = ck(a, b); pair[key] = (pair[key] || 0) + q; }
+          const key3 = ck(i, j, k); trio[key3] = (trio[key3] || 0) + q;
+        }
+      }
+    }
+    return { top2, top3, pair, trio };
+  }
+  // 出馬表の市場勝率から Harville 法の確率（市場勝率が欠けた馬がいれば null）。馬番の順に並べて計算する（PC版と同じ）
+  function marketHarville(horses) {
+    const running = horses.filter((h) => !h["取消"]);
+    if (!running.length || running.some((h) => h["市場勝率"] == null)) return null;
+    // オブジェクトのキーは数字の順に並ぶので、Map ではなく配列の順で渡す
+    const probs = {};
+    for (const h of running) probs[String(parseInt(h["馬番"], 10))] = h["市場勝率"] / 100;
+    return harville(probs);
+  }
+  function oddsLow(text) {
+    const m = String(text == null ? "" : text).replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+    return m ? parseFloat(m[0]) : null;
+  }
+  // 同じ日・同じ競馬場の確定済みレース（[{"レース番号", "結果"}]）から【当日の傾向】の行（PC版の day_trend_lines）
+  function dayTrendLines(dayResults) {
+    const rows = (dayResults || []).filter((x) => x && x["結果"]).slice().sort((a, b) => a["レース番号"] - b["レース番号"]);
+    if (!rows.length) return [];
+    const lines = ["", `【当日の傾向（同じ競馬場のこの日の確定済み ${rows.length}レース：${rows.map((x) => x["レース番号"]).join("・")}R）】`,
+      "凡例: 3着までの馬（4角=4コーナーを何番手で回ったか）。逃げ・先行の残りやすさや内外の有利不利の参考に"];
+    let nTop = 0, front = 0, mid = 0, back = 0, unknown = 0, inner = 0;
+    const fav = [0, 0, 0, 0];
+    for (const x of rows) {
+      const res = x["結果"], order = res["着順"] || {}, corner = res["4角"] || {}, ninki = res["人気"] || {};
+      const heads = Object.values(order).filter((v) => v !== "取消" && v !== "除外").length;
+      const top = Object.entries(order).filter(([, v]) => /^\d+$/.test(v) && +v <= 3).map(([k, v]) => [+v, k])
+        .sort((a, b) => a[0] - b[0] || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+      const parts = [];
+      for (const [rank, no] of top) {
+        const c = corner[no], nk = ninki[no];
+        parts.push(`${rank}着 ${no}番(4角${c ? c + "番手" : "-"}・${nk ? nk + "人気" : "人気-"})`);
+        nTop++;
+        if (!c) unknown++; else if (c <= 3) front++; else if (c <= 6) mid++; else back++;
+        if (/^\d+$/.test(no) && +no * 2 <= heads) inner++;
+      }
+      const favNo = Object.keys(ninki).find((k) => ninki[k] === "1");
+      if (favNo && /^\d+$/.test(String(order[favNo] || ""))) fav[Math.min(+order[favNo], 4) - 1]++;
+      lines.push(`  ${String(x["レース番号"]).padStart(2)}R ${pad(res["条件"] || "", 12)} ${String(heads).padStart(2)}頭  ` + parts.join("  "));
+    }
+    if (nTop) {
+      lines.push(`  まとめ: 3着内 ${nTop}頭のうち 4角3番手以内 ${front}頭（${pyFixed(front / nTop * 100, 0)}%）・4〜6番手 ${mid}頭・7番手以下 ${back}頭` +
+        (unknown ? `・4角不明 ${unknown}頭` : "") +
+        `／馬番が内側の半分 ${inner}頭（${pyFixed(inner / nTop * 100, 0)}%）／1番人気 ${fav[0]}-${fav[1]}-${fav[2]}-${fav[3]}`);
+    }
+    return lines;
+  }
+
+  function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt, settings, dayResults) {
     ri = ri || {};
     const d = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6)}`;
     let title = `${d} ${keibajo} ${raceNo}R`;
@@ -1529,21 +1715,40 @@
     const st = speedTable(horses, keibajo, ri);
     if (st) lines.push(...formatSpeed(st));
 
+    lines.push(...dayTrendLines(dayResults));
+
+    // 市場勝率から Harville 法で計算した複勝・ワイド・三連複の的中率（AI の推定的中率の目安）
+    const hv = marketHarville(horses);
     const running = horses.filter((h) => !h["取消"]);
+    const placeKey = running.length >= 8 ? "top3" : "top2";
     if (running.length && running.every((h) => ["", "--", null, undefined].includes(h["複勝"]))) {
       lines.push("", "【複勝】オッズを取得できず（発売前か、取得に失敗）。複勝は選ばないこと");
+    } else if (hv) {
+      lines.push("", `【複勝（市場計算）】${placeKey === "top3" ? "3" : "2"}着内に入る確率を市場勝率から計算した値と、参考期待値（複勝オッズの下限×計算値）`);
+      for (const h of running) {
+        const low = oddsLow(h["複勝"]);
+        const pp = hv[placeKey][String(parseInt(h["馬番"], 10))];
+        if (low == null || pp == null) continue;
+        lines.push(`  ${pad(h["馬番"], 2, ">")}番  複勝 ${pad(h["複勝"] || "", 11, ">")}  市場計算 ${pyFixed(pp * 100, 1).padStart(4)}%  参考期待値 ${pyFixed(low * pp, 2)}`);
+      }
     }
 
-    for (const [label, combos] of [["ワイド", wideTop], ["三連複", sanrenTop]]) {
+    for (const [label, combos, kind] of [["ワイド", wideTop, "pair"], ["三連複", sanrenTop, "trio"]]) {
       if (combos && combos.length) {
-        lines.push("", `【${label} 人気上位】`);
+        lines.push("", `【${label} 人気上位】` + (hv ? "（市場計算=市場勝率から計算した的中率、参考期待値=オッズの下限×市場計算）" : ""));
         combos.slice(0, 10).forEach((c, i) => {
-          lines.push(`  ${String(i + 1).padStart(2)}位  ${pad(c["組み合わせ"], 8)}  ${c["オッズ"]}倍`);
+          let line = `  ${String(i + 1).padStart(2)}位  ${pad(c["組み合わせ"], 8)}  ${c["オッズ"]}倍`;
+          const nums = String(c["組み合わせ"]).match(/\d+/g) || [];
+          const pp = hv ? hv[kind][nums.map((n) => String(parseInt(n, 10))).sort((a, b) => +a - +b).join("-")] : undefined;
+          const low = oddsLow(c["オッズ"]);
+          if (pp != null && low != null) line += `  市場計算 ${pyFixed(pp * 100, 1).padStart(4)}%  参考期待値 ${pyFixed(low * pp, 2)}`;
+          lines.push(line);
         });
       } else {
         lines.push("", `【${label} 人気上位】取得できず（発売前か、取得に失敗）。${label}は選ばないこと`);
       }
     }
+    if (hv) lines.push("※市場計算は Harville 法（勝率どおりに1着が決まり、2・3着も残りの馬の勝率の比で決まるとみなす計算）の値。人気馬の2・3着をやや多めに、人気薄をやや少なめに見積もる傾向がある");
 
     const notes = oddsNotes(horses);
     if (notes.length) lines.push("", "【オッズの注記】", ...notes.map((n) => `・${n}`));
@@ -1576,7 +1781,7 @@
     if (parts.sanren_note) warnings.push(parts.sanren_note);
     for (const n of parts.notes || []) warnings.push(n);
     return formatForAi(horses, parts.keibajo, parts.race_date, parts.race_no, parts.shutuba.race_info,
-      parts.wide, parts.sanren, warnings, payoutRate, parts.collected_at || nowStamp(), parts.settings);
+      parts.wide, parts.sanren, warnings, payoutRate, parts.collected_at || nowStamp(), parts.settings, parts.day_results);
   }
 
   // build と同じテキストに、画面の要約に使う情報を添えて返す（アプリの結果画面用）
@@ -1636,7 +1841,7 @@
     NETKEIBA, KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, BET_MODES, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
     parsePatCalendar, parsePatRange,
     oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
-    parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
+    parseAiBlock, raceIdOf, newRecord, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList, nextRaceIndex,
     parseShutuba, parseRaceInfo, parseKyakuType,

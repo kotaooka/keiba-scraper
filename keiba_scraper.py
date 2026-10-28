@@ -101,7 +101,7 @@ PROMPT_TEXT = """
 
 ■ 手順
 1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
-2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。
+2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。「当日の傾向」があれば、逃げ・先行の残りやすさや内外の有利不利の参考にする（レース数が少ないときは強く頼らない）。
 3. 各馬の評価：次の観点で、市場評価より上か下かを判断する。
    ・人気と着順：過去走で人気より上の着順に来ているか（人気以上に走る馬か、人気を裏切る馬か）
    ・負け幅：着順より「差」を重視する。頭数が少ないレースの着順は割り引いて見る
@@ -112,7 +112,7 @@ PROMPT_TEXT = """
    ・前走間隔：中1週以内や3か月以上は割り引いて考える
    ・騎手：乗り替わりの有無と騎手コンビ成績
    ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
-4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。
+4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。複勝・ワイド・三連複の推定的中率は、自分の推定勝率・推定複勝率と矛盾しないように付ける（表の「市場計算」は、市場勝率から同じ考え方で計算した目安）。
 {BET_STEP}
 
 ■ 出力フォーマット（この順で出力）
@@ -1242,8 +1242,107 @@ def format_speed(st):
     return lines
 
 
+def harville(probs):
+    """各馬の勝率（{馬番: 確率}。合計1でなくてよい）から Harville 法で
+    3着内・2着内に入る確率と、2頭がそろって3着内（ワイド）・3頭が3着内（三連複）の確率を返す。
+    1着が勝率どおりに決まり、2着・3着は残った馬の勝率を合計1にそろえ直して決まるとみなす。
+    返り値: {"top2": {馬番: p}, "top3": {馬番: p}, "pair": {"3-8": p}, "trio": {"1-3-8": p}}（3頭未満は None）"""
+    keys = [k for k, v in probs.items() if v is not None and v > 0]
+    tot = _sum(probs[k] for k in keys)
+    if len(keys) < 3 or tot <= 0:
+        return None
+    p = {k: probs[k] / tot for k in keys}
+    top2 = {k: 0.0 for k in keys}
+    top3 = {k: 0.0 for k in keys}
+    pair, trio = {}, {}
+
+    def ck(*ns):
+        return "-".join(sorted(ns, key=int))
+    for i in keys:
+        if 1 - p[i] <= 0:
+            continue
+        for j in keys:
+            if j == i:
+                continue
+            pij = p[i] * p[j] / (1 - p[i])
+            top2[i] += pij
+            top2[j] += pij
+            rest = 1 - p[i] - p[j]
+            if rest <= 0:
+                continue
+            for k in keys:
+                if k == i or k == j:
+                    continue
+                q = pij * p[k] / rest
+                top3[i] += q
+                top3[j] += q
+                top3[k] += q
+                for a, b in ((i, j), (i, k), (j, k)):
+                    key = ck(a, b)
+                    pair[key] = pair.get(key, 0.0) + q
+                key = ck(i, j, k)
+                trio[key] = trio.get(key, 0.0) + q
+    return {"top2": top2, "top3": top3, "pair": pair, "trio": trio}
+
+
+def market_harville(horses):
+    """出馬表の市場勝率から Harville 法の確率を出す（市場勝率が欠けた馬がいれば None）"""
+    running = [h for h in horses if not h.get("取消")]
+    if not running or any(h.get("市場勝率") is None for h in running):
+        return None
+    return harville({str(int(h["馬番"])): h["市場勝率"] / 100 for h in running})
+
+
+def _odds_low(text):
+    """オッズの文字（"4.5" や "4.5 - 5.1"）の下限"""
+    m = re.search(r"\d+(?:\.\d+)?", str(text or "").replace(",", ""))
+    return float(m.group(0)) if m else None
+
+
+def day_trend_lines(day_results):
+    """同じ日・同じ競馬場の確定済みレース（[{"レース番号": n, "結果": 結果}]）から【当日の傾向】の行を作る"""
+    rows = sorted((x for x in day_results or [] if x.get("結果")), key=lambda x: x["レース番号"])
+    if not rows:
+        return []
+    lines = ["", f"【当日の傾向（同じ競馬場のこの日の確定済み {len(rows)}レース：{'・'.join(str(x['レース番号']) for x in rows)}R）】",
+             "凡例: 3着までの馬（4角=4コーナーを何番手で回ったか）。逃げ・先行の残りやすさや内外の有利不利の参考に"]
+    n_top = front = mid = back = unknown = inner = 0
+    fav = [0, 0, 0, 0]
+    for x in rows:
+        res = x["結果"]
+        order = res.get("着順") or {}
+        corner = res.get("4角") or {}
+        ninki = res.get("人気") or {}
+        heads = sum(1 for v in order.values() if v not in ("取消", "除外"))
+        top = sorted((int(v), k) for k, v in order.items() if v.isdigit() and int(v) <= 3)
+        parts = []
+        for rank, no in top:
+            c, nk = corner.get(no), ninki.get(no)
+            parts.append(f"{rank}着 {no}番(4角{str(c) + '番手' if c else '-'}・{nk + '人気' if nk else '人気-'})")
+            n_top += 1
+            if not c:
+                unknown += 1
+            elif c <= 3:
+                front += 1
+            elif c <= 6:
+                mid += 1
+            else:
+                back += 1
+            if no.isdigit() and int(no) * 2 <= heads:
+                inner += 1
+        fav_no = next((k for k, v in ninki.items() if v == "1"), None)
+        if fav_no and str(order.get(fav_no, "")).isdigit():
+            fav[min(int(order[fav_no]), 4) - 1] += 1
+        lines.append(f"  {x['レース番号']:2d}R {pad(res.get('条件') or '', 12)} {heads:2d}頭  " + "  ".join(parts))
+    if n_top:
+        lines.append(f"  まとめ: 3着内 {n_top}頭のうち 4角3番手以内 {front}頭（{front / n_top * 100:.0f}%）・4〜6番手 {mid}頭・7番手以下 {back}頭"
+                     + (f"・4角不明 {unknown}頭" if unknown else "")
+                     + f"／馬番が内側の半分 {inner}頭（{inner / n_top * 100:.0f}%）／1番人気 {fav[0]}-{fav[1]}-{fav[2]}-{fav[3]}")
+    return lines
+
+
 def format_for_ai(horses, keibajo, date, race_no, race_info=None,
-                  wide_top=None, sanren_top=None, warnings=None, payout_rate=None):
+                  wide_top=None, sanren_top=None, warnings=None, payout_rate=None, day_results=None):
     d = f"{date[:4]}/{date[4:6]}/{date[6:]}"
     ri = race_info or {}
     title = f"{d} {keibajo} {race_no}R"
@@ -1332,17 +1431,39 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
     if st:
         lines += format_speed(st)
 
+    lines += day_trend_lines(day_results)
+
+    # 市場勝率から Harville 法で計算した複勝・ワイド・三連複の的中率（AI の推定的中率の目安）
+    hv = market_harville(horses)
     running = [h for h in horses if not h.get("取消")]
+    place_key = "top3" if len(running) >= 8 else "top2"
     if running and all(h.get("複勝") in ("", "--", None) for h in running):
         lines += ["", "【複勝】オッズを取得できず（発売前か、取得に失敗）。複勝は選ばないこと"]
+    elif hv:
+        lines += ["", f"【複勝（市場計算）】{'3' if place_key == 'top3' else '2'}着内に入る確率を市場勝率から計算した値と、参考期待値（複勝オッズの下限×計算値）"]
+        for h in running:
+            low = _odds_low(h.get("複勝"))
+            pp = hv[place_key].get(str(int(h["馬番"])))
+            if low is None or pp is None:
+                continue
+            lines.append(f"  {pad(h['馬番'], 2, '>')}番  複勝 {pad(h.get('複勝', ''), 11, '>')}  市場計算 {pp * 100:4.1f}%  参考期待値 {low * pp:.2f}")
 
-    for label, combos in (("ワイド", wide_top), ("三連複", sanren_top)):
+    for label, combos, kind in (("ワイド", wide_top, "pair"), ("三連複", sanren_top, "trio")):
         if combos:
-            lines += ["", f"【{label} 人気上位】"]
+            lines += ["", f"【{label} 人気上位】" + ("（市場計算=市場勝率から計算した的中率、参考期待値=オッズの下限×市場計算）" if hv else "")]
             for i, c in enumerate(combos[:10], 1):
-                lines.append(f"  {i:2d}位  {pad(c['組み合わせ'], 8)}  {c['オッズ']}倍")
+                line = f"  {i:2d}位  {pad(c['組み合わせ'], 8)}  {c['オッズ']}倍"
+                nums = re.findall(r"\d+", str(c["組み合わせ"]))
+                pp = hv[kind].get("-".join(sorted((str(int(n)) for n in nums), key=int))) if hv else None
+                low = _odds_low(c["オッズ"])
+                if pp is not None and low is not None:
+                    line += f"  市場計算 {pp * 100:4.1f}%  参考期待値 {low * pp:.2f}"
+                lines.append(line)
         else:
             lines += ["", f"【{label} 人気上位】取得できず（発売前か、取得に失敗）。{label}は選ばないこと"]
+    if hv:
+        lines += ["※市場計算は Harville 法（勝率どおりに1着が決まり、2・3着も残りの馬の勝率の比で決まるとみなす計算）の値。"
+                  "人気馬の2・3着をやや多めに、人気薄をやや少なめに見積もる傾向がある"]
 
     notes = odds_notes(horses)
     if notes:
@@ -1357,6 +1478,41 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
 
 # ========== 1レース分の収集 ==========
 
+DAY_RESULTS_MAX = 6  # 当日の傾向に使う、このレースより前のレース数（新しい順）
+
+
+def scrape_day_results(page, code, race_date, race_no):
+    """同じ日・同じ競馬場で、このレースより前の確定済みレースの結果を読む（新しい順に最大 DAY_RESULTS_MAX レース）。
+    確定した結果は output/results/ に置いて使い回す。未来の日付は読まない。
+    まだ確定していないレースが2つ続いたら、それより前も走っていないとみなしてやめる"""
+    if race_date > datetime.now().strftime("%Y%m%d"):
+        return []
+    cache = OUTPUT_DIR / "results"
+    out, misses = [], 0
+    for n in range(race_no - 1, max(0, race_no - 1 - DAY_RESULTS_MAX), -1):
+        rid = f"{race_date[:4]}{code}{race_date[4:8]}{n:02d}"
+        f = cache / f"{rid}.json"
+        res = None
+        if f.exists():
+            try:
+                res = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                res = None
+        if res is None:
+            res = scrape_result(page, rid)
+            if res:
+                cache.mkdir(parents=True, exist_ok=True)
+                f.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+        if res:
+            out.append({"レース番号": n, "結果": res})
+            misses = 0
+        else:
+            misses += 1
+            if misses >= 2:
+                break
+    return sorted(out, key=lambda x: x["レース番号"])
+
+
 def collect_race(page, keibajo_name, race_date, race_no):
     code = KEIBA_CODES.get(keibajo_name)
     if not code:
@@ -1368,6 +1524,11 @@ def collect_race(page, keibajo_name, race_date, race_no):
 
     print(f"\n収集対象: {keibajo_name} {race_date[:4]}/{race_date[4:6]}/{race_date[6:]} {race_no}R"
           f"（race_id: {race_id}）")
+
+    # 当日の傾向に使う、この日の前のレースの結果（オッズをなるべく新しくするため、オッズより先に読む）
+    print("\n[当日の結果]")
+    day_results = scrape_day_results(page, code, race_date, race_no)
+    print(f"  確定済み {len(day_results)}レース")
 
     print("\n[出馬表]")
     horses, soup = scrape_shutuba(page, url_shutuba)
@@ -1407,7 +1568,7 @@ def collect_race(page, keibajo_name, race_date, race_no):
     if sanren_note:
         warnings.append(sanren_note)
     text = format_for_ai(merged, keibajo_name, race_date, race_no, race_info,
-                         wide_top, sanren_top, warnings, payout_rate)
+                         wide_top, sanren_top, warnings, payout_rate, day_results)
 
     print("\n" + "=" * 70)
     print(text)
@@ -1727,11 +1888,26 @@ def _cell_texts(tr):
     return [re.sub(r"\s+", "", c.get_text()) for c in tr.find_all(["th", "td"])]
 
 
+def parse_corner(text):
+    """コーナー通過順位の文字（"(4,12),(3,11),6,1-(8,10),2,9,7=5"）から {馬番: 何番手} を作る。
+    かっこの中は並んで通過した馬（同じ番手）。「,」「-」「=」は前の馬との差の大きさなので番手には使わない"""
+    pos, ahead = {}, 0
+    for grp, one in re.findall(r"\(([^)]*)\)|(\d+)", text):
+        nums = re.findall(r"\d+", grp) if grp else [one]
+        for n in nums:
+            pos[str(int(n))] = ahead + 1
+        ahead += len(nums)
+    return pos
+
+
 def parse_result(html):
     """結果ページから着順と払戻を読む。
-    返り値: {"着順": {馬番: "1" / "取消" など}, "払戻": {券種: {組み合わせ: 円(100円あたり)}}, "注記": [...]}"""
+    返り値: {"着順": {馬番: "1" / "取消" など}, "払戻": {券種: {組み合わせ: 円(100円あたり)}}, "注記": [...],
+             "確定単勝": {馬番: "1.4"}, "枠": {馬番: "8"}, "人気": {馬番: "1"}, "4角": {馬番: 番手}, "条件": "ダ1500m 稍重"}
+    確定単勝は締切オッズとの比較（CLV）に、枠・人気・4角・条件は当日の傾向に使う"""
     soup = BeautifulSoup(html, "html.parser")
     order, notes = {}, []
+    odds, waku, ninki = {}, {}, {}
 
     # 着順表: 見出し行に「着順」と「馬番」がある表
     for table in soup.find_all("table"):
@@ -1743,6 +1919,7 @@ def parse_result(html):
         if "着順" not in headers or "馬番" not in headers:
             continue
         i_rank, i_no = headers.index("着順"), headers.index("馬番")
+        col = {k: headers.index(k) for k in ("枠", "単勝オッズ", "人気") if k in headers}
         for tr in rows:
             tds = tr.find_all("td")
             if len(tds) <= max(i_rank, i_no):
@@ -1750,7 +1927,14 @@ def parse_result(html):
             no = re.sub(r"\D", "", tds[i_no].get_text())
             rank = re.sub(r"\s+", "", tds[i_rank].get_text())
             if no:
-                order[str(int(no))] = rank
+                key = str(int(no))
+                order[key] = rank
+                if "枠" in col and len(tds) > col["枠"] and (w := re.sub(r"\D", "", tds[col["枠"]].get_text())):
+                    waku[key] = w
+                if "単勝オッズ" in col and len(tds) > col["単勝オッズ"] and (m := re.search(r"\d+(?:\.\d+)?", tds[col["単勝オッズ"]].get_text().replace(",", ""))):
+                    odds[key] = m.group(0)
+                if "人気" in col and len(tds) > col["人気"] and (n := re.sub(r"\D", "", tds[col["人気"]].get_text())):
+                    ninki[key] = n
         if order:
             break
 
@@ -1775,7 +1959,25 @@ def parse_result(html):
         table = payouts.setdefault(bet_type, {})
         for c, pay in zip(combos, pays):
             table[combo_key(bet_type, c)] = pay
-    return {"着順": order, "払戻": payouts, "注記": notes}
+
+    # 4コーナーの通過順（無ければいちばん後ろのコーナー）
+    corners = []
+    for tr in soup.select("table.Corner_Num tr"):
+        th, td = tr.find("th"), tr.find("td")
+        if th and td:
+            corners.append((th.get_text(strip=True), td.get_text()))
+    corner_text = next((t for h, t in corners if h.startswith("4")), corners[-1][1] if corners else "")
+    # レースの条件（距離・馬場）
+    cond = []
+    rd = soup.select_one(".RaceData01")
+    if rd:
+        t = rd.get_text(" ", strip=True)
+        if m := re.search(r"(芝|ダ|障)\s*(\d{3,4})m", t):
+            cond.append(f"{m.group(1)}{m.group(2)}m")
+        if m := re.search(r"馬場[:：]\s*(良|稍重|稍|重|不良|不)", t):
+            cond.append(COND_MAP.get(m.group(1), m.group(1)))
+    return {"着順": order, "払戻": payouts, "注記": notes, "確定単勝": odds, "枠": waku, "人気": ninki,
+            "4角": parse_corner(corner_text), "条件": " ".join(cond)}
 
 
 def scrape_result(page, race_id):
@@ -1887,7 +2089,7 @@ def compute_summary(records):
         "n_no_result": sum(1 for r in records if r.get("AI") and not r.get("結果")),
         "bets": None, "bet_rows": [], "hit_bets": None, "hit_bet_rows": [],
         "own_bets": None, "own_bet_rows": [],
-        "brier": None, "calib_win": None, "calib_place": None,
+        "brier": None, "calib_win": None, "calib_place": None, "clv": None,
     }
     # 自分で買った馬券（AI の回答が無いレースも含む）
     own_races = sorted((r for r in records if r.get("結果") and isinstance(r.get("購入"), list) and r["購入"]), key=_race_order)
@@ -1906,7 +2108,112 @@ def compute_summary(records):
         out["hit_bets"], out["hit_bet_rows"] = _bet_summary(hit_races, "的中買い目")
 
     _accuracy_summary(races, out)
+    _clv_summary(races, out)
     return out
+
+
+def _bet_horses(record):
+    """AI の買い目（期待値重視・的中重視）に入った馬番（枠連・枠単は馬番でないので除く）"""
+    nos = []
+    ai = record.get("AI") or {}
+    for key in ("買い目", "的中買い目"):
+        for b in ai.get(key) or []:
+            if str(b.get("券種", "")).startswith("枠"):
+                continue
+            for n in re.findall(r"\d+", str(b.get("組み合わせ", ""))):
+                n = str(int(n))
+                if n not in nos:
+                    nos.append(n)
+    return nos
+
+
+def _clv_summary(races, out):
+    """締切オッズとの比較（CLV）。結果ページの確定単勝オッズがあるレースだけで数える。
+    - AI の買い目に入った馬の、記録時の単勝オッズ ÷ 確定単勝オッズ（1より大きいほど、記録したあとに人気を集めた）
+    - AI が市場より2ポイント以上高く（低く）見た馬の、記録時から締切までの市場勝率の動き
+    単勝が発売前の予想オッズだったレースは、記録時のオッズが本物でないので除く"""
+    per_race, hi_moves, lo_moves = [], [], []
+    for r in races:
+        close = (r.get("結果") or {}).get("確定単勝")
+        if not isinstance(close, dict) or not close or r.get("予想オッズ"):
+            continue
+        cf = {}
+        for k, v in close.items():
+            try:
+                x = float(v)
+            except (TypeError, ValueError):
+                continue
+            if x > 0:
+                cf[str(k)] = x
+        if not cf:
+            continue
+        nums = sorted(cf, key=int)
+        tot = _sum(1 / cf[k] for k in nums)
+        close_mp = {k: 1 / cf[k] / tot * 100 for k in nums}
+        horses = r.get("馬") or {}
+        logs = []
+        for n in _bet_horses(r):
+            try:
+                x = float((horses.get(n) or {}).get("単勝", ""))
+            except (TypeError, ValueError):
+                continue
+            if x > 0 and n in cf:
+                logs.append(math.log(x / cf[n]))
+        if logs:
+            per_race.append(logs)
+        pred = (r.get("AI") or {}).get("予想") or {}
+        for n in sorted(horses, key=lambda k: (0, int(k)) if str(k).isdigit() else (1, str(k))):
+            mp = (horses.get(n) or {}).get("市場勝率")
+            if mp is None or n not in close_mp or n not in pred:
+                continue
+            d = pred[n]["勝率"] - mp
+            if d >= 2:
+                hi_moves.append(close_mp[n] - mp)
+            elif d <= -2:
+                lo_moves.append(close_mp[n] - mp)
+    if not per_race and not hi_moves and not lo_moves:
+        return out
+    clv = {"n_races": len(per_race), "n": 0, "ratio": None, "ci": None, "up": None, "down": None,
+           "hi": {"n": len(hi_moves), "move": _sum(hi_moves) / len(hi_moves) if hi_moves else None},
+           "lo": {"n": len(lo_moves), "move": _sum(lo_moves) / len(lo_moves) if lo_moves else None}}
+    if per_race:
+        flat = [x for xs in per_race for x in xs]
+        clv["n"] = len(flat)
+        clv["ratio"] = math.exp(_sum(flat) / len(flat))
+        clv["up"] = sum(1 for x in flat if x > 0) / len(flat)
+        clv["down"] = sum(1 for x in flat if x < 0) / len(flat)
+        lo, hi = bootstrap_ci(
+            lambda idx: (_sum(_sum(per_race[i]) for i in idx) / c if (c := sum(len(per_race[i]) for i in idx)) else None),
+            len(per_race))
+        clv["ci"] = [math.exp(lo), math.exp(hi)] if lo is not None else None
+    out["clv"] = clv
+    return out
+
+
+def format_clv(clv):
+    """締切オッズとの比較（CLV）の行"""
+    lines = ["", "【締切オッズとの比較（CLV）】（結果ページの確定単勝オッズを読めたレース）"]
+    if clv["n"]:
+        ci = clv["ci"]
+        lines.append(f"  AI の買い目に入った馬 {clv['n']}頭（{clv['n_races']}レース）: 記録時の単勝オッズ ÷ 確定オッズ ＝ 平均 {clv['ratio']:.3f}倍"
+                     + (f"（95%区間 {ci[0]:.3f}〜{ci[1]:.3f}）" if ci else ""))
+        lines.append(f"  記録のあとに人気を集めた（オッズが下がった）馬 {clv['up'] * 100:.0f}%・人気を落とした馬 {clv['down'] * 100:.0f}%")
+    for key, label in (("hi", "高く"), ("lo", "低く")):
+        x = clv[key]
+        if x["n"]:
+            lines.append(f"  AI が市場より2ポイント以上{label}見た馬 {x['n']}頭: 締切までに市場勝率が平均 {x['move']:+.2f}ポイント")
+    if clv["n"]:
+        ci = clv["ci"]
+        if clv["n_races"] < 30 or not ci:
+            lines.append("  → まだ判断できない（30レース未満）")
+        elif ci[0] > 1:
+            lines.append("  → AI の買った馬は記録のあとに人気を集めている（市場より先に評価できている可能性がある）")
+        elif ci[1] < 1:
+            lines.append("  → AI の買った馬は記録のあとに人気を落としている（記録時のオッズで出した期待値は高めに出ている）")
+        else:
+            lines.append("  → 記録時と締切の差は、このレース数では区別できない")
+        lines.append("  ※1倍より大きいほど、記録したときのオッズが締切より有利だった。回収率より少ないレース数で腕の有無が見える指標")
+    return lines
 
 
 def _bet_summary(races, key):
@@ -1998,6 +2305,9 @@ def format_summary(sm):
             lines.append(f"  的中したレース {b['hit_races']}/{b['bought']}件（{b['hit_races'] / b['bought'] * 100:.0f}%）")
             for k, n, hit, a, r in b["by_type"]:
                 lines.append(f"  {pad(k, 6)} {n:3d}点 的中{hit:3d}点　購入 {a:,}円 → {r:,}円（{r / a * 100:.0f}%）")
+
+    if sm.get("clv"):
+        lines += format_clv(sm["clv"])
 
     lines += ["", "【推定勝率の精度（ブライアスコア、小さいほど良い）】"]
     br = sm["brier"]

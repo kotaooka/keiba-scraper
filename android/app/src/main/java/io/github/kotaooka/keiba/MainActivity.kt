@@ -312,7 +312,7 @@ class MainActivity : Activity() {
         }
 
         @JavascriptInterface
-        fun collect(keibajo: String, date: String, raceNo: Int) = runOnUiThread {
+        fun collect(keibajo: String, date: String, raceNo: Int, prevStarted: Int) = runOnUiThread {
             val prev = job
             prev?.cancel()
             jobKind = "collect"
@@ -327,7 +327,7 @@ class MainActivity : Activity() {
                 }
                 setBusy(true)
                 try {
-                    val out = scraper.collectRace(keibajo, date, raceNo)
+                    val out = scraper.collectRace(keibajo, date, raceNo, prevStarted)
                     if (out.json != null) {
                         // コピーは UI 側で行う（指示文を今の予想の条件で書き直してから写すため）
                         js("App.onResult(${out.json})")
