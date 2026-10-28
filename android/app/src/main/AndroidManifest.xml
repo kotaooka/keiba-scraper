@@ -31,6 +31,13 @@
             </intent-filter>
         </activity>
 
+        <!-- 地方競馬ライブの映像をアプリ内で見る画面。回してもページを読み直さない -->
+        <activity
+            android:name=".LiveActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode"
+            android:exported="false"
+            android:theme="@style/LiveTheme" />
+
         <receiver android:name=".AlarmReceiver" android:exported="false" />
         <receiver android:name=".ShareChosenReceiver" android:exported="false" />
         <receiver android:name=".BootReceiver" android:exported="true">

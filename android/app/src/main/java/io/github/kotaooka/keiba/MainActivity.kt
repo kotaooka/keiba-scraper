@@ -548,6 +548,10 @@ class MainActivity : Activity() {
             }
         }
 
+        /** 地方競馬ライブの映像をアプリ内で開く（track は映像専用版の競馬場名。空なら競馬場の一覧） */
+        @JavascriptInterface
+        fun openLive(track: String) = runOnUiThread { LiveActivity.start(this@MainActivity, track) }
+
         @JavascriptInterface
         fun setDebug(on: Boolean) = runOnUiThread {
             debug = on

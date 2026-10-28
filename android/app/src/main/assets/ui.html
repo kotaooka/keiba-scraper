@@ -527,7 +527,7 @@ function setThemePref(t) {
 const Native = window.Android || {
   // ブラウザで開いたとき用のダミー（画面の確認用）
   loadRaceList() {}, collect() {}, cancel() {}, copy() {}, share() {}, setDebug() {},
-  setBarsDark() {}, checkUpdate() {}, installUpdate() {}, openUrl() {},
+  setBarsDark() {}, checkUpdate() {}, installUpdate() {}, openUrl() {}, openLive() {},
   appInfo() { return JSON.stringify({ versionCode: 1005, versionName: "0.4.5", commit: "abc1234", builtAt: "2026-10-26 12:30" }); },
   shareTarget() { return "Claude"; }, getReservations() { return "[]"; },
   setReservation(j) { return JSON.stringify({ ok: true, exact: false, notif: true }); }, removeReservation() {},
@@ -637,16 +637,21 @@ function patRace(info, no) {
   return no >= info.v.from && no <= info.v.to;
 }
 // 即PAT・A-PAT で地方競馬を買う入口（地方競馬ネット投票）。レースを指定して開く方法は公開されていないので、入口を開くだけ。
-// 即PAT・A-PAT はスマホ版のログイン画面、レース映像は地方競馬ライブ（スマホ版）を開く
+// 即PAT・A-PAT はスマホ版のログイン画面をブラウザで開く
 const PAT_URL = "https://n.ipat.jra.go.jp/sp/index.cgi";
-const LIVE_URL = "https://keiba-lv-st.jp/sp/";
 function openPat() { Native.openUrl(PAT_URL); }
-function openLive() { Native.openUrl(LIVE_URL); }
-/** 「即PATを開く ›」「地方競馬ライブ ›」の行（発売の有無が分からなくても出す） */
-function extLinks() {
+// レース映像は地方競馬ライブの映像専用版（simple.keiba-lv-st.jp/?track=…）をアプリ内で開く。
+// 競馬場名は映像専用版の映像プレイヤー（hls_movie_player.js の trackDict）と同じ
+const LIVE_TRACK = { "帯広": "obihiro", "帯広(ば)": "obihiro", "ばんえい": "obihiro", "門別": "monbetsu", "盛岡": "morioka", "水沢": "mizusawa",
+  "浦和": "urawa", "船橋": "funabashi", "大井": "ooi", "川崎": "kawasaki", "金沢": "kanazawa", "笠松": "kasamatsu",
+  "名古屋": "nagoya", "園田": "sonoda", "姫路": "himeji", "高知": "kouchi", "佐賀": "saga" };
+function liveTrack(venue) { return LIVE_TRACK[String(venue || "").replace(/\s/g, "")] || ""; }
+function openLive(venue) { Native.openLive ? Native.openLive(liveTrack(venue)) : Native.openUrl("https://simple.keiba-lv-st.jp/"); }
+/** 「即PATを開く ›」「レース映像 ›」の行（発売の有無が分からなくても出す） */
+function extLinks(venue) {
   const p = el("p", "ext-links");
   const a = el("button", null, "即PATを開く ›"); a.onclick = openPat; p.append(a);
-  const b = el("button", null, "地方競馬ライブ ›"); b.onclick = openLive; p.append(b);
+  const b = el("button", null, "レース映像 ›"); b.onclick = () => openLive(venue); p.append(b);
   return p;
 }
 const patRangeText = (v) => (v.all ? "全R" : v.from != null ? `${v.from}〜${v.to}R` : v.text);
@@ -786,7 +791,7 @@ function renderRaces() {
     area.append(el("p", "pat-line none", "即PAT・A-PAT の発売カレンダーを読めませんでした（引っ張って読み直せます）"));
   }
   // 発売カレンダーを読めていなくても、投票とレース映像の入口はいつも出す
-  area.append(extLinks());
+  area.append(extLinks(v.name));
 
   const list = el("div", "races");
   v.races.forEach((r, i) => {
@@ -940,7 +945,7 @@ function renderResult() {
   const pi = patInfo(state.date, venue), onPat = patRace(pi, +race.no);
   if (onPat === true) chips.append(el("span", "chip pat", `${PAT_KIND[pi.kind]}で発売`));
   else if (onPat === false) chips.append(el("span", "chip", "即PAT・A-PAT は発売なし"));
-  const live = el("button", "chip link", "地方競馬ライブ ›"); live.onclick = openLive; chips.append(live);
+  const live = el("button", "chip link", "レース映像 ›"); live.onclick = () => openLive(venue); chips.append(live);
   body.append(chips);
 
   // 発走までの時間と、オッズを取ってからの時間
