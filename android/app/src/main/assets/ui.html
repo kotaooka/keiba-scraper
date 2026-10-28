@@ -313,6 +313,24 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .rec-table .back { color: var(--warn); }
 .up { color: var(--ok); } .down { color: var(--ng); }
 .big-num { font-family: var(--f-num); font-size: 26px; font-weight: 500; }
+.trend { width: 100%; height: auto; display: block; margin: 4px 0 6px; }
+.trend .grid { stroke: var(--grid); stroke-width: 1; }
+.trend .zero { stroke: var(--muted); stroke-width: 1; }
+.trend .tick { fill: var(--muted); font-size: 10.5px; font-family: var(--f-num); }
+.trend .ln { fill: none; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
+.trend .ln-own { stroke: var(--accent); }
+.trend .ln-ev { stroke: var(--ok); stroke-dasharray: 6 4; }
+.trend .ln-hit { stroke: var(--ink2); stroke-dasharray: 2 4; }
+.trend .dot.ln-own { fill: var(--accent); } .trend .dot.ln-ev { fill: var(--ok); } .trend .dot.ln-hit { fill: var(--ink2); }
+.trend .dot { stroke: none; }
+.trend-legend { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--ink2); }
+.trend-legend .lg { display: flex; align-items: center; gap: 6px; }
+.trend-legend .lg i { width: 22px; height: 0; border-top: 2.5px solid var(--accent); flex: none; }
+.trend-legend .lg-ev i { border-top: 2.5px dashed var(--ok); }
+.trend-legend .lg-hit i { border-top: 2.5px dotted var(--ink2); }
+.trend-legend b { color: var(--ink); }
+.breakdown { margin-top: 10px; }
+.breakdown summary { cursor: pointer; color: var(--accent); font-weight: 700; font-size: 13.5px; padding: 6px 0; }
 .big-num small { font-family: var(--f-ui); font-size: 13px; color: var(--ink2); margin-left: 6px; }
 .verdict { margin: 6px 0 0; font-size: 13px; padding: 8px 10px; border-radius: 10px; background: var(--bg); }
 .rec-list { display: grid; gap: 6px; }
@@ -442,6 +460,23 @@ button.pref-row:active { background: var(--grid); }
 .h-tag.pick { color: var(--accent); } .h-tag.over { color: var(--ink2); }
 .toast { position: fixed; left: 50%; bottom: 96px; transform: translate(-50%, 20px); opacity: 0; background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 20px; font-size: 14px; transition: all .25s; z-index: 40; pointer-events: none; white-space: nowrap; }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+.btn.pat-list-btn { width: 100%; margin-top: 10px; }
+.pat-type { display: flex; justify-content: space-between; align-items: baseline; margin: 14px 0 6px; }
+.pat-type b { font-size: 15px; color: var(--ink); }
+.pat-type span { font-size: 12.5px; color: var(--ink2); font-weight: 400; }
+.pat-rows { display: flex; flex-direction: column; gap: 6px; }
+.pat-row { display: grid; grid-template-columns: 26px 1fr auto; align-items: center; gap: 8px; text-align: left; width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--bg); }
+.pat-row .pat-check { width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--line); display: grid; place-items: center; font-size: 14px; font-weight: 700; color: var(--accent-ink); }
+.pat-row.done { opacity: .55; }
+.pat-row.done .pat-check { background: var(--accent); border-color: var(--accent); }
+.pat-what b { font-size: 22px; letter-spacing: .02em; display: block; line-height: 1.2; }
+.pat-what small, .pat-amt small { display: block; font-size: 12px; color: var(--ink2); }
+.pat-amt { text-align: right; }
+.pat-amt b { font-size: 17px; }
+.pat-total { margin: 14px 0 10px; font-weight: 700; }
+.clip-offer { position: fixed; left: 12px; right: 12px; bottom: 84px; z-index: 30; background: var(--surface); border: 2px solid var(--accent); border-radius: 16px; padding: 14px 16px 12px; box-shadow: 0 8px 28px rgba(0,0,0,.28); }
+.clip-offer b { color: var(--accent); font-size: 15px; }
+.clip-offer p { margin: 4px 0 10px; font-size: 13.5px; color: var(--ink2); }
 </style>
 </head>
 <body>
@@ -535,7 +570,7 @@ const Native = window.Android || {
   setReservation(j) { return JSON.stringify({ ok: true, exact: false, notif: true }); }, removeReservation() {},
   takeBackgroundResults() { return "[]"; }, exactAlarmAllowed() { return false; }, openExactAlarmSettings() {},
   notificationsAllowed() { return true; }, requestNotifications() {},
-  readClipboard() { return ""; }, fetchResults() {}, exportRecords() {}, importRecords() {}, scheduleResultCheck() { return "{}"; }, cancelResultCheck() {}, takeRaceResults() { return "[]"; }
+  readClipboard() { return ""; }, clipStamp() { return -1; }, fetchResults() {}, exportRecords() {}, importRecords() {}, scheduleResultCheck() { return "{}"; }, cancelResultCheck() {}, takeRaceResults() { return "[]"; }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -863,6 +898,7 @@ function raceHead(venue, race) {
 
 function showScreen(name) {
   state.screen = name;
+  hideClipOffer();
   $("home").classList.toggle("hidden", name !== "home");
   $("backBtn").textContent = name === "settings" && state.back === "result" ? "‹ 結果に戻る"
     : name === "result" && state.fromRecords ? "‹ 記録に戻る"
@@ -1117,11 +1153,11 @@ function renderResult() {
   const lbl = el("span", "lbl", target ? `${target} へ送る` : "AIアプリへ送る");
   lbl.append(el("small", null, target ? "長押しで変更" : "送り先を選ぶ"));
   send.append(lbl);
-  onPress(send, () => Native.share(textFor(res), false), () => Native.share(textFor(res), true));
+  onPress(send, () => { markSent(venue, race); Native.share(textFor(res), false); }, () => { markSent(venue, race); Native.share(textFor(res), true); });
   const copy = el("button", "btn secondary sub"); copy.innerHTML = ICON_COPY; copy.append(document.createTextNode("コピー"));
-  copy.onclick = () => { Native.copy(textFor(res)); toast("コピーしました"); };
+  copy.onclick = () => { markSent(venue, race); Native.copy(textFor(res)); toast("コピーしました"); };
   const pick = el("button", "btn secondary sub"); pick.innerHTML = ICON_PICK; pick.append(document.createTextNode("送り先"));
-  pick.onclick = () => Native.share(textFor(res), true);
+  pick.onclick = () => { markSent(venue, race); Native.share(textFor(res), true); };
   bar.append(send, copy, pick);
   // 投票の入口はいつも出す（発売カレンダーが手元にない・競馬場名が合わないときに消えないように）
   {
@@ -1282,8 +1318,53 @@ const App = {
     if (state.screen === "prefs") renderPrefs();
   },
   onUpdateState(s, detail) { onUpdateState(s, detail); },
+  // 画面に戻ってきた（窓が前に出た）とき。AI の回答がコピーされていれば記録を勧める
+  onFocus() { checkClipboardAnswer(); },
 };
 window.App = App;
+
+// ===== AI の回答をクリップボードから読み込む =====
+// 結果画面で AI へ送った（コピーした）レースに戻ってきたとき、クリップボードに記録用ブロック（#PRED）があれば
+// 「このレースに記録しますか」と出す。送ってから3時間以内・AI の回答をまだ記録していないときだけ読む
+// （Android 12 以降はほかのアプリのコピーを読むと「貼り付けました」と出るため、必要なときだけ読む）
+const SENT_KEY = "keiba-sent";
+const SENT_TTL = 3 * 3600 * 1000;
+function markSent(venue, race) { store.set(SENT_KEY, { key: cacheKey(state.date, venue, race.no), at: Date.now() }); }
+function checkClipboardAnswer() {
+  if (state.screen !== "result" || !state.result) return;
+  const { venue, race, res } = state.result;
+  const key = cacheKey(state.date, venue, race.no);
+  const sent = store.get(SENT_KEY, null);
+  if (!sent || sent.key !== key || Date.now() - sent.at > SENT_TTL) return;
+  const rec = readRecords()[key];
+  if (rec && rec["AI"]) return;
+  // クリップボードが前に見たときから変わっていなければ読まない
+  let stamp = -1;
+  try { stamp = Number(Native.clipStamp()); } catch (e) {}
+  if (stamp > 0 && stamp === state.clipStamp) return;
+  state.clipStamp = stamp;
+  let text = "";
+  try { text = Native.readClipboard() || ""; } catch (e) {}
+  if (!text.trim() || text.trim() === textFor(res).trim()) return;
+  const parsed = KS.parseAiBlock(text);
+  if (!parsed) return;
+  showClipOffer(key, text, parsed);
+}
+function showClipOffer(key, text, parsed) {
+  hideClipOffer();
+  const { venue, race } = state.result;
+  const box = el("div", "clip-offer"); box.id = "clipOffer";
+  const n = parsed["買い目"].length + (parsed["的中買い目"] || []).length;
+  box.append(el("b", null, "AI の回答がコピーされています"),
+    el("p", null, `${venue} ${race.no}R に記録しますか？（買い目 ${n}点${parsed["予想"] ? `・${Object.keys(parsed["予想"]).length}頭の推定勝率` : ""}）`));
+  const row = el("div", "btn-row");
+  const ok = el("button", "btn primary", "記録する");
+  ok.onclick = () => { if (state.result && cacheKey(state.date, state.result.venue, state.result.race.no) === key) pasteAiAnswer(text); else hideClipOffer(); };
+  const no = el("button", "btn secondary", "記録しない"); no.onclick = hideClipOffer;
+  row.append(ok, no); box.append(row);
+  document.body.append(box);
+}
+function hideClipOffer() { const b = $("clipOffer"); if (b) b.remove(); }
 
 // ===== 版情報と更新 =====
 const UPDATE_KEY = "keiba-update";  // 最後に確認した結果（{at, latest}）
@@ -1504,11 +1585,12 @@ function pendingResults() {
   return Object.entries(readRecords()).filter(([, r]) => (r["AI"] || ownBetsOf(r).length) && !r["結果"] && r.race_id && (sinceStart(r) ?? 0) >= 15);
 }
 
-// 結果画面の「AI の回答を貼り付けて記録」
-function pasteAiAnswer() {
+// 結果画面の「AI の回答を貼り付けて記録」。given はクリップボードから先に読んでおいた回答
+function pasteAiAnswer(given) {
   const { venue, race, res } = state.result;
-  let text = "";
-  try { text = Native.readClipboard() || ""; } catch (e) {}
+  let text = typeof given === "string" ? given : "";
+  if (!text) { try { text = Native.readClipboard() || ""; } catch (e) {} }
+  hideClipOffer();
   if (!text.trim()) { toast("クリップボードが空です。AI の回答をコピーしてから押してください"); return; }
   if (text.trim() === textFor(res).trim()) { toast("クリップボードは送ったテキストのままです。AI の回答をコピーしてください"); return; }
   const parsed = KS.parseAiBlock(text);
@@ -1741,7 +1823,7 @@ function aiCard(venue, race) {
   c.append(h);
   if (!rec || !rec["AI"]) {
     c.append(el("p", "note", "AI の回答（全文）をコピーしてから押すと、最後の記録用ブロック（#PRED・#BET）を読んで記録します。結果が出たら答え合わせできます"));
-    const b = el("button", "btn secondary preview-btn", "AI の回答を貼り付けて記録"); b.onclick = pasteAiAnswer; c.append(b);
+    const b = el("button", "btn secondary preview-btn", "AI の回答を貼り付けて記録"); b.onclick = () => pasteAiAnswer(); c.append(b);
     return c;
   }
   const ai = rec["AI"], pred = ai["予想"] || {};
@@ -1842,6 +1924,7 @@ function aiCard(venue, race) {
     const top = Object.entries(rec["結果"]["着順"]).filter(([, r]) => /^[123]$/.test(r)).sort((a, b) => +a[1] - +b[1]).map(([n, r]) => `${r}着 ${n}番`).join("・");
     c.append(el("p", "note", `結果：${top}`));
   } else {
+    c.append(patListButton(venue, race));
     const ss = sinceStart(rec);
     if (ss != null && ss >= 15 && rec.race_id) {
       c.append(el("p", "note", "上の「レース結果を取得」で答え合わせできます"));
@@ -1960,6 +2043,7 @@ function ownCard(venue, race) {
     }
   }
   if (!rec || !rec["結果"]) {
+    if (own.length) c.append(patListButton(venue, race, "own"));
     const row = el("div", "own-actions");
     const ai = rec && rec["AI"];
     const copy = (k, label) => {
@@ -1982,6 +2066,99 @@ function ownCard(venue, race) {
   return c;
 }
 // 1点ずつ入れるシート（券種・馬番・金額）
+// ===== 即PAT 入力用の買い目一覧 =====
+// 即PAT の券種の並び（単勝・複勝・枠連・馬連・ワイド・馬単・3連複・3連単）で、券種ごとにまとめて出す。
+// 同じ券種・組み合わせが重なっていれば金額を足す。入力し終えた行はタップで印を付けられる（画面の中だけ）
+const PAT_ORDER = ["単勝", "複勝", "枠連", "馬連", "ワイド", "馬単", "3連複", "3連単", "枠単"];
+function patSources(rec) {
+  const out = [];
+  if (!rec) return out;
+  const own = ownBetsOf(rec), ai = rec["AI"];
+  if (own.length) out.push({ id: "own", label: "買った馬券", bets: own });
+  if (ai && Array.isArray(ai["買い目"]) && ai["買い目"].length) out.push({ id: "ev", label: hasHitOf(rec) ? "期待値重視" : "AI の買い目", bets: ai["買い目"] });
+  if (ai && hasHitOf(rec) && Array.isArray(ai["的中買い目"]) && ai["的中買い目"].length) out.push({ id: "hit", label: "的中重視", bets: ai["的中買い目"] });
+  if (ai && out.filter((x) => x.id !== "own").length === 2) {
+    out.push({ id: "both", label: "AI 両方", bets: ai["買い目"].concat(ai["的中買い目"]) });
+  }
+  return out;
+}
+function patGroups(bets) {
+  const map = new Map();
+  for (const b of bets) {
+    const k = `${b["券種"]}|${b["組み合わせ"]}`;
+    const x = map.get(k) || { type: b["券種"], combo: b["組み合わせ"], amount: 0 };
+    x.amount += +b["金額"] || 0;
+    map.set(k, x);
+  }
+  const cmpCombo = (a, b) => { const x = a.split("-").map(Number), y = b.split("-").map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) - (y[i] || 0); return 0; };
+  const rank = (t) => { const i = PAT_ORDER.indexOf(t); return i < 0 ? 99 : i; };
+  const rows = [...map.values()].sort((a, b) => rank(a.type) - rank(b.type) || cmpCombo(a.combo, b.combo));
+  const groups = [];
+  for (const r of rows) { const g = groups[groups.length - 1]; if (g && g.type === r.type) g.rows.push(r); else groups.push({ type: r.type, rows: [r] }); }
+  return groups;
+}
+function patListButton(venue, race, prefer) {
+  const b = el("button", "btn secondary pat-list-btn");
+  b.innerHTML = ICON_PAT;
+  b.append(document.createTextNode("即PAT 入力用の一覧"));
+  b.onclick = () => openPatSheet(venue, race, prefer);
+  return b;
+}
+function patListText(venue, race, src) {
+  const lines = [`${venue} ${race.no}R ${src.label}`];
+  for (const g of patGroups(src.bets)) for (const r of g.rows) lines.push(`${r.type} ${r.combo} ${yen(r.amount)}`);
+  lines.push(`合計 ${yen(src.bets.reduce((t, b) => t + (+b["金額"] || 0), 0))}`);
+  return lines.join("\n");
+}
+function openPatSheet(venue, race, prefer) {
+  const key = cacheKey(state.date, venue, race.no);
+  const info = state.result.res.info;
+  const srcs = patSources(readRecords()[key]);
+  if (!srcs.length) { toast("買い目がありません"); return; }
+  let cur = (srcs.find((x) => x.id === prefer) || srcs[0]).id;
+  const done = new Set();
+  const nameOf = (n) => ((info.horses || []).find((x) => String(parseInt(x.no, 10)) === n) || {}).name || "";
+  const sh = $("sheet");
+  function render() {
+    const src = srcs.find((x) => x.id === cur);
+    sh.replaceChildren();
+    sh.append(el("div", "grip"), el("h3", null, "即PAT 入力用の一覧"), el("p", "sub", `${venue} ${race.no}R ${race.title || ""}・入力した行はタップで印を付けられます`));
+    if (srcs.length > 1) {
+      const tg = el("div", "chips-pick");
+      for (const x of srcs) { const b = el("button", null, x.label); b.setAttribute("aria-pressed", String(x.id === cur)); b.onclick = () => { cur = x.id; done.clear(); render(); }; tg.append(b); }
+      sh.append(tg);
+    }
+    const groups = patGroups(src.bets);
+    for (const g of groups) {
+      const sum = g.rows.reduce((t, r) => t + r.amount, 0);
+      const h = el("h4", "pat-type"); h.append(el("b", null, g.type), el("span", null, `${g.rows.length}点・${yen(sum)}`));
+      sh.append(h);
+      const list = el("div", "pat-rows");
+      for (const r of g.rows) {
+        const k = `${r.type}|${r.combo}`;
+        const row = el("button", "pat-row" + (done.has(k) ? " done" : ""));
+        const names = r.type.startsWith("枠") ? "" : r.combo.split("-").map(nameOf).filter(Boolean).join("・");
+        const left = el("span", "pat-what"); left.append(el("b", "num", r.combo)); if (names) left.append(el("small", null, names));
+        const right = el("span", "pat-amt"); right.append(el("b", "num", yen(r.amount)), el("small", null, `${r.amount / 100}口`));
+        row.append(el("span", "pat-check", done.has(k) ? "✓" : ""), left, right);
+        row.onclick = () => { if (done.has(k)) done.delete(k); else done.add(k); render(); };
+        list.append(row);
+      }
+      sh.append(list);
+    }
+    const total = src.bets.reduce((t, b) => t + (+b["金額"] || 0), 0);
+    const points = groups.reduce((t, g) => t + g.rows.length, 0);
+    sh.append(el("p", "pat-total", `合計 ${points}点・${yen(total)}${done.size ? `（入力済み ${done.size}/${points}）` : ""}`));
+    const row = el("div", "btn-row");
+    const open = el("button", "btn primary"); open.innerHTML = ICON_PAT; open.append(document.createTextNode("即PATを開く")); open.onclick = openPat;
+    const copy = el("button", "btn secondary", "コピー"); copy.onclick = () => { Native.copy(patListText(venue, race, src)); toast("コピーしました"); };
+    row.append(open, copy);
+    sh.append(row);
+  }
+  render();
+  sh.classList.remove("hidden"); $("sheetScrim").classList.remove("hidden");
+}
+
 function openOwnSheet(venue, race) {
   const info = state.result.res.info;
   const horses = (info.horses || []).filter((x) => !x.cancel);
@@ -2033,6 +2210,104 @@ function openOwnSheet(venue, race) {
 
 // ===== 記録と答え合わせの画面 =====
 function showRecords() { closeMenu(); state.back = null; showScreen("records"); renderRecords(); }
+// ===== 回収率の推移と内訳 =====
+// 記録を発走の順（日付・発走時刻・競馬場・レース番号）に並べ、買った・買い目のあるレースだけで収支を足し上げる。
+// 期待値重視・的中重視の数え方は computeSummary（PC版の _bet_summary）と同じ
+function trendSeries(records) {
+  const done = records.filter((r) => r["結果"]).sort((a, b) =>
+    `${a["日付"]} ${a["発走"] || ""} ${a["競馬場"]} ${String(a["レース番号"]).padStart(2, "0")}`.localeCompare(`${b["日付"]} ${b["発走"] || ""} ${b["競馬場"]} ${String(b["レース番号"]).padStart(2, "0")}`));
+  const defs = [
+    { id: "own", label: "自分", key: "購入", ok: (r) => Array.isArray(r["購入"]) && r["購入"].length },
+    { id: "ev", label: "AI期待値", key: "買い目", ok: (r) => r["AI"] && r["買い方"] !== "hit" },
+    { id: "hit", label: "AI的中", key: "的中買い目", ok: (r) => r["AI"] && (Array.isArray(r["AI"]["的中買い目"]) || ["hit", "both"].includes(r["買い方"])) },
+  ];
+  const out = [];
+  for (const d of defs) {
+    let cum = 0, spent = 0, ret = 0; const pts = [];
+    for (const r of done) {
+      if (!d.ok(r)) continue;
+      let rows = null; try { rows = KS.settleBets(r, d.key); } catch (e) { rows = null; }
+      if (!rows || !rows.length) continue;
+      const a = rows.reduce((t, x) => t + x["金額"], 0), b = rows.reduce((t, x) => t + x["払戻"], 0);
+      spent += a; ret += b; cum += b - a;
+      pts.push({ cum, roi: ret / spent * 100, date: r["日付"] });
+    }
+    if (pts.length) out.push(Object.assign({ pts, spent, ret }, d));
+  }
+  // AI の的中重視が無いときは「AI期待値」を「AI」と書く
+  if (!out.some((x) => x.id === "hit")) out.forEach((x) => { if (x.id === "ev") x.label = "AI"; });
+  return out;
+}
+function trendCard(records) {
+  const series = trendSeries(records);
+  if (!series.length || !series.some((x) => x.pts.length >= 2)) return null;
+  const c = el("div", "card");
+  c.append(el("h3", null, "収支の推移"));
+  const W = 340, H = 190, L = 50, R = 10, T = 12, B = 26;
+  const n = Math.max(...series.map((x) => x.pts.length));
+  const vals = series.flatMap((x) => x.pts.map((p) => p.cum)).concat([0]);
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (hi - lo < 1000) { const m = (hi + lo) / 2; lo = m - 500; hi = m + 500; }
+  // 目盛りは 1・2・5 の刻み
+  const raw = (hi - lo) / 4, mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = [1, 2, 5, 10].map((k) => k * mag).find((v) => v >= raw);
+  lo = Math.floor(lo / step) * step; hi = Math.ceil(hi / step) * step;
+  const x = (i) => L + (n <= 1 ? 0 : i / (n - 1) * (W - L - R));
+  const y = (v) => T + (hi - v) / (hi - lo) * (H - T - B);
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("class", "trend");
+  svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "収支の推移のグラフ");
+  const mk = (tag, attrs, text) => { const e = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v); if (text != null) e.textContent = text; svg.append(e); return e; };
+  for (let v = lo; v <= hi + 1e-6; v += step) {
+    mk("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: v === 0 ? "zero" : "grid" });
+    mk("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end", class: "tick" }, `${v > 0 ? "+" : ""}${Math.abs(v) >= 10000 ? `${(v / 10000).toLocaleString("ja-JP")}万` : v.toLocaleString("ja-JP")}`);
+  }
+  mk("text", { x: L, y: H - 6, class: "tick" }, "1");
+  mk("text", { x: W - R, y: H - 6, "text-anchor": "end", class: "tick" }, `${n}レース目`);
+  for (const s1 of series) {
+    const d = s1.pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join(" ");
+    mk("path", { d, class: `ln ln-${s1.id}` });
+    const last = s1.pts[s1.pts.length - 1];
+    mk("circle", { cx: x(s1.pts.length - 1), cy: y(last.cum), r: 3, class: `dot ln-${s1.id}` });
+  }
+  c.append(svg);
+  // 凡例（線の種類と最後の値）
+  const lg = el("div", "trend-legend");
+  for (const s1 of series) {
+    const last = s1.pts[s1.pts.length - 1];
+    const it = el("span", `lg lg-${s1.id}`);
+    it.append(el("i"), el("b", null, s1.label), document.createTextNode(` ${last.cum >= 0 ? "+" : ""}${yen(last.cum)}・回収率 ${last.roi.toFixed(1)}%・${s1.pts.length}レース`));
+    lg.append(it);
+  }
+  c.append(lg);
+  c.append(el("p", "note", "買ったレース（AI は買い目のあったレース）だけを発走の順に並べ、収支を足し上げています。30レース未満は偶然の当たり外れで大きく動くので、傾向の判断には使えません"));
+  return c;
+}
+// 内訳の表（競馬場別・月別など）。rows は computeSummary の bet_rows（買い目1点ずつ）
+function breakdownTable(label, rows, keyOf) {
+  const groups = new Map();
+  for (const x of rows) {
+    const k = keyOf(x);
+    const g = groups.get(k) || { races: new Set(), n: 0, hit: 0, a: 0, r: 0 };
+    g.races.add(`${x.race_id}|${x["日付"]}|${x["レース番号"]}`); g.n++; g.hit += x["判定"] === "的中" ? 1 : 0; g.a += x["金額"]; g.r += x["払戻"];
+    groups.set(k, g);
+  }
+  if (groups.size < 2) return null;
+  const det = el("details", "breakdown");
+  det.append(el("summary", null, `${label}の内訳`));
+  const tb = el("table", "rec-table");
+  const hr = el("tr"); for (const [t, cls] of [[label.replace(/別$/, "")], ["レース", "r"], ["点数", "r"], ["的中", "r"], ["購入", "r"], ["回収率", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+  for (const [k, g] of [...groups.entries()].sort((a, b) => b[1].a - a[1].a || String(a[0]).localeCompare(String(b[0])))) {
+    const tr = el("tr");
+    tr.append(el("td", null, k), el("td", "r", g.races.size), el("td", "r", g.n), el("td", "r", g.hit), el("td", "r", g.a.toLocaleString("ja-JP")),
+      el("td", "r " + (g.r >= g.a ? "up" : "down"), g.a ? `${(g.r / g.a * 100).toFixed(0)}%` : "--"));
+    tb.append(tr);
+  }
+  det.append(tb);
+  return det;
+}
+
 function renderRecords() {
   const body = $("detailBody"); body.replaceChildren();
   body.append(el("h2", "race-title", "予想の記録と答え合わせ"));
@@ -2062,7 +2337,9 @@ function renderRecords() {
   if (!sm.own_bets && !sm.bets && !sm.hit_bets) {
     const c0 = el("div", "card"); c0.append(el("h3", null, "回収率"), el("p", "note", "結果まで記録したレースがまだありません")); body.append(c0);
   }
-  for (const [bb, title] of [[sm.own_bets, "回収率：自分で買った馬券"], [sm.bets, sm.hit_bets ? "回収率：AI 期待値重視" : sm.own_bets ? "回収率：AI の買い目" : "回収率"], [sm.hit_bets, "回収率：AI 的中重視"]]) {
+  // 収支の推移（発走の順に足し上げる）
+  { const tc = trendCard(all); if (tc) body.append(tc); }
+  for (const [bb, title, rowsAll] of [[sm.own_bets, "回収率：自分で買った馬券", sm.own_bet_rows], [sm.bets, sm.hit_bets ? "回収率：AI 期待値重視" : sm.own_bets ? "回収率：AI の買い目" : "回収率", sm.bet_rows], [sm.hit_bets, "回収率：AI 的中重視", sm.hit_bet_rows]]) {
   if (!bb) continue;
   const c1 = el("div", "card");
   c1.append(el("h3", null, title));
@@ -2081,6 +2358,11 @@ function renderRecords() {
       tb.append(tr);
     }
     c1.append(tb);
+    // 内訳：競馬場別・月別（開くと出す）
+    for (const [label, keyOf] of [["競馬場別", (x) => x["競馬場"] || "?"], ["月別", (x) => { const d = String(x["日付"] || ""); return d.length >= 6 ? `${d.slice(0, 4)}/${d.slice(4, 6)}` : "?"; }]]) {
+      const det = breakdownTable(label, rowsAll || [], keyOf);
+      if (det) c1.append(det);
+    }
   }
   body.append(c1);
   }

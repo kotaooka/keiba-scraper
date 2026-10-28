@@ -17,12 +17,13 @@
   const CODE_TO_NAME = {};
   for (const [k, v] of Object.entries(KEIBA_CODES)) CODE_TO_NAME[v] = k;
 
-  // keiba.go.jp (NAR公式) の競馬場コード — netkeiba と異なる
+  // keiba.go.jp (NAR公式) の競馬場コード — netkeiba と異なる（帯広(ばんえい)は 3、姫路は 28 を当日メニューで確認）
   const KEIBAGO_CODES = {
     "門別": "36", "盛岡": "10", "水沢": "11",
     "浦和": "18", "船橋": "19", "大井": "20", "川崎": "21",
     "金沢": "22", "笠松": "23", "名古屋": "24",
     "園田": "27", "姫路": "28", "高知": "31", "佐賀": "32",
+    "帯広(ば)": "3",
   };
 
   const NETKEIBA = "https://nar.netkeiba.com";
@@ -449,7 +450,8 @@
     }
 
     for (const td of directChildren(r1, "TD")) {
-      const m = gt(td, " ").match(/^[^\d\s]*\s*\d{2}\.\d\s+(\d+-\d+-\d+-\d+)$/);
+      // ばんえいは斤量が "730"（kg・小数なし）
+      const m = gt(td, " ").match(/^[^\d\s]*\s*(?:\d{2}\.\d|\d{3})\s+(\d+-\d+-\d+-\d+)$/);
       if (m) {
         data["コンビ"] = m[1];
         break;
@@ -464,7 +466,8 @@
       if (!rec) continue;
       rec["クラス"] = gt(cols[1][k]);
 
-      const m = gt(cols[2][k], " ").match(/(\d+)人\s+(\d{3})?\s*(\S+)?\s+(\d{2}\.\d)/);
+      // ばんえいは "3人 1035 中原蓮 690"（馬体重4桁・斤量3桁）
+      const m = gt(cols[2][k], " ").match(/(\d+)人\s+(\d{3,4})?\s*(\S+)?\s+(\d{2}\.\d|\d{3})(?!\d)/);
       if (m) {
         rec["人気"] = m[1];
         rec["体重"] = m[2] || "";
@@ -477,7 +480,8 @@
       rec["タイム"] = m1 ? m1[0] : "";
       const m2 = t.match(/\b\d{1,2}(?:-\d{1,2}){1,3}\b/);
       rec["通過"] = m2 ? m2[0] : "";
-      const m3 = t.match(/(\d{2}\.\d)\s*$/);
+      // 上がりはタイムを除いた残りから読む（ばんえいは上がりが無い）
+      const m3 = t.replace(/\d:\d{2}\.\d/g, "").match(/(\d{2}\.\d)\s*$/);
       rec["上がり"] = m3 ? m3[1] : "";
 
       const m4 = gt(cols[4][k], " ").match(/^(\d+\.\d)/);
@@ -500,10 +504,11 @@
     else rec = { "着順": rankText };
 
     const text = gt(ri, " ");
-    const mDate = text.match(/(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不)\s+(\d+)頭/);
+    // ばんえいは馬場が水分（"1.1"）。"水分1.1%" にする
+    const mDate = text.match(/(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不|\d{1,2}\.\d)\s+(\d+)頭/);
     if (!mDate) return null;
     rec["日付"] = `20${mDate[1]}/${mDate[2]}/${mDate[3]}`;
-    rec["馬場"] = COND_MAP[mDate[4]] || mDate[4];
+    rec["馬場"] = /^\d/.test(mDate[4]) ? `水分${mDate[4]}%` : (COND_MAP[mDate[4]] || mDate[4]);
     rec["頭数"] = mDate[5];
 
     const after = text.slice(mDate.index + mDate[0].length);

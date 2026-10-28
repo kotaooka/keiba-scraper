@@ -47,12 +47,13 @@ CODE_TO_NAME = {v: k for k, v in KEIBA_CODES.items()}
 NAME_ALIASES = {"帯広": "帯広(ば)", "ばんえい": "帯広(ば)", "帯広ばんえい": "帯広(ば)"}
 
 # keiba.go.jp (NAR公式) の競馬場コード — netkeiba と異なる
-# 姫路は未確認。帯広(ばんえい)は未定義のため過去成績の補完をしない
+# 帯広(ばんえい)は 3、姫路は 28（keiba.go.jp の当日メニューで確認：2026-10-26 帯広ば・2026-03-04 姫路）
 KEIBAGO_CODES = {
     "門別": "36", "盛岡": "10", "水沢": "11",
     "浦和": "18", "船橋": "19", "大井": "20", "川崎": "21",
     "金沢": "22", "笠松": "23", "名古屋": "24",
     "園田": "27", "姫路": "28", "高知": "31", "佐賀": "32",
+    "帯広(ば)": "3",
 }
 
 NETKEIBA = "https://nar.netkeiba.com"
@@ -634,7 +635,8 @@ def _parse_keibago_horse(rows):
 
     # 今回の騎手とこの馬のコンビ成績（"54.0 0-1-0-4" の後半）
     for td in _cells(r1):
-        m = re.fullmatch(r"[^\d\s]*\s*\d{2}\.\d\s+(\d+-\d+-\d+-\d+)", td.get_text(" ", strip=True))
+        # ばんえいは斤量が "730"（kg・小数なし）
+        m = re.fullmatch(r"[^\d\s]*\s*(?:\d{2}\.\d|\d{3})\s+(\d+-\d+-\d+-\d+)", td.get_text(" ", strip=True))
         if m:
             data["コンビ"] = m.group(1)
             break
@@ -649,8 +651,8 @@ def _parse_keibago_horse(rows):
             continue
         rec["クラス"] = cols[1][k].get_text(strip=True)
 
-        # "7人 432 菅原辰 54.0"
-        m = re.search(r"(\d+)人\s+(\d{3})?\s*(\S+)?\s+(\d{2}\.\d)", cols[2][k].get_text(" ", strip=True))
+        # "7人 432 菅原辰 54.0"（ばんえいは "3人 1035 中原蓮 690"：馬体重4桁・斤量3桁）
+        m = re.search(r"(\d+)人\s+(\d{3,4})?\s*(\S+)?\s+(\d{2}\.\d|\d{3})(?!\d)", cols[2][k].get_text(" ", strip=True))
         if m:
             rec["人気"] = m.group(1)
             rec["体重"] = m.group(2) or ""
@@ -663,7 +665,8 @@ def _parse_keibago_horse(rows):
         rec["タイム"] = m1.group(0) if m1 else ""
         m2 = re.search(r"\b\d{1,2}(?:-\d{1,2}){1,3}\b", t)
         rec["通過"] = m2.group(0) if m2 else ""
-        m3 = re.search(r"(\d{2}\.\d)\s*$", t)
+        # 上がりはタイムを除いた残りから読む（ばんえいは上がりが無く、"2:11.4" の "11.4" を取り違えないように）
+        m3 = re.search(r"(\d{2}\.\d)\s*$", re.sub(r"\d:\d{2}\.\d", "", t))
         rec["上がり"] = m3.group(1) if m3 else ""
 
         # "1.7 カンフーヒーロー"：負けは +1.7（勝ち馬から遅れた秒）、勝ちは -1.0（2着につけた差）
@@ -679,7 +682,8 @@ def _parse_keibago_horse(rows):
 
 def _parse_keibago_raceinfo(ri):
     """div.raceInfo 1要素から過去成績レコードを作る。
-    例: "7 26.10.19 稍重 10頭 / 盛岡 左1200 2番"、"16 26.08.30 良 16頭 / Ｊ札幌 芝右2000 8番" """
+    例: "7 26.10.19 稍重 10頭 / 盛岡 左1200 2番"、"16 26.08.30 良 16頭 / Ｊ札幌 芝右2000 8番"
+    ばんえいは馬場が水分（"6 26.10.10 1.1 9頭 / 帯広 直200 1番"）。馬場は "水分1.1%" にする """
     if ri is None:
         return None
     rank_el = ri.select_one(".pastRank")
@@ -695,11 +699,12 @@ def _parse_keibago_raceinfo(ri):
         rec = {"着順": rank_text}  # "取止", "除外" 等
 
     text = ri.get_text(" ", strip=True)
-    m_date = re.search(r"(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不)\s+(\d+)頭", text)
+    m_date = re.search(r"(\d{2})\.(\d{2})\.(\d{2})\s+(良|稍重|稍|重|不良|不|\d{1,2}\.\d)\s+(\d+)頭", text)
     if not m_date:
         return None
     rec["日付"] = f"20{m_date.group(1)}/{m_date.group(2)}/{m_date.group(3)}"
-    rec["馬場"] = COND_MAP.get(m_date.group(4), m_date.group(4))
+    cond = m_date.group(4)
+    rec["馬場"] = f"水分{cond}%" if cond[0].isdigit() else COND_MAP.get(cond, cond)
     rec["頭数"] = m_date.group(5)
 
     m_venue = re.search(r"(\S+)\s+(芝)?([右左直])[内外線]?(\d{3,4})\s+(\d+)番", text[m_date.end():])

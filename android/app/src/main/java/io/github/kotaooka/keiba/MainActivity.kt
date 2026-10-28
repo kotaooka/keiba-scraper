@@ -30,6 +30,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import org.json.JSONObject
 import java.io.File
@@ -122,6 +123,12 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         readOpenIntent(intent)
         deliverPendingOpen()
+    }
+
+    // 窓が前に出たとき（Android 10 以降は、このときでないとクリップボードを読めない）
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && pageReady) js("App.onFocus && App.onFocus()")
     }
 
     // 戻ってきたら、自動収集の結果・予約・送り先を UI に読み直させる
@@ -282,14 +289,24 @@ class MainActivity : Activity() {
         @JavascriptInterface
         fun loadRaceList(date: String, patMonth: String) = runOnUiThread {
             // 前の読み込み・収集が残っていれば止めてから読む（日付を続けて変えたときなど）
-            job?.cancel()
+            val prev = job
+            prev?.cancel()
             jobKind = "list"
             job = scope.launch {
-                val list = try { scraper.fetchRaceList(date) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
-                js("App.onRaceList(${list ?: "null"})")
-                if (patMonth.isNotEmpty()) {
-                    val cal = try { scraper.fetchPatCalendar(patMonth) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
-                    js("App.onPatCalendar(${JSONObject.quote(patMonth)}, ${cal ?: "null"})")
+                // 前の処理が収集用の WebView を手放すのを待つ
+                prev?.cancelAndJoin()
+                // 裏の自動収集・答え合わせと同じサイトへ同時にアクセスしないよう、鍵を取ってから読む（自動収集は長くても数分）
+                val locked = withTimeoutOrNull(90_000L) { CollectLock.mutex.lock(); true } ?: false
+                if (!locked) { js("App.onRaceList(null)"); return@launch }
+                try {
+                    val list = try { scraper.fetchRaceList(date) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+                    js("App.onRaceList(${list ?: "null"})")
+                    if (patMonth.isNotEmpty()) {
+                        val cal = try { scraper.fetchPatCalendar(patMonth) } catch (e: CancellationException) { throw e } catch (e: Exception) { null }
+                        js("App.onPatCalendar(${JSONObject.quote(patMonth)}, ${cal ?: "null"})")
+                    }
+                } finally {
+                    CollectLock.mutex.unlock()
                 }
             }
         }
@@ -334,6 +351,13 @@ class MainActivity : Activity() {
         fun cancel() = runOnUiThread { job?.cancel() }
 
         // ---- 予想の記録と答え合わせ ----
+
+        /** クリップボードの中身が入れ替わった時刻（中身は読まない。変わっていなければ読み直さないため）。無ければ -1 */
+        @JavascriptInterface
+        fun clipStamp(): Long {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            return cm.primaryClipDescription?.timestamp ?: -1L
+        }
 
         /** クリップボードの文字（AI の回答を貼り戻すため） */
         @JavascriptInterface
