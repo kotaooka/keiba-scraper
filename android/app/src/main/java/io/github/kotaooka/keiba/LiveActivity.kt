@@ -86,7 +86,7 @@ class LiveActivity : Activity() {
                     if (customView != null) { callback.onCustomViewHidden(); return }
                     customView = view; customCallback = callback
                     root.addView(view, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
-                    setImmersive(true)
+                    hideBars(true)
                 }
 
                 override fun onHideCustomView() = hideCustom()
@@ -121,10 +121,10 @@ class LiveActivity : Activity() {
         web.evaluateJavascript(
             "(function(){var s=document.getElementById('kz-fill');if(!s){s=document.createElement('style');s.id='kz-fill';" +
                 "(document.head||document.documentElement).appendChild(s);}s.textContent=${org.json.JSONObject.quote(css)};})()", null)
-        setImmersive(land || customView != null)
+        hideBars(land || customView != null)
     }
 
-    private fun setImmersive(on: Boolean) {
+    private fun hideBars(on: Boolean) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val c = window.insetsController ?: return
             if (on) {
