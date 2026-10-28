@@ -78,7 +78,7 @@ class MainActivity : Activity() {
         ui = WebView(this).apply {
             settings.javaScriptEnabled = true
             // 端末の文字サイズの設定に合わせる（大きすぎるとボタンの文字が折り返して崩れるので 85〜115% に収める）
-            settings.textZoom = Math.round(resources.configuration.fontScale * 100).coerceIn(85, 115)
+            settings.textZoom = Math.round(resources.configuration.fontScale * 100).coerceIn(Config.TEXT_ZOOM_MIN, Config.TEXT_ZOOM_MAX)
             settings.domStorageEnabled = true  // 収集済みの記録（localStorage）に使う
             settings.allowFileAccess = false
             setBackgroundColor(Color.TRANSPARENT)
@@ -342,6 +342,7 @@ class MainActivity : Activity() {
                     if (job === me) js("App.onResult(null, 'cancel')")
                     throw e
                 } catch (e: Exception) {
+                    ErrorLog.add(this@MainActivity, "収集：$keibajo ${raceNo}R", e)
                     js("App.onResult(null, ${JSONObject.quote("エラー: ${e.message}")})")
                 } finally {
                     CollectLock.mutex.unlock()
@@ -409,6 +410,7 @@ class MainActivity : Activity() {
             ResultChecks.set(this@MainActivity, JSONObject(json))
             JSONObject().put("ok", true).put("exact", Reservations.exactAllowed(this@MainActivity)).toString()
         } catch (e: Exception) {
+            ErrorLog.add(this@MainActivity, "結果の自動取得の予約", e)
             JSONObject().put("ok", false).toString()
         }
 
@@ -420,7 +422,24 @@ class MainActivity : Activity() {
 
         /** 発走5分前のオッズの取り直しを予約する（AI の回答を記録したとき）。予約できたら true */
         @JavascriptInterface
-        fun schedulePreCheck(json: String): Boolean = runCatching { PreChecks.set(this@MainActivity, JSONObject(json)) }.getOrDefault(false)
+        fun schedulePreCheck(json: String): Boolean = runCatching { PreChecks.set(this@MainActivity, JSONObject(json)) }
+            .onFailure { ErrorLog.add(this@MainActivity, "締切前の確認の予約", it) }.getOrDefault(false)
+
+        /** 裏の処理のエラーの記録（JSON の配列、新しい順） */
+        @JavascriptInterface
+        fun errorLog(): String = ErrorLog.read(this@MainActivity)
+
+        @JavascriptInterface
+        fun clearErrorLog() = ErrorLog.clear(this@MainActivity)
+
+        /** 動作確認：ボタン付きの通知をすぐ出す */
+        @JavascriptInterface
+        fun testNotify() {
+            val r = JSONObject().put("key", "test|動作確認|0").put("date", Jst.format("yyyyMMdd")).put("venue", "").put("no", 0)
+            Notifier.post(this@MainActivity, "test".hashCode(), "動作確認", "通知が出ています。下のボタンも押して確かめてください",
+                Notifier.openIntent(this@MainActivity, "open", r),
+                listOf("AI へ送る" to Notifier.openIntent(this@MainActivity, "send", r), "即PAT を開く" to Notifier.patIntent(this@MainActivity)))
+        }
 
         @JavascriptInterface
         fun cancelPreCheck(key: String) = PreChecks.remove(this@MainActivity, key)
@@ -430,6 +449,7 @@ class MainActivity : Activity() {
         fun autoBackup(json: String, name: String) {
             scope.launch {
                 val r = withContext(Dispatchers.IO) { runCatching { Backup.write(this@MainActivity, json, name) } }
+                r.exceptionOrNull()?.let { ErrorLog.add(this@MainActivity, "自動バックアップ", it) }
                 js("App.onAutoBackup(${r.isSuccess}, ${JSONObject.quote(r.getOrElse { it.message ?: "エラー" })})")
             }
         }

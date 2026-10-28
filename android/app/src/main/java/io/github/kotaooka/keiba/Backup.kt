@@ -12,7 +12,7 @@ import android.provider.MediaStore
 object Backup {
     private const val DIR = "Download/keiba-backup/"
     private const val PREFIX = "keiba-backup-"
-    const val KEEP = 3
+    const val KEEP = Config.BACKUP_KEEP
 
     /** 書いたファイルの場所（画面に出す文字）を返す。失敗したら例外 */
     fun write(ctx: Context, json: String, name: String): String {

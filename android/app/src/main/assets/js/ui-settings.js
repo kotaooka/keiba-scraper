@@ -324,7 +324,7 @@ function openFromNotification(p) {
 // 自動収集の結果を収集済みの記録へ取り込む
 function mergeBackgroundResults() {
   let list = [];
-  try { list = JSON.parse(Native.takeBackgroundResults() || "[]"); } catch (e) {}
+  try { list = JSON.parse(Native.takeBackgroundResults() || "[]"); } catch (e) { logError("裏で集めたレースの読み込み", e); }
   if (!list.length) return;
   const c = readCache();
   for (const x of list) {
@@ -422,7 +422,10 @@ function renderPrefs() {
   }
 
   // 取れないとき
-  const g4 = group("取れないとき");
+  const g4 = group("取れないとき・動作確認");
+  const nErr = allErrors().length;
+  row(g4, "エラーの記録", "裏の処理や画面で起きたエラー（新しい順）", nErr ? el("span", "val warn", `${nErr}件`) : el("span", "val", "なし"), sub(showErrors));
+  row(g4, "動作確認", "通知・締切前の確認・結果の自動取得・バックアップ・小窓を、すぐに試す", null, sub(showDeviceTest));
   const sw = el("span", "switch" + (state.debug ? " on" : ""));
   const pvRow = el("button", "pref-row");
   { const tx = el("div", "tx"); tx.append(el("b", null, "取得中のサイトをプレビュー"), el("small", null, "裏で開いているページを下半分に表示")); pvRow.append(tx, sw); }
@@ -489,11 +492,90 @@ setInterval(() => {
   });
 })();
 
+// ===== エラーの記録の画面 =====
+// 画面（JS）の記録と、裏の処理（Kotlin）の記録を合わせて、新しい順に出す
+function allErrors() {
+  let kt = [];
+  try { kt = JSON.parse(Native.errorLog() || "[]").map((x) => Object.assign({ src: "裏" }, x)); } catch (e) { /* 読めなければ画面の分だけ */ }
+  return readErrors().map((x) => Object.assign({ src: "画面" }, x)).concat(kt).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
+function showErrors() { showScreen("errors"); renderErrors(); }
+function renderErrors() {
+  const body = $("detailBody"); body.replaceChildren();
+  body.append(el("h2", "race-title", "エラーの記録"));
+  const list = allErrors();
+  body.append(el("p", "race-sub", list.length ? `${list.length}件（新しい順。画面と裏の処理のそれぞれ ${ERR_MAX}件まで）` : "エラーはありません"));
+  const c = el("div", "card err-list");
+  for (const x of list.slice(0, 200)) {
+    const it = el("div", "err-item");
+    it.append(el("small", null, `${x.at}・${x.src}`), el("b", null, x.where), el("pre", null, x.msg || ""));
+    c.append(it);
+  }
+  if (list.length) body.append(c);
+  const row = el("div", "btn-row"); row.style.marginTop = "12px";
+  const cp = el("button", "btn secondary", "コピー");
+  cp.onclick = () => { Native.copy(list.map((x) => `${x.at} [${x.src}] ${x.where}\n${x.msg}`).join("\n\n") || "エラーなし"); toast("コピーしました"); };
+  const clr = el("button", "btn quiet", "消す");
+  clr.onclick = () => {
+    if (!clr.dataset.armed) { clr.dataset.armed = "1"; clr.textContent = "もう一度押すと消します"; return; }
+    try { localStorage.removeItem(ERR_KEY); } catch (e) { /* 消せなくても動く */ }
+    try { Native.clearErrorLog(); } catch (e) { logError("エラーの記録を消す", e); }
+    toast("消しました"); renderErrors();
+  };
+  row.append(cp, clr); body.append(row);
+  body.append(el("p", "note", "直してもらうときは「コピー」して、そのまま貼り付けて送ってください"));
+}
+
+// ===== 動作確認の画面 =====
+// 裏で動く処理は、ふだんは発走の時刻に合わせてしか動かないので、ここから1分後に動かして確かめる（手順は docs/device-test.md）
+function showDeviceTest() { showScreen("devtest"); renderDeviceTest(); }
+function renderDeviceTest() {
+  const body = $("detailBody"); body.replaceChildren();
+  body.append(el("h2", "race-title", "動作確認"));
+  body.append(el("p", "race-sub", "押したあと、アプリを閉じて（ホームへ移って）待つと、裏で動くかを確かめられます"));
+  let exact = true; try { exact = Native.exactAlarmAllowed(); } catch (e) { logError("アラームの許可の確認", e); }
+  if (!exact) body.append(el("p", "note warn-text", "「アラームとリマインダー」が未許可です。締切前の確認と、時刻どおりの結果の取得は動きません（設定 →「アラームとリマインダー」から許可）"));
+  const recs = Object.entries(readRecords()).sort((a, b) => recOrder(b[1]).localeCompare(recOrder(a[1])));
+  const aiRec = recs.find(([k, r]) => r["AI"] && r.race_id && readCache()[k]);
+  const anyRec = recs.find(([, r]) => r.race_id);
+  const item = (title, expect, label, fn, disabled) => {
+    const c = el("div", "card test-card");
+    c.append(el("h3", null, title), el("p", "note", expect));
+    const b = el("button", "btn secondary", label); b.disabled = !!disabled; b.onclick = fn;
+    c.append(b); body.append(c);
+  };
+  item("1. 通知", "すぐに「動作確認」の通知が出ます。「AI へ送る」「即PAT を開く」のボタンが付いていれば正常です（AI へ送るは一覧が開くだけ）", "通知を出す",
+    () => { Native.testNotify(); toast("通知を出しました"); });
+  item("2. 締切前のオッズの確認", aiRec ? `約1分後に、${aiRec[1]["競馬場"]} ${aiRec[1]["レース番号"]}R を裏で収集し直し、「締切前のオッズ」か「見送り推奨あり」の通知が出ます（収集に30秒〜1分）` : "AI の回答を記録したレースがないので試せません",
+    "1分後に動かす", () => {
+      const [k, r] = aiRec;
+      const um = (KS.CONFIG.PRECHECK_MINUTES + 1) * 60000;
+      const ok = Native.schedulePreCheck(JSON.stringify({ key: k, race_id: r.race_id, date: r["日付"], venue: r["競馬場"], no: r["レース番号"],
+        title: `${r["レース名"] || ""}（動作確認）`, time: r["発走"], start: Date.now() + um,
+        bets: r["買い方"] === "hit" ? [] : r["AI"]["買い目"] || [], hit_bets: hasHitOf(r) ? (r["AI"]["的中買い目"] || []) : [],
+        pred: r["AI"]["予想"] || {}, ev_min: r["EV_MIN"] ?? betSettings().ev_min, hit_ev_min: r["HIT_EV_MIN"] ?? betSettings().hit_ev_min }));
+      toast(ok ? "約1分後に動きます" : "予約できませんでした（アラームの許可を確かめてください）");
+    }, !aiRec);
+  item("3. 結果の自動取得", anyRec ? `約1分後に、${anyRec[1]["競馬場"]} ${anyRec[1]["レース番号"]}R の結果ページを裏で読みます。AI の回答か買った馬券があれば「答え合わせ」の通知、なければ通知なしで記録に結果が入ります（発走前のレースは「確定していない」扱い）` : "記録がないので試せません",
+    "1分後に動かす", () => {
+      const [k, r] = anyRec;
+      try {
+        Native.scheduleResultCheck(JSON.stringify({ key: k, race_id: r.race_id, date: r["日付"], venue: r["競馬場"], no: r["レース番号"],
+          title: `${r["レース名"] || ""}（動作確認）`, time: r["発走"], start: Date.now() - (KS.CONFIG.RESULT_DELAY_MINUTES - 1) * 60000,
+          bets: r["AI"] ? r["AI"]["買い目"] : [], hit_bets: hasHitOf(r) ? (r["AI"]["的中買い目"] || []) : null,
+          own_bets: ownBetsOf(r).length ? r["購入"] : null, mode: r["AI"] ? (r["買い方"] || "ev") : "none" }));
+        toast("約1分後に動きます");
+      } catch (e) { logError("動作確認：結果の自動取得", e); toast("予約できませんでした"); }
+    }, !anyRec);
+  item("4. 自動バックアップ", "すぐに「ダウンロード/keiba-backup」にファイルを書きます。ファイルアプリで開けるか確かめてください", "今すぐバックアップ", () => runBackup(true));
+  item("5. レース映像（小窓）", "映像の画面が開き、すぐ小窓になってこの画面に戻ります", "レース映像を開く", () => openLive(state.venue || ""));
+}
+
 // ===== 記録の自動バックアップ =====
 // 週に1回、記録をすべて「ダウンロード/keiba-backup」に書く（新しい3件だけ残す）。中身は「書き出す」と同じなので「読み込む」で戻せる。
 // 失敗したら1日は試さない
 const BACKUP_KEY = "keiba-backup";
-const BACKUP_EVERY = 7 * 24 * 3600 * 1000;
+const BACKUP_EVERY = KS.CONFIG.BACKUP_DAYS * 24 * 3600 * 1000;
 function backupInfo() { return store.get(BACKUP_KEY, {}); }
 function runBackup(manual) {
   const recs = Object.values(readRecords());

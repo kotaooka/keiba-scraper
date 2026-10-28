@@ -8,6 +8,8 @@ on:
     paths:
       - "keiba_scraper.py"
       - "tests/**"
+      - "tools/**"
+      - "android/app/src/main/java/**/Config.kt"
       - "android/app/src/main/assets/**"
       - ".github/workflows/tests.yml"
   pull_request:
@@ -40,6 +42,12 @@ jobs:
 
       - name: PC版とアプリ版の計算の一致
         run: python tests/test_parity.py
+
+      - name: 設定値（PC版・アプリ・Kotlin）の一致
+        run: python tests/test_config.py
+
+      - name: 指示文が keiba_scraper.py から作り直されているか
+        run: python tools/sync_prompt.py --check
 
       - name: アプリの画面
         run: node tests/ui_smoke.js

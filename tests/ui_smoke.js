@@ -141,10 +141,12 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     const rec = await page.evaluate((records) => {
       const o = readRecords(); records.forEach((r, i) => { o[`${r["日付"]}|${r["競馬場"]}|${r["レース番号"]}|${i}`] = r; }); writeRecords(o);
       showRecords();
-      return [...document.querySelectorAll(".card h3")].map((x) => x.textContent);
+      return { h: [...document.querySelectorAll(".card h3")].map((x) => x.textContent), items: document.querySelectorAll(".rec-list .rec-item").length, brier: [...document.querySelectorAll(".card h3")].some((x) => x.textContent.startsWith("推定勝率の精度")), ex: document.querySelector(".backup-line").parentElement.querySelectorAll("button").length };
     }, records);
-    check(scheme, "収支の推移", rec.some((t) => t.startsWith("収支の推移")), rec.join(","));
-    check(scheme, "CLV", rec.some((t) => t.startsWith("締切オッズとの比較")));
+    check(scheme, "収支の推移", rec.h.some((t) => t.startsWith("収支の推移")), rec.h.join(","));
+    check(scheme, "CLV", rec.h.some((t) => t.startsWith("締切オッズとの比較")));
+    check(scheme, "記録の一覧が並ぶ", rec.items > 0, String(rec.items));
+    check(scheme, "精度のカードと書き出しのボタン", rec.brier && rec.ex === 3, String(rec.ex));
     check(scheme, "記録の画面が横にはみ出さない", (await overflow()) <= 0);
 
     // 設定・予想の条件
@@ -158,6 +160,21 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     check(scheme, "ケリー基準の設定", st.kelly);
     check(scheme, "締切5分前の確認のオン・オフ", st.pre);
     check(scheme, "設定の画面が横にはみ出さない", (await overflow()) <= 0);
+
+    // エラーの記録・動作確認の画面
+    const tools = await page.evaluate(() => {
+      logError("テスト", new Error("わざと起こしたエラー"));
+      showErrors();
+      const errItems = document.querySelectorAll(".err-item").length;
+      showDeviceTest();
+      const cards = document.querySelectorAll(".test-card").length;
+      let notified = false; Native.testNotify = () => { notified = true; };
+      document.querySelector(".test-card .btn").click();
+      localStorage.removeItem("keiba-errors");
+      return { errItems, cards, notified };
+    });
+    check(scheme, "エラーの記録の画面", tools.errItems >= 1, JSON.stringify(tools));
+    check(scheme, "動作確認の画面（5項目）", tools.cards === 5 && tools.notified, JSON.stringify(tools));
 
     check(scheme, "画面のエラーなし", errs.length === 0, errs.join(" / "));
     await page.close();

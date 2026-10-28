@@ -38,5 +38,7 @@ out.harville = KS.harville(probs);
 // 記録の集計（回収率・精度・CLV）
 out.summary = KS.computeSummary(JSON.parse(fs.readFileSync(path.join(FX, "records.json"), "utf8")));
 // AI の回答の読み取り
+out.migrated = [{ "レース番号": "7", "日付": "20261025", "競馬場": "盛岡" }, { schema: 2, "AI": null }, "x", { "馬": [], "レース番号": 3 }]
+  .concat(JSON.parse(fs.readFileSync(path.join(FX, "records.json"), "utf8")).slice(0, 3)).map((r) => KS.migrateRecord(r));
 out.ai_block = KS.parseAiBlock(fs.readFileSync(path.join(FX, "ai_answer.txt"), "utf8"));
 process.stdout.write(JSON.stringify(out));

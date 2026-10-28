@@ -97,7 +97,7 @@ PROMPT_TEXT = """
 ・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
 ・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
 ・オッズが「--」の馬の単勝・複勝と、オッズを取得できなかった券種は選ばないでください。
-・複勝・ワイドで、オッズの幅の下限が1.1倍以下の組は選ばないでください（当たっても払戻がほぼ元返しで、回収にならないため）。
+・複勝・ワイドで、オッズの幅の下限が{PAYBACK_MAX_ODDS}倍以下の組は選ばないでください（当たっても払戻がほぼ元返しで、回収にならないため）。
 ・単勝が発売前の予想オッズ（「データの欠損」に書いてあります）のときは、期待値は参考値として計算し、その旨を【前提】に書いてください。
 
 ■ 手順
@@ -134,8 +134,15 @@ TIMEOUT_SELECTOR = 10000  # セレクタ出現待機 (ms)
 RETRY            = 2      # ページ取得の試行回数
 REQUEST_INTERVAL = 2.0    # サイトへのアクセス間隔の下限 (秒)。サーバ負荷を避けるため短くしない
 
+# 判断の基準・件数など（Android版の scraper.js の CONFIG・Kotlin の Config と同じ値。tests/test_config.py で確かめる）
+PAYBACK_MAX_ODDS = 1.1     # 複勝・ワイドでオッズの下限がこれ以下の組は、当たってもほぼ元返し（指示文で選ばないよう伝える）
+CLV_VIEW_POINTS = 2        # CLV：AI が市場より「高く（低く）見た」とみなす推定勝率の差（ポイント）
+VERDICT_MIN_RACES = 30     # 集計の判定（どちらが当たっているか等）を出す最少レース数
+DAY_RESULTS_MAX = 6        # 当日の傾向に使う、このレースより前のレース数（新しい順）
+
 
 RECORD_DIR = OUTPUT_DIR / "records"  # 予想と結果の記録（1レース1ファイル）
+RECORD_SCHEMA = 2  # 記録の形式の版（中身は docs/record-format.md。上げたら migrate_record に直し方を足す）
 
 
 # ========== 表示幅（全角=2）を考慮した整形 ==========
@@ -1178,7 +1185,8 @@ def prompt_text(budget=None, max_bets=None, ev_min=None, mode=None, hit_min=None
         t = t.replace("{" + k + "}", parts[k])
     t = (t.replace("{BUDGET}", str(budget or BUDGET)).replace("{MAX_BETS}", str(max_bets or MAX_BETS))
          .replace("{EV_MIN}", fmt_ev(ev_min or EV_MIN))
-         .replace("{HIT_MIN}", fmt_pct(hit_min or HIT_MIN)).replace("{HIT_EV_MIN}", fmt_ev(hit_ev_min or HIT_EV_MIN)))
+         .replace("{HIT_MIN}", fmt_pct(hit_min or HIT_MIN)).replace("{HIT_EV_MIN}", fmt_ev(hit_ev_min or HIT_EV_MIN))
+         .replace("{PAYBACK_MAX_ODDS}", str(PAYBACK_MAX_ODDS)))
     return "\n".join(line.rstrip() for line in t.strip().split("\n"))
 
 
@@ -1342,27 +1350,9 @@ def day_trend_lines(day_results):
     return lines
 
 
-def format_for_ai(horses, keibajo, date, race_no, race_info=None,
-                  wide_top=None, sanren_top=None, warnings=None, payout_rate=None, day_results=None):
-    d = f"{date[:4]}/{date[4:6]}/{date[6:]}"
-    ri = race_info or {}
-    title = f"{d} {keibajo} {race_no}R"
-    if ri.get("レース名"):
-        title += f" {ri['レース名']}"
-    lines = [
-        f"【{title} 出馬表 + オッズ + 過去成績】",
-        f"収集時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        + (f" / 発走: {ri['発走']}" if ri.get("発走") else ""),
-        "",
-        f"レース条件: {ri.get('馬場種別', '不明')} {ri.get('距離', '不明')} "
-        f"/ 馬場状態: {ri.get('馬場状態', '不明')} / クラス: {ri.get('クラス') or '不明'}"
-        + (f" / {ri['頭数']}頭" if ri.get("頭数") else ""),
-        "",
-    ]
-    if payout_rate:
-        lines += [f"単勝の払戻率（オッズから逆算した目安）: {payout_rate * 100:.1f}%"
-                  "　※市場勝率は控除分を除いて合計100%にそろえた値", ""]
-
+def _ai_horse_table(horses):
+    """AI へ送るテキストの出馬表（馬番・騎手・オッズ・市場勝率など）"""
+    lines = []
     cols = [("馬番", 4, ">"), ("馬名", 20, "<"), ("性齢", 5, "<"), ("斤量", 5, ">"),
             ("騎手", 11, "<"), ("調教師", 11, "<"), ("馬体重", 9, ">"),
             ("単勝", 7, ">"), ("市場勝率", 9, ">"), ("人気", 5, ">"), ("複勝", 12, ">"), ("脚質", 5, "<")]
@@ -1384,8 +1374,12 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
                 h.get("人気", ""), h.get("複勝", "--"), h.get("脚質", "")]
         lines.append(" ".join(pad(v, w, a) for v, (_, w, a) in zip(vals, cols)))
     lines.append(rule)
+    return lines
 
-    # 各馬の過去成績
+
+def _ai_history(horses):
+    """AI へ送るテキストの各馬の過去成績（直近5走と条件別成績）"""
+    lines = []
     pcols = [("日付", 10, "<"), ("競馬場", 8, "<"), ("回", 2, "<"), ("距離", 7, "<"),
              ("馬場", 4, "<"), ("頭数", 4, ">"), ("馬番", 4, ">"), ("人気", 4, ">"),
              ("着順", 4, ">"), ("差", 5, ">"), ("タイム", 6, ">"), ("通過", 11, ">"),
@@ -1427,14 +1421,12 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
             r["回"] = r.get("回り", "")
             lines.append(" ".join(pad(r.get(c, ""), w, a) for c, w, a in pcols))
         lines.append("")
+    return lines
 
-    st = speed_table(horses, keibajo, ri)
-    if st:
-        lines += format_speed(st)
 
-    lines += day_trend_lines(day_results)
-
-    # 市場勝率から Harville 法で計算した複勝・ワイド・三連複の的中率（AI の推定的中率の目安）
+def _ai_market_lines(horses, wide_top, sanren_top):
+    """市場勝率から Harville 法で計算した複勝・ワイド・三連複の的中率（AI の推定的中率の目安）"""
+    lines = []
     hv = market_harville(horses)
     running = [h for h in horses if not h.get("取消")]
     place_key = "top3" if len(running) >= 8 else "top2"
@@ -1465,6 +1457,40 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
     if hv:
         lines += ["※市場計算は Harville 法（勝率どおりに1着が決まり、2・3着も残りの馬の勝率の比で決まるとみなす計算）の値。"
                   "人気馬の2・3着をやや多めに、人気薄をやや少なめに見積もる傾向がある"]
+    return lines
+
+
+def format_for_ai(horses, keibajo, date, race_no, race_info=None,
+                  wide_top=None, sanren_top=None, warnings=None, payout_rate=None, day_results=None):
+    d = f"{date[:4]}/{date[4:6]}/{date[6:]}"
+    ri = race_info or {}
+    title = f"{d} {keibajo} {race_no}R"
+    if ri.get("レース名"):
+        title += f" {ri['レース名']}"
+    lines = [
+        f"【{title} 出馬表 + オッズ + 過去成績】",
+        f"収集時刻: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        + (f" / 発走: {ri['発走']}" if ri.get("発走") else ""),
+        "",
+        f"レース条件: {ri.get('馬場種別', '不明')} {ri.get('距離', '不明')} "
+        f"/ 馬場状態: {ri.get('馬場状態', '不明')} / クラス: {ri.get('クラス') or '不明'}"
+        + (f" / {ri['頭数']}頭" if ri.get("頭数") else ""),
+        "",
+    ]
+    if payout_rate:
+        lines += [f"単勝の払戻率（オッズから逆算した目安）: {payout_rate * 100:.1f}%"
+                  "　※市場勝率は控除分を除いて合計100%にそろえた値", ""]
+
+    lines += _ai_horse_table(horses)
+    lines += _ai_history(horses)
+
+    st = speed_table(horses, keibajo, ri)
+    if st:
+        lines += format_speed(st)
+
+    lines += day_trend_lines(day_results)
+
+    lines += _ai_market_lines(horses, wide_top, sanren_top)
 
     notes = odds_notes(horses)
     if notes:
@@ -1478,9 +1504,6 @@ def format_for_ai(horses, keibajo, date, race_no, race_info=None,
 
 
 # ========== 1レース分の収集 ==========
-
-DAY_RESULTS_MAX = 6  # 当日の傾向に使う、このレースより前のレース数（新しい順）
-
 
 def scrape_day_results(page, code, race_date, race_no):
     """同じ日・同じ競馬場で、このレースより前の確定済みレースの結果を読む（新しい順に最大 DAY_RESULTS_MAX レース）。
@@ -1609,10 +1632,33 @@ def collect_race(page, keibajo_name, race_date, race_no):
 
 # ========== 予想の記録 ==========
 
+def migrate_record(r):
+    """古い形式の記録を今の形式（RECORD_SCHEMA）に直す。dict でなければ None。Android版の migrateRecord と同じ。
+    版1（schema なし）→ 版2：AI・結果・馬の項目を必ず持たせ、レース番号を数にする"""
+    if not isinstance(r, dict):
+        return None
+    out = dict(r)
+    try:
+        version = int(out.get("schema") or 1)
+    except (TypeError, ValueError):
+        version = 1
+    if version < 2:
+        out.setdefault("AI", None)
+        out.setdefault("結果", None)
+        if not isinstance(out.get("馬"), dict):
+            out["馬"] = {}
+        no = out.get("レース番号")
+        if isinstance(no, str) and no.strip().isdigit():
+            out["レース番号"] = int(no.strip())
+        out["schema"] = 2
+    return out
+
+
 def new_record(race_id, keibajo, race_date, race_no, race_info, horses, payout_rate):
     """収集時点のオッズと市場勝率を記録用の dict にする（AI の回答と結果はあとで入る）"""
     ri = race_info or {}
     return {
+        "schema": RECORD_SCHEMA,
         "race_id": race_id,
         "日付": race_date,
         "競馬場": keibajo,
@@ -1649,7 +1695,9 @@ def load_records():
     recs = []
     for f in sorted(RECORD_DIR.glob("*.json")):
         try:
-            recs.append(json.loads(f.read_text(encoding="utf-8")))
+            r = migrate_record(json.loads(f.read_text(encoding="utf-8")))
+            if r is not None:
+                recs.append(r)
         except (OSError, ValueError) as e:
             print(f"  記録を読めませんでした: {f.name}（{e}）")
     return recs
@@ -2168,9 +2216,9 @@ def _clv_summary(races, out):
             if mp is None or n not in close_mp or n not in pred:
                 continue
             d = pred[n]["勝率"] - mp
-            if d >= 2:
+            if d >= CLV_VIEW_POINTS:
                 hi_moves.append(close_mp[n] - mp)
-            elif d <= -2:
+            elif d <= -CLV_VIEW_POINTS:
                 lo_moves.append(close_mp[n] - mp)
     if not per_race and not hi_moves and not lo_moves:
         return out
@@ -2205,7 +2253,7 @@ def format_clv(clv):
             lines.append(f"  AI が市場より2ポイント以上{label}見た馬 {x['n']}頭: 締切までに市場勝率が平均 {x['move']:+.2f}ポイント")
     if clv["n"]:
         ci = clv["ci"]
-        if clv["n_races"] < 30 or not ci:
+        if clv["n_races"] < VERDICT_MIN_RACES or not ci:
             lines.append("  → まだ判断できない（30レース未満）")
         elif ci[0] > 1:
             lines.append("  → AI の買った馬は記録のあとに人気を集めている（市場より先に評価できている可能性がある）")
@@ -2316,7 +2364,7 @@ def format_summary(sm):
         lo, hi = br["ci"]
         lines.append(f"  対象 {br['n']}レース　市場 {br['market']:.4f} / AI {br['ai']:.4f}")
         lines.append(f"  AI − 市場 = {br['diff']:+.4f}（95%区間 {lo:+.4f}〜{hi:+.4f}）")
-        if br["n"] < 30:
+        if br["n"] < VERDICT_MIN_RACES:
             lines.append("  → まだ判断できない（30レース未満）")
         elif hi < 0:
             lines.append("  → AI の推定勝率は市場（単勝オッズ）より当たっている")
@@ -2346,7 +2394,7 @@ def format_summary(sm):
     else:
         lines.append("  市場勝率と AI 推定がそろったレースがありません。")
 
-    if sm["n_races"] < 30:
+    if sm["n_races"] < VERDICT_MIN_RACES:
         lines += ["", f"※レース数が {sm['n_races']}件と少ないため、区間が広く結論は出せません。"
                       "目安として50レース以上たまってから判断してください。"]
     return "\n".join(lines)
@@ -2393,6 +2441,7 @@ def run_import(path):
         items = []
     added = merged = skipped = 0
     for r in items:
+        r = migrate_record(r)
         if not isinstance(r, dict) or not r.get("race_id"):
             skipped += 1  # 競馬場コードの分からないレースなど
             continue

@@ -60,6 +60,8 @@ def py_side():
     ps = [0.35, 0.2, 0.12, 0.1, 0.08, 0.06, 0.04, 0.03, 0.015, 0.005]
     out["harville"] = ks.harville({str(i + 1): p for i, p in enumerate(ps)})
     out["summary"] = ks.compute_summary(json.loads(rd("records.json")))
+    out["migrated"] = [ks.migrate_record(r) for r in [{"レース番号": "7", "日付": "20261025", "競馬場": "盛岡"}, {"schema": 2, "AI": None}, "x", {"馬": [], "レース番号": 3}]
+                       + json.loads(rd("records.json"))[:3]]
     out["ai_block"] = ks.parse_ai_block(rd("ai_answer.txt"))
     return out
 

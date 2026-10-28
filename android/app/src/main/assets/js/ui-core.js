@@ -28,6 +28,22 @@ function setThemePref(t) {
   applyTheme();
 }
 
+// ===== エラーの記録 =====
+// 黙って捨てていたエラーを、端末の中に新しい順で ERR_MAX 件まで残す（設定 →「エラーの記録」で見られる。Kotlin 側の分と合わせて出す）
+const ERR_KEY = "keiba-errors", ERR_MAX = 100;
+function logError(where, e) {
+  try {
+    const list = JSON.parse(localStorage.getItem(ERR_KEY) || "[]");
+    const d = new Date(Date.now() + (540 + new Date().getTimezoneOffset()) * 60000), z = (n) => String(n).padStart(2, "0");
+    list.unshift({ at: `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`,
+      where: String(where), msg: String((e && (e.stack || e.message)) || e).slice(0, 400) });
+    localStorage.setItem(ERR_KEY, JSON.stringify(list.slice(0, ERR_MAX)));
+  } catch (x) { /* 記録そのものに失敗したときは何もしない */ }
+}
+function readErrors() { try { return JSON.parse(localStorage.getItem(ERR_KEY) || "[]"); } catch (e) { return []; } }
+window.addEventListener("error", (ev) => logError("画面（捕まえていないエラー）", ev.error || ev.message));
+window.addEventListener("unhandledrejection", (ev) => logError("画面（捕まえていない Promise）", ev.reason));
+
 // ===== Kotlin とのやり取り =====
 // JS → Kotlin：window.Android（MainActivity の Bridge）
 // Kotlin → JS：App.onRaceList / onStep / onLog / onResult / back / setTheme
@@ -40,7 +56,7 @@ const Native = window.Android || {
   setReservation(j) { return JSON.stringify({ ok: true, exact: false, notif: true }); }, removeReservation() {},
   takeBackgroundResults() { return "[]"; }, exactAlarmAllowed() { return false; }, openExactAlarmSettings() {},
   notificationsAllowed() { return true; }, requestNotifications() {},
-  readClipboard() { return ""; }, clipStamp() { return -1; }, autoBackup() {}, schedulePreCheck() { return false; }, cancelPreCheck() {}, fetchResults() {}, exportRecords() {}, importRecords() {}, scheduleResultCheck() { return "{}"; }, cancelResultCheck() {}, takeRaceResults() { return "[]"; }
+  readClipboard() { return ""; }, clipStamp() { return -1; }, errorLog() { return "[]"; }, clearErrorLog() {}, testNotify() {}, autoBackup() {}, schedulePreCheck() { return false; }, cancelPreCheck() {}, fetchResults() {}, exportRecords() {}, importRecords() {}, scheduleResultCheck() { return "{}"; }, cancelResultCheck() {}, takeRaceResults() { return "[]"; }
 };
 
 const $ = (id) => document.getElementById(id);
@@ -70,7 +86,7 @@ const state = {
 // ===== 端末に残す設定（すべて try で包む。保存できなくても動く） =====
 const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* 保存できなくても動く */ } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { logError(`保存（${k}）`, e); } },
 };
 const FAV_KEY = "keiba-fav-venues", LAST_VENUE_KEY = "keiba-last-venue";
 state.venue = store.get(LAST_VENUE_KEY, null);
@@ -104,7 +120,7 @@ function writeCache(c) {
   // 新しい順に 40 件まで残す
   const keys = Object.keys(c).sort((a, b) => (c[b].at || "").localeCompare(c[a].at || "")).slice(0, 40);
   const out = {}; for (const k of keys) out[k] = c[k];
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(out)); } catch (e) { /* 保存できなくても動く */ }
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(out)); } catch (e) { logError("収集済みの記録の保存", e); }
 }
 const cacheKey = (date, venue, no) => `${date}|${venue}|${no}`;
 
@@ -403,7 +419,7 @@ function showScreen(name) {
   $("home").classList.toggle("hidden", name !== "home");
   $("backBtn").textContent = name === "settings" && state.back === "result" ? "‹ 結果に戻る"
     : name === "result" && state.fromRecords ? "‹ 記録に戻る"
-    : state.parent === "prefs" && ["settings", "records", "about"].includes(name) ? "‹ 設定" : "‹ レース一覧";
+    : state.parent === "prefs" && ["settings", "records", "about", "errors", "devtest"].includes(name) ? "‹ 設定" : "‹ レース一覧";
   $("detail").classList.toggle("hidden", name === "home");
   window.scrollTo({ top: 0 });
 }

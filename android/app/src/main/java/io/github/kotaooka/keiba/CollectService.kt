@@ -66,7 +66,8 @@ class CollectService : Service() {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // 予期しないエラーでもアプリごと落とさない
+                // 予期しないエラーでもアプリごと落とさない（記録だけ残す）
+                ErrorLog.add(this@CollectService, "裏の処理（${if (resultMode) "答え合わせ" else if (preMode) "締切前の確認" else "自動収集"}）：$title", e)
             } finally {
                 if (wake.isHeld) wake.release()
                 running--
@@ -113,6 +114,7 @@ class CollectService : Service() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            ErrorLog.add(this, "自動収集：$title", e)
             Scraper.Outcome(null, e.message ?: "エラー")
         } finally {
             CollectLock.mutex.unlock()
@@ -178,6 +180,7 @@ class CollectService : Service() {
             throw e
         } catch (e: Exception) {
             // 読めなかったときは、あとで読み直す
+            ErrorLog.add(this, "答え合わせ：$title", e)
         } finally {
             CollectLock.mutex.unlock()
         }
@@ -232,7 +235,8 @@ class CollectService : Service() {
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // 取れなかったときは何も出さない（時刻を過ぎてからでは役に立たないので）
+            // 取れなかったときは通知しない（時刻を過ぎてからでは役に立たないので）。記録だけ残す
+            ErrorLog.add(this, "締切前の確認：$title", e)
         } finally {
             CollectLock.mutex.unlock()
         }

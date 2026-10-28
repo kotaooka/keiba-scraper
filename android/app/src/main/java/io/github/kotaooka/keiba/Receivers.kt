@@ -21,7 +21,7 @@ class AlarmReceiver : BroadcastReceiver() {
             runCatching {
                 ctx.startForegroundService(Intent(ctx, CollectService::class.java)
                     .putExtra("mode", "precheck").putExtra("reservation", r.toString()))
-            }
+            }.onFailure { ErrorLog.add(ctx, "締切前の確認を始められなかった：$title", it) }
             return
         }
 
@@ -37,6 +37,7 @@ class AlarmReceiver : BroadcastReceiver() {
                 ctx.startForegroundService(Intent(ctx, CollectService::class.java)
                     .putExtra("mode", "result").putExtra("reservation", r.toString()))
             } catch (e: Exception) {
+                ErrorLog.add(ctx, "答え合わせを始められなかった：$title", e)
                 fallback()
             }
             return
@@ -58,6 +59,7 @@ class AlarmReceiver : BroadcastReceiver() {
             ctx.startForegroundService(Intent(ctx, CollectService::class.java).putExtra("reservation", r.toString()))
         } catch (e: Exception) {
             // Android の制限で裏から始められなかったとき
+            ErrorLog.add(ctx, "自動収集を始められなかった：$title", e)
             fallback()
         }
     }

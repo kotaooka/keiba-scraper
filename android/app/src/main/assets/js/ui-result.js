@@ -20,6 +20,35 @@ function renderResult() {
   const body = $("detailBody"); body.replaceChildren();
   const info = res.info;
   const r = { ...race, title: info.race_name || race.title, time: info.start || race.time, heads: info.heads || race.heads };
+  resultTop(body, venue, race, res, r);
+  const resBox = resultSection(venue, race, res);
+  const infoBox = infoSection(venue, race, res);
+  const hc = horsesCard(info);
+  const speedCard = speedCardOf(info);
+  // 画面の並び：AI の回答を記録したあとは、判断に使う「AI の予想」「買った馬券」を上に出す
+  const recNow0 = readRecords()[cacheKey(state.date, venue, race.no)];
+  const hasAi = !!(recNow0 && recNow0["AI"]);
+  const ai = aiCard(venue, race); ai.id = "sec-ai";
+  const own = ownCard(venue, race); own.id = "sec-own";
+  const pc = el("details", "card preview"); pc.id = "sec-text";
+  keepOpen(pc, "text");
+  const sendText = textFor(res);
+  pc.append(el("summary", null, `送るテキストを見る（${sendText.split("\n").length}行）`));
+  pc.append(el("pre", null, sendText));
+  const textNote = el("p", "note", `ワイド上位 ${info.wide}組・三連複上位 ${info.sanren}組も送ります。収集 ${res.at}` + (fresh ? "（テキストはコピー済み）" : ""));
+  const order = hasAi ? [resBox, ai, own, infoBox, hc, speedCard, pc, textNote] : [resBox, infoBox, hc, speedCard, ai, own, pc, textNote];
+  // 見出しのナビ（押すとその場所へ。画面の上に固定）
+  const navItems = [["sec-res", "結果", resBox.childElementCount > 0], ["sec-ai", "AI予想", true], ["sec-own", "馬券", true], ["sec-horses", "出走馬", true], ["sec-time", "タイム", !!speedCard], ["sec-text", "テキスト", true]]
+    .filter((x) => x[2]).sort((a, b) => order.findIndex((n) => n && n.id === a[0]) - order.findIndex((n) => n && n.id === b[0]));
+  body.append(secNav(navItems));
+  for (const n of order) if (n && (n !== resBox || resBox.childElementCount)) body.append(n);
+
+  body.append(sendBar(venue, race, res));
+}
+
+// 結果画面の上：レース名・条件の札・発走までの時間・オッズを更新・通知・レース映像
+function resultTop(body, venue, race, res, r) {
+  const info = res.info;
   body.append(raceHead(venue, r));
 
   const chips = el("div", "chips");
@@ -42,25 +71,31 @@ function renderResult() {
   const lv = liveButton(venue, "wide"); lv.append(el("small", null, "小窓で開きます"));
   body.append(lv);
   updateTimeLine();
+}
+
+// レースの結果（発走後の「レース結果を取得」と、取れた結果のカード）
+function resultSection(venue, race, res) {
   const resBox = el("div", "sec-box"); resBox.id = "sec-res";
-  const infoBox = el("div", "sec-box");
-  let speedCard = null;
-  // 発走したら、結果ページを読んで着順と払戻を出す（記録があればそのまま答え合わせする）
-  {
-    const umNow = untilMin(state.date, res.info.start || race.time);
-    const rk = cacheKey(state.date, venue, race.no);
-    const recNow = readRecords()[rk];
-    const got = (recNow && recNow["結果"]) || res.result || null;
-    if (umNow != null && umNow <= 0) {
-      const fb = el("button", "btn " + (got ? "secondary" : "primary") + " result-btn",
-        state.fetching ? "結果を取得中…" : got ? "レース結果を取り直す" : "レース結果を取得");
-      fb.disabled = !!state.fetching;
-      fb.onclick = () => fetchRaceResult(venue, race);
-      resBox.append(fb);
-      if (!got && umNow > -10) resBox.append(el("p", "note", "結果は確定してから（発走の10〜15分後ごろ）取れます"));
-    }
-    if (got) resBox.append(resultCard(got, res.info));
+  const umNow = untilMin(state.date, res.info.start || race.time);
+  const rk = cacheKey(state.date, venue, race.no);
+  const recNow = readRecords()[rk];
+  const got = (recNow && recNow["結果"]) || res.result || null;
+  if (umNow != null && umNow <= 0) {
+    const fb = el("button", "btn " + (got ? "secondary" : "primary") + " result-btn",
+      state.fetching ? "結果を取得中…" : got ? "レース結果を取り直す" : "レース結果を取得");
+    fb.disabled = !!state.fetching;
+    fb.onclick = () => fetchRaceResult(venue, race);
+    resBox.append(fb);
+    if (!got && umNow > -10) resBox.append(el("p", "note", "結果は確定してから（発走の10〜15分後ごろ）取れます"));
   }
+  if (got) resBox.append(resultCard(got, res.info));
+  return resBox;
+}
+
+// 送る前の確認：AI への条件・予想オッズ・オッズの動き・オッズの注記・欠損
+function infoSection(venue, race, res) {
+  const info = res.info;
+  const infoBox = el("div", "sec-box");
   const cond = el("button", "cond-line");
   cond.append(el("span", null, "AI への条件"), el("b", null, betSummary(betSettings()) + (promptTemplate() ? "・指示文は書き換え中" : "")), el("span", "go", "変更 ›"));
   cond.onclick = () => { state.back = "result"; showSettings(); };
@@ -109,7 +144,11 @@ function renderResult() {
     infoBox.append(w);
   }
 
-  // 各馬
+  return infoBox;
+}
+
+// 各馬（市場勝率と単勝。行をタップで過去5走）
+function horsesCard(info) {
   const hc = el("div", "card");
   const hh = el("h3", null, "各馬");
   if (info.payout_rate) hh.append(el("span", "aside num", `払戻率 ${(info.payout_rate * 100).toFixed(1)}%`));
@@ -145,8 +184,12 @@ function renderResult() {
   hc.append(lg);
   hc.id = "sec-horses";
 
-  // 同条件の走破タイム（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速）
-  const sp = res.info.speed;
+  return hc;
+}
+
+// 同条件の走破タイム（過去5走のうち、今回と同じ競馬場・同じ距離のレースの最速）。無ければ null
+function speedCardOf(info) {
+  const sp = info.speed;
   if (sp && sp.rows && sp.rows.length) {
     const sc = el("div", "card");
     const sh = el("h3", null, "走破タイム"); sh.append(el("span", "aside", sp["条件"])); sc.append(sh);
@@ -163,28 +206,15 @@ function renderResult() {
     sc.append(tb);
     if (sp.none && sp.none.length) sc.append(el("p", "note", `同条件の走歴なし：${sp.none.join("・")}番`));
     addHelp(sc, "speed", [`過去5走のうち、今回と同じ競馬場・同じ距離（${sp["条件"]}）のレースの最速タイム。条件の違うレースのタイムは比べられないので入れていません。馬場状態で速さが変わるので、馬場も見てください`]);
-    sc.id = "sec-time"; speedCard = sc;
+    sc.id = "sec-time";
+    return sc;
   }
+  return null;
 
-  // 画面の並び：AI の回答を記録したあとは、判断に使う「AI の予想」「買った馬券」を上に出す
-  const recNow0 = readRecords()[cacheKey(state.date, venue, race.no)];
-  const hasAi = !!(recNow0 && recNow0["AI"]);
-  const ai = aiCard(venue, race); ai.id = "sec-ai";
-  const own = ownCard(venue, race); own.id = "sec-own";
-  const pc = el("details", "card preview"); pc.id = "sec-text";
-  keepOpen(pc, "text");
-  const sendText = textFor(res);
-  pc.append(el("summary", null, `送るテキストを見る（${sendText.split("\n").length}行）`));
-  pc.append(el("pre", null, sendText));
-  const textNote = el("p", "note", `ワイド上位 ${info.wide}組・三連複上位 ${info.sanren}組も送ります。収集 ${res.at}` + (fresh ? "（テキストはコピー済み）" : ""));
-  const order = hasAi ? [resBox, ai, own, infoBox, hc, speedCard, pc, textNote] : [resBox, infoBox, hc, speedCard, ai, own, pc, textNote];
-  // 見出しのナビ（押すとその場所へ。画面の上に固定）
-  const navItems = [["sec-res", "結果", resBox.childElementCount > 0], ["sec-ai", "AI予想", true], ["sec-own", "馬券", true], ["sec-horses", "出走馬", true], ["sec-time", "タイム", !!speedCard], ["sec-text", "テキスト", true]]
-    .filter((x) => x[2]).sort((a, b) => order.findIndex((n) => n && n.id === a[0]) - order.findIndex((n) => n && n.id === b[0]));
-  body.append(secNav(navItems));
-  for (const n of order) if (n && (n !== resBox || resBox.childElementCount)) body.append(n);
+}
 
-  // 送る（画面の下に固定）
+// 画面の下に固定の「AI へ送る」「コピー」「即PAT」
+function sendBar(venue, race, res) {
   const bar = el("div", "send-bar");
   const send = el("button", "btn primary");
   send.innerHTML = ICON_SEND;
@@ -205,8 +235,9 @@ function renderResult() {
     pat.onclick = openPat;
     bar.append(pat);
   }
-  body.append(bar);
+  return bar;
 }
+
 
 // 結果画面の見出しナビ。押すとその場所へ移る。いま見ている場所に印を付ける
 function secNav(items) {
@@ -355,7 +386,7 @@ const App = {
     if (state.screen === "settings" && state.back === "result" && state.result) { state.back = null; showScreen("result"); renderResult(); return true; }
     if (state.screen === "result" && state.fromRecords) { state.fromRecords = false; showRecords(); return true; }
     // 設定の画面から開いた画面は、設定へ戻る
-    if (state.parent === "prefs" && ["settings", "records", "about"].includes(state.screen)) { showScreen("prefs"); renderPrefs(); return true; }
+    if (state.parent === "prefs" && ["settings", "records", "about", "errors", "devtest"].includes(state.screen)) { showScreen("prefs"); renderPrefs(); return true; }
     if (state.screen === "collect" && state.job) { Native.cancel(); }
     goHome(); return true;
   },
@@ -375,8 +406,9 @@ const App = {
     items = Array.isArray(items) ? items : items && Array.isArray(items.records) ? items.records : [];
     const recs = readRecords();
     let added = 0, merged = 0, skipped = 0;
-    for (const r of items) {
-      if (!validRecord(r)) { skipped++; continue; }
+    for (const r0 of items) {
+      const r = KS.migrateRecord(r0);
+      if (!r || !validRecord(r)) { skipped++; continue; }
       const k = cacheKey(r["日付"], r["競馬場"], r["レース番号"]);
       const cur = recs[k];
       if (!cur) { recs[k] = r; added++; continue; }
@@ -417,7 +449,7 @@ window.App = App;
 // 「このレースに記録しますか」と出す。送ってから3時間以内・AI の回答をまだ記録していないときだけ読む
 // （Android 12 以降はほかのアプリのコピーを読むと「貼り付けました」と出るため、必要なときだけ読む）
 const SENT_KEY = "keiba-sent";
-const SENT_TTL = 3 * 3600 * 1000;
+const SENT_TTL = KS.CONFIG.SENT_HOURS * 3600 * 1000;
 function markSent(venue, race) { store.set(SENT_KEY, { key: cacheKey(state.date, venue, race.no), at: Date.now() }); }
 function checkClipboardAnswer() {
   if (state.screen !== "result" || !state.result) return;

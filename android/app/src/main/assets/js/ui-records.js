@@ -4,7 +4,12 @@
 // ===== 予想の記録と答え合わせ =====
 // 形式は PC版の output/records/<race_id>.json と同じ（書き出して PC版の verify にもかけられる）。キーは cacheKey
 const REC_KEY = "keiba-records", AI_TEXT_KEY = "keiba-ai-texts";
-const readRecords = () => store.get(REC_KEY, {});
+// 記録を読む（古い形式の記録は今の形式に直して返す）
+const readRecords = () => {
+  const o = store.get(REC_KEY, {}), out = {};
+  for (const [k, r] of Object.entries(o)) { const m = KS.migrateRecord(r); if (m) out[k] = m; }
+  return out;
+};
 // 端末の時刻（日本時間）で「YYYY-MM-DD HH:MM:SS」。PC版の記録と同じ形
 function localStamp(d) {
   d = d || jstNow();
@@ -70,7 +75,7 @@ function writeRecords(recs) {
   // AI の回答か買った馬券のある記録は新しい順に 500件、データだけの記録（AI なし）は新しい順に 300件まで残す
   // （端末の保存の上限を超えないように。全部の控えは自動バックアップと書き出しにある）
   const keys = Object.keys(recs).sort((a, b) => recOrder(recs[b]).localeCompare(recOrder(recs[a])));
-  const main = keys.filter((k) => !isDataOnly(recs[k])).slice(0, 500), data = keys.filter((k) => isDataOnly(recs[k])).slice(0, 300);
+  const main = keys.filter((k) => !isDataOnly(recs[k])).slice(0, KS.CONFIG.RECORDS_MAX), data = keys.filter((k) => isDataOnly(recs[k])).slice(0, KS.CONFIG.DATA_RECORDS_MAX);
   const out = {}; for (const k of keys) if (main.includes(k) || data.includes(k)) out[k] = recs[k];
   store.set(REC_KEY, out);
 }
@@ -148,7 +153,7 @@ function scheduleResultCheck(key, rec, race) {
       hit_bets: hasHitOf(rec) ? (rec["AI"]["的中買い目"] || []) : null,
       own_bets: ownBetsOf(rec).length ? rec["購入"] : null,
       mode: rec["AI"] ? (rec["買い方"] || "ev") : "none" }));
-  } catch (e) { /* 予約できなくても記録は残る */ }
+  } catch (e) { logError("結果の自動取得の予約", e); }
   // 発走5分前にオッズを取り直して、買い目の期待値を確かめる（AI の回答を記録したレースだけ）
   try {
     if (rec["AI"] && preCheckOn() && Native.schedulePreCheck) {
@@ -159,12 +164,12 @@ function scheduleResultCheck(key, rec, race) {
         pred: rec["AI"]["予想"] || {}, ev_min: rec["EV_MIN"] != null ? rec["EV_MIN"] : bs.ev_min,
         hit_ev_min: rec["HIT_EV_MIN"] != null ? rec["HIT_EV_MIN"] : bs.hit_ev_min }));
     }
-  } catch (e) { /* 予約できなくても記録は残る */ }
+  } catch (e) { logError("締切前の確認の予約", e); }
 }
 // アプリを閉じている間に自動で取った結果を、記録へ入れる
 function mergeRaceResults() {
   let list = [];
-  try { list = JSON.parse(Native.takeRaceResults() || "[]"); } catch (e) {}
+  try { list = JSON.parse(Native.takeRaceResults() || "[]"); } catch (e) { logError("裏で取った結果の読み込み", e); }
   if (!list.length) return;
   const recs = readRecords();
   for (const x of list) {
@@ -285,11 +290,11 @@ function dayPnl(date) {
   for (const r of rs) {
     if (!r["結果"]) continue;
     let rows = null, hrows = null, orows = null;
-    try { orows = ownBetsOf(r).length ? KS.settleBets(r, "購入") : null; } catch (e) {}
+    try { orows = ownBetsOf(r).length ? KS.settleBets(r, "購入") : null; } catch (e) { logError(`答え合わせ（${r.race_id}・買った馬券）`, e); }
     if (orows) { oSettled++; od += orows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
     if (!r["AI"]) continue;
-    try { rows = r["買い方"] === "hit" ? null : KS.settleBets(r, "買い目"); } catch (e) { /* 形の崩れた記録は数えない */ }
-    try { hrows = hasHitOf(r) ? KS.settleBets(r, "的中買い目") : null; } catch (e) {}
+    try { rows = r["買い方"] === "hit" ? null : KS.settleBets(r, "買い目"); } catch (e) { logError(`答え合わせ（${r.race_id}・期待値重視）`, e); }
+    try { hrows = hasHitOf(r) ? KS.settleBets(r, "的中買い目") : null; } catch (e) { logError(`答え合わせ（${r.race_id}・的中重視）`, e); }
     if (rows) { settled++; d += rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
     if (hrows) { hSettled++; hd += hrows.reduce((t, x) => t + x["払戻"] - x["金額"], 0); }
   }
@@ -300,30 +305,9 @@ function updateRecBadge() { const n = pendingResults().length; $("recDot").class
 // 結果画面の「AI の予想」欄
 // 買い目のオッズ（収集したデータから。単勝・複勝は各馬、ワイド・3連複は人気上位10組にあれば）。
 // 返り値 {text: 表示, low: 期待値・払戻の計算に使う倍率（幅があるときは下限）} か null
-function betOddsOf(b, info) {
-  if (!info) return null;
-  const nums = b["組み合わせ"].split("-");
-  const lowOf = (t) => { const m = /\d+(\.\d+)?/.exec(String(t || "")); return m ? parseFloat(m[0]) : null; };
-  if (b["券種"] === "単勝" || b["券種"] === "複勝") {
-    const h = (info.horses || []).find((x) => String(parseInt(x.no, 10)) === nums[0]);
-    const t = h && (b["券種"] === "単勝" ? h.odds : h.fuku);
-    const low = lowOf(t);
-    return low ? { text: String(t), low } : null;
-  }
-  const list = (info.combos || {})[b["券種"]] || [];
-  const c = list.find((x) => x.key === b["組み合わせ"]);
-  const low = c && lowOf(c.odds);
-  return low ? { text: c.odds, low } : null;
-}
-// AI が見積もった的中率。#BET の推定的中率の列があればそれ、無ければ単勝は推定勝率・複勝は推定複勝率（ほかは null）
-function betProbOf(b, pred) {
-  if (typeof b["的中率"] === "number" && b["的中率"] > 0) return b["的中率"] / 100;
-  const a = pred[b["組み合わせ"]];
-  if (!a) return null;
-  if (b["券種"] === "単勝") return a["勝率"] / 100;
-  if (b["券種"] === "複勝") return a["複勝率"] / 100;
-  return null;
-}
+// 買い目のオッズと AI の見積もった的中率は scraper.js の計算を使う（締切前の点検と同じ計算にするため）
+const betOddsOf = (b, info) => KS.betOddsFromInfo(b, info);
+const betProbOf = (b, pred) => KS.betProbOf(b, pred);
 // AI の回答から総評の一文を取り出す（見出し「総評」の行か、その次の行）
 function aiComment(text) {
   const lines = String(text || "").replace(/\r/g, "").split("\n");
@@ -342,6 +326,184 @@ function resultTimeOf(rec) {
   if (!m) return "";
   const t = +m[1] * 60 + +m[2] + 15;
   return `${String(Math.floor(t / 60) % 24).padStart(2, "0")}:${String(t % 60).padStart(2, "0")}`;
+}
+
+// ===== AI の予想欄 =====
+// AI の推定勝率から Harville 法で計算した的中率を引く関数（複勝・ワイド・3連複の見積もりと比べる）。推定勝率が欠けていれば常に null
+function aiCalcProb(info, pred) {
+  const running = (info.horses || []).filter((x) => !x.cancel);
+  const probs = {};
+  for (const h of running) {
+    const a = pred[String(parseInt(h.no, 10))];
+    if (!a) return () => null;
+    probs[String(parseInt(h.no, 10))] = a["勝率"] / 100;
+  }
+  const hv = KS.harville(probs);
+  const placeN = running.length >= 8 ? "top3" : "top2";
+  return (b) => {
+    if (!hv) return null;
+    const key = String(b["組み合わせ"]).split("-").map((n) => String(parseInt(n, 10))).sort((x, y) => +x - +y).join("-");
+    if (b["券種"] === "複勝") return hv[placeN][key] ?? null;
+    if (b["券種"] === "ワイド") return hv.pair[key] ?? null;
+    if (b["券種"] === "3連複") return hv.trio[key] ?? null;
+    return null;
+  };
+}
+
+// 買い目1点の行。ctx は {rec, info, pred, updated, recOdds, settled, evMin, calcProbOf}。返り値は {row, kelly}（kelly はケリーの金額か null）
+function betRow(b, i, ctx) {
+  const { rec, info, pred, updated, recOdds, settled, evMin, calcProbOf } = ctx;
+  const s = settled && settled[i];
+  const row = el("div", "bet");
+  // 1行目：券種・組み合わせ（馬名）・金額・結果
+  const top = el("div", "bet-top");
+  const names = b["券種"].startsWith("枠") ? "" : b["組み合わせ"].split("-").map((n) => ((info.horses || []).find((x) => String(parseInt(x.no, 10)) === n) || {}).name || "").filter(Boolean).join("・");
+  const what = el("span", "bet-what");
+  what.append(el("b", null, `${b["券種"]} ${b["組み合わせ"]}`));
+  if (names && b["組み合わせ"].split("-").length === 1) what.append(el("span", "bet-name", names));
+  top.append(what, el("span", "bet-amt num", yen(b["金額"])));
+  if (rec["結果"]) {
+    top.append(el("span", "bet-res " + (s ? (s["判定"] === "的中" ? "hit" : s["判定"] === "返還" ? "back" : "miss") : "miss"),
+      s ? (s["判定"] === "的中" ? `的中 ${yen(s["払戻"])}` : s["判定"] === "返還" ? `返還 ${yen(s["払戻"])}` : "不的中") : "払戻不明"));
+  }
+  row.append(top);
+  if (names && b["組み合わせ"].split("-").length > 1) row.append(el("div", "bet-names", names));
+  // オッズ・当たる確率・期待値を3列で。記録のあとにオッズを取り直していれば「今」の値も並べる
+  const atRec = recOdds[i] ? { text: recOdds[i], low: parseFloat(/\d+(\.\d+)?/.exec(recOdds[i]) || "") } :
+    (b["券種"] === "単勝" && rec["馬"] && rec["馬"][b["組み合わせ"]] ? { text: rec["馬"][b["組み合わせ"]]["単勝"], low: parseFloat(rec["馬"][b["組み合わせ"]]["単勝"]) } :
+    (!updated ? betOddsOf(b, info) : null));
+  const now = updated ? betOddsOf(b, info) : null;
+  const p = betProbOf(b, pred);
+  const recOk = !!(atRec && atRec.low > 0);
+  const nowDiff = !!(now && now.low > 0 && (!recOk || now.text !== atRec.text));
+  const wide = /\d\s*-\s*\d/.test(recOk ? atRec.text : nowDiff ? now.text : "");
+  const shortOdds = (t) => String(t).replace(/\s*-\s*/, "-");
+  const evOf = (o) => (o && o.low > 0 && p != null ? p * o.low : null);
+  const evCls = (ev) => (Math.round(ev * 100) / 100 >= evMin - 1e-9 ? "ok" : "ng");
+  const ev1 = evOf(recOk ? atRec : null), ev2 = nowDiff ? evOf(now) : null;
+  const cell = (label, main, cls, sub, subCls) => {
+    const k = el("div", "k" + (cls ? " " + cls : ""));
+    k.append(el("small", null, label), el("b", "num" + (String(main).length > 5 ? " long" : ""), main));
+    if (sub) k.append(el("i", subCls || null, sub));
+    return k;
+  };
+  const kpi = el("div", "bet-kpi");
+  kpi.append(
+    cell(rec["予想オッズ"] && b["券種"] === "単勝" ? "オッズ（予想）" : "オッズ", recOk ? shortOdds(atRec.text) : "--", null, nowDiff ? `今 ${shortOdds(now.text)}` : null),
+    cell("当たる確率", p != null ? `${(p * 100).toFixed(1)}%` : "--"),
+    cell("期待値", ev1 != null ? ev1.toFixed(2) : "--", ev1 != null ? `ev ${evCls(ev1)}` : "ev", ev2 != null ? `今 ${ev2.toFixed(2)}` : null, ev2 != null ? evCls(ev2) : null));
+  row.append(kpi);
+  // 補足の1行：当たったときの払戻・AI の推定勝率から計算した的中率（Harville 法）・ケリー基準の金額の目安
+  const extra = [];
+  if (recOk) extra.push(el("span", null, `当たれば ${yen(Math.floor(b["金額"] / 100) * Math.round(atRec.low * 100))}${wide ? "以上" : ""}`));
+  const cp = calcProbOf(b);
+  // AI の推定勝率から計算した的中率は、AI の見積もりと大きく違うときだけ出す（同じくらいなら読む意味がないので）
+  if (cp != null && p != null && Math.abs(p - cp) > Math.max(KS.CONFIG.CALC_FAR_POINTS, cp * KS.CONFIG.CALC_FAR_RATIO)) {
+    extra.push(el("span", "calc-far", `勝率から計算 ${(cp * 100).toFixed(1)}%（AI と差が大きい）`));
+  }
+  // 複勝・ワイドで下限が1.1倍以下は、当たってもほぼ元返し（指示文でも選ばないよう伝えている）
+  const lowNow = nowDiff ? now.low : recOk ? atRec.low : null;
+  if ((b["券種"] === "複勝" || b["券種"] === "ワイド") && lowNow != null && lowNow <= KS.CONFIG.PAYBACK_MAX_ODDS) extra.push(el("span", "calc-far", "元返しに近い（当たっても増えない）"));
+  const ko = lowNow;
+  const ka = rec["結果"] ? null : kellyAmount(p, ko);
+  if (ka != null) extra.push(el("span", "kelly", ka > 0 ? `ケリー${kellyLabel()} ${yen(ka)}` : `ケリー${kellyLabel()} 見送り`));
+  if (extra.length) { const d = el("div", "bet-extra"); extra.forEach((x, j) => { if (j) d.append(el("span", "sep", "・")); d.append(x); }); row.append(d); }
+  return { row, kelly: ka };
+}
+
+// 買い目の合計・ケリーの合計・どれかが当たる確率
+function betTotals(bets, pred, kellyTotal, kellyN) {
+  const total = bets.reduce((t, b) => t + b["金額"], 0);
+  const sum = el("p", "bet-total");
+  sum.append(document.createTextNode(`合計 ${yen(total)}`));
+  if (kellyN) sum.append(el("span", "kelly-total", kellyTotal > 0 ? `ケリー${kellyLabel()}の目安 合計 ${yen(kellyTotal)}` : `ケリー${kellyLabel()}ではすべて見送り`));
+  // どれかが当たる確率（AI の見積もり）。同じ券種の別の組み合わせ（単勝どうし・三連複どうしなど）は同時に当たらないので足せる。
+  // 複勝・ワイドや券種が混ざると同時に当たることがあるので、幅（いちばん高い確率〜足した確率）で出す
+  const ps = bets.map((b) => betProbOf(b, pred));
+  if (ps.length && ps.every((x) => x != null)) {
+    const exclusive = new Set(bets.map((b) => b["券種"])).size === 1 && !["複勝", "ワイド"].includes(bets[0]["券種"]) &&
+      new Set(bets.map((b) => b["組み合わせ"])).size === bets.length;
+    const total1 = Math.min(1, ps.reduce((t, x) => t + x, 0)), max1 = Math.max(...ps);
+    const pct = (x) => `${(x * 100).toFixed(1)}%`;
+    const range = !(exclusive || total1 - max1 < 0.0005);
+    sum.append(el("span", "hit-any", range ? `どれかが当たる確率 ${pct(max1)}〜${pct(total1)}` : `どれかが当たる確率 ${pct(total1)}`));
+    if (range) sum.append(el("span", "hint-s", "同時に当たることがあるので幅で表示"));
+  }
+  if (bets.some((b) => betProbOf(b, pred) == null)) sum.append(el("span", "note", "推定的中率が分からない買い目は、期待値を出していません（記録用ブロックに推定的中率の列が無い古い回答など）"));
+  return sum;
+}
+
+// 買い目の一覧（key: "買い目" か "的中買い目"）
+function betSection(ctx, key, oddsKey, title, condText, evMin) {
+  const { rec, pred } = ctx;
+  const ai = rec["AI"];
+  const c = el("div", "bet-section");
+  if (title) { const hh = el("h4", "bet-head", title); hh.append(el("span", "aside", condText)); c.append(hh); }
+  else c.append(el("p", "ai-cond", condText));
+  const bets = ai[key] || [];
+  const settled = rec["結果"] ? KS.settleBets(rec, key) : null;
+  if (!bets.length) { c.append(el("p", "ai-skip", "見送り（条件を満たす買い目なし）")); return c; }
+  // 記録したときのオッズと、今のオッズ（記録のあとに取り直していれば）
+  const rowCtx = Object.assign({}, ctx, { recOdds: ai[oddsKey] || [], settled, evMin });
+  const list = el("div", "bet-list");
+  let kellyTotal = 0, kellyN = 0;
+  bets.forEach((b, i) => {
+    const { row, kelly } = betRow(b, i, rowCtx);
+    if (kelly != null) { kellyTotal += kelly; kellyN++; }
+    list.append(row);
+  });
+  c.append(list, betTotals(bets, pred, kellyTotal, kellyN));
+  if (settled) {
+    const spent = settled.reduce((t, x) => t + x["金額"], 0), ret = settled.reduce((t, x) => t + x["払戻"], 0);
+    const v = el("p", "verdict"); v.append(document.createTextNode("収支 "), el("b", ret - spent >= 0 ? "up" : "down", `${ret - spent >= 0 ? "+" : ""}${yen(ret - spent)}`), document.createTextNode(`（購入 ${yen(spent)} → 払戻 ${yen(ret)}）`));
+    c.append(v);
+  }
+  return c;
+}
+
+// 市場と AI の比較の表（AI の推定勝率の高い順に6頭。買った馬は必ず入れる）。出す馬がいなければ null
+function aiCompareTable(rec, info, pred) {
+  const ai = rec["AI"];
+  const boughtNos = new Set();
+  for (const b of [...(ai["買い目"] || []), ...(ai["的中買い目"] || [])]) if (!b["券種"].startsWith("枠")) b["組み合わせ"].split("-").forEach((n) => boughtNos.add(n));
+  const horses = (info.horses || []).filter((x) => !x.cancel);
+  const all = horses.map((x) => ({ x, no: String(parseInt(x.no, 10)), ai: pred[String(parseInt(x.no, 10))] })).filter((r) => r.ai)
+    .sort((a, b) => b.ai["勝率"] - a.ai["勝率"]);
+  const rows = all.filter((r, i) => i < 6 || boughtNos.has(r.no));
+  if (!rows.length) return null;
+  const tb = el("table", "rec-table"); tb.style.marginTop = "12px";
+  const hr = el("tr"); for (const [t, cls] of [["馬"], ["市場", "r"], ["AI勝率", "r"], ["差", "r"], ["AI複勝", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
+  for (const { x, no, ai: a } of rows) {
+    const d = a["勝率"] - (x.prob || 0);
+    const ratio = x.prob ? a["勝率"] / x.prob : null;
+    const tag = ratio != null && d >= 2 && ratio >= 1.3 ? ["pick", "狙い目"] : ratio != null && d <= -2 && ratio <= 0.9 ? ["over", "人気しすぎ"] : null;
+    const tr = el("tr");
+    if (boughtNos.has(no)) tr.className = "bought";
+    const res = rec["結果"] && rec["結果"]["着順"][no];
+    const name = el("td");
+    if (boughtNos.has(no)) name.append(el("span", "buy-mark", "買"));
+    name.append(document.createTextNode(`${x.no} ${x.name}${res && /^\d+$/.test(res) ? `（${res}着）` : ""}`));
+    if (tag) name.append(el("span", "h-tag " + tag[0], tag[1]));
+    tr.append(name, el("td", "r", x.prob != null ? `${x.prob.toFixed(1)}%` : "--"),
+      el("td", "r", `${a["勝率"].toFixed(1)}%`), el("td", "r", `${d >= 0 ? "+" : ""}${d.toFixed(1)}`), el("td", "r", `${a["複勝率"].toFixed(0)}%`));
+    tb.append(tr);
+  }
+  return tb;
+}
+
+// 結果が出る前／出たあとの一言（結果の着順、または結果をいつ取るか）
+function aiResultNote(rec) {
+  if (rec["結果"]) {
+    const top = Object.entries(rec["結果"]["着順"]).filter(([, r]) => /^[123]$/.test(r)).sort((a, b) => +a[1] - +b[1]).map(([n, r]) => `${r}着 ${n}番`).join("・");
+    return el("p", "note", `結果：${top}`);
+  }
+  const ss = sinceStart(rec);
+  if (ss != null && ss >= KS.CONFIG.RESULT_DELAY_MINUTES && rec.race_id) return el("p", "note", "上の「レース結果を取得」で答え合わせできます");
+  let exact = true; try { exact = Native.exactAlarmAllowed(); } catch (e) { logError("アラームの許可の確認", e); }
+  const at = resultTimeOf(rec);
+  return el("p", "note", !at ? `発走の${KS.CONFIG.RESULT_DELAY_MINUTES}分後から結果を取得できます`
+    : exact ? `結果は ${at} ごろ自動で取得して通知します`
+    : `結果は ${at} から取得できます（自動で取るには「アラームとリマインダー」の許可が要ります）`);
 }
 
 function aiCard(venue, race) {
@@ -364,180 +526,29 @@ function aiCard(venue, race) {
   const info = state.result.res.info;
   const updated = state.result.res.at && rec["収集時刻"] && state.result.res.at !== rec["収集時刻"];
   const hasHit = hasHitOf(rec);
-  const evMin0 = rec["EV_MIN"] != null ? rec["EV_MIN"] : betSettings().ev_min;
-  const hitEv0 = rec["HIT_EV_MIN"] != null ? rec["HIT_EV_MIN"] : betSettings().hit_ev_min;
-  const hitMin0 = rec["HIT_MIN"] != null ? rec["HIT_MIN"] : betSettings().hit_min;
+  const bs = betSettings();
+  const evMin0 = rec["EV_MIN"] != null ? rec["EV_MIN"] : bs.ev_min;
+  const hitEv0 = rec["HIT_EV_MIN"] != null ? rec["HIT_EV_MIN"] : bs.hit_ev_min;
+  const hitMin0 = rec["HIT_MIN"] != null ? rec["HIT_MIN"] : bs.hit_min;
   if (rec["予算"]) c.append(el("p", "ai-cond", `予算 ${yen(rec["予算"])}` + (hasHit && rec["買い方"] !== "hit" ? "（期待値重視・的中重視それぞれ）" : "")));
-  // AI の推定勝率から Harville 法で計算した的中率（複勝・ワイド・3連複の見積もりと比べる）
-  const hvAi = (() => {
-    const probs = {};
-    for (const h of (info.horses || []).filter((x) => !x.cancel)) {
-      const a = pred[String(parseInt(h.no, 10))];
-      if (!a) return null;
-      probs[String(parseInt(h.no, 10))] = a["勝率"] / 100;
-    }
-    return KS.harville(probs);
-  })();
-  const placeN = (info.horses || []).filter((x) => !x.cancel).length >= 8 ? "top3" : "top2";
-  const calcProbOf = (b) => {
-    if (!hvAi) return null;
-    const key = String(b["組み合わせ"]).split("-").map((n) => String(parseInt(n, 10))).sort((x, y) => +x - +y).join("-");
-    if (b["券種"] === "複勝") return hvAi[placeN][key] ?? null;
-    if (b["券種"] === "ワイド") return hvAi.pair[key] ?? null;
-    if (b["券種"] === "3連複") return hvAi.trio[key] ?? null;
-    return null;
-  };
-
+  const ctx = { rec, info, pred, updated, calcProbOf: aiCalcProb(info, pred) };
   // 期待値重視（#BET）を出す。的中重視（#HIT）を記録していれば続けて出す（的中重視だけのときは期待値重視を省く）
-  if (!(hasHit && rec["買い方"] === "hit")) c.append(betSection("買い目", "オッズ", hasHit ? "期待値重視" : "", `期待値 ${KS.fmtEv(evMin0)} 以上`, evMin0));
-  if (hasHit) c.append(betSection("的中買い目", "的中オッズ", "的中重視", `的中率 ${hitMin0}%以上・期待値 ${KS.fmtEv(hitEv0)} 以上`, hitEv0));
-
-  // 買い目の一覧（key: "買い目" か "的中買い目"）
-  function betSection(key, oddsKey, title, condText, evMin) {
-  const c = el("div", "bet-section");
-  if (title) { const hh = el("h4", "bet-head", title); hh.append(el("span", "aside", condText)); c.append(hh); }
-  else c.append(el("p", "ai-cond", condText));
-  const bets = ai[key] || [];
-  const settled = rec["結果"] ? KS.settleBets(rec, key) : null;
-  // 記録したときのオッズと、今のオッズ（記録のあとに取り直していれば）
-  const recOdds = ai[oddsKey] || [];
-  if (!bets.length) c.append(el("p", "ai-skip", "見送り（条件を満たす買い目なし）"));
-  else {
-    const list = el("div", "bet-list");
-    let total = 0, kellyTotal = 0, kellyN = 0;
-    bets.forEach((b, i) => {
-      total += b["金額"];
-      const s = settled && settled[i];
-      const row = el("div", "bet");
-      // 1行目：券種・組み合わせ（馬名）・金額・結果
-      const top = el("div", "bet-top");
-      const names = b["券種"].startsWith("枠") ? "" : b["組み合わせ"].split("-").map((n) => ((info.horses || []).find((x) => String(parseInt(x.no, 10)) === n) || {}).name || "").filter(Boolean).join("・");
-      const what = el("span", "bet-what");
-      what.append(el("b", null, `${b["券種"]} ${b["組み合わせ"]}`));
-      if (names && b["組み合わせ"].split("-").length === 1) what.append(el("span", "bet-name", names));
-      top.append(what, el("span", "bet-amt num", yen(b["金額"])));
-      if (rec["結果"]) {
-        top.append(el("span", "bet-res " + (s ? (s["判定"] === "的中" ? "hit" : s["判定"] === "返還" ? "back" : "miss") : "miss"),
-          s ? (s["判定"] === "的中" ? `的中 ${yen(s["払戻"])}` : s["判定"] === "返還" ? `返還 ${yen(s["払戻"])}` : "不的中") : "払戻不明"));
-      }
-      row.append(top);
-      if (names && b["組み合わせ"].split("-").length > 1) row.append(el("div", "bet-names", names));
-      // オッズ・当たる確率・期待値を3列で。記録のあとにオッズを取り直していれば「今」の値も並べる
-      const atRec = recOdds[i] ? { text: recOdds[i], low: parseFloat(/\d+(\.\d+)?/.exec(recOdds[i]) || "") } :
-        (b["券種"] === "単勝" && rec["馬"] && rec["馬"][b["組み合わせ"]] ? { text: rec["馬"][b["組み合わせ"]]["単勝"], low: parseFloat(rec["馬"][b["組み合わせ"]]["単勝"]) } :
-        (!updated ? betOddsOf(b, info) : null));
-      const now = updated ? betOddsOf(b, info) : null;
-      const p = betProbOf(b, pred);
-      const recOk = !!(atRec && atRec.low > 0);
-      const nowDiff = !!(now && now.low > 0 && (!recOk || now.text !== atRec.text));
-      const wide = /\d\s*-\s*\d/.test(recOk ? atRec.text : nowDiff ? now.text : "");
-      const shortOdds = (t) => String(t).replace(/\s*-\s*/, "-");
-      const evOf = (o) => (o && o.low > 0 && p != null ? p * o.low : null);
-      const evCls = (ev) => (Math.round(ev * 100) / 100 >= evMin - 1e-9 ? "ok" : "ng");
-      const ev1 = evOf(recOk ? atRec : null), ev2 = nowDiff ? evOf(now) : null;
-      const cell = (label, main, cls, sub, subCls) => {
-        const k = el("div", "k" + (cls ? " " + cls : ""));
-        k.append(el("small", null, label), el("b", "num" + (String(main).length > 5 ? " long" : ""), main));
-        if (sub) k.append(el("i", subCls || null, sub));
-        return k;
-      };
-      const kpi = el("div", "bet-kpi");
-      kpi.append(
-        cell(rec["予想オッズ"] && b["券種"] === "単勝" ? "オッズ（予想）" : "オッズ", recOk ? shortOdds(atRec.text) : "--", null, nowDiff ? `今 ${shortOdds(now.text)}` : null),
-        cell("当たる確率", p != null ? `${(p * 100).toFixed(1)}%` : "--"),
-        cell("期待値", ev1 != null ? ev1.toFixed(2) : "--", ev1 != null ? `ev ${evCls(ev1)}` : "ev", ev2 != null ? `今 ${ev2.toFixed(2)}` : null, ev2 != null ? evCls(ev2) : null));
-      row.append(kpi);
-      // 補足の1行：当たったときの払戻・AI の推定勝率から計算した的中率（Harville 法）・ケリー基準の金額の目安
-      const extra = [];
-      if (recOk) extra.push(el("span", null, `当たれば ${yen(Math.floor(b["金額"] / 100) * Math.round(atRec.low * 100))}${wide ? "以上" : ""}`));
-      const cp = calcProbOf(b);
-      // AI の推定勝率から計算した的中率は、AI の見積もりと大きく違うときだけ出す（同じくらいなら読む意味がないので）
-      if (cp != null && p != null && Math.abs(p - cp) > Math.max(0.03, cp * 0.3)) {
-        extra.push(el("span", "calc-far", `勝率から計算 ${(cp * 100).toFixed(1)}%（AI と差が大きい）`));
-      }
-      // 複勝・ワイドで下限が1.1倍以下は、当たってもほぼ元返し（指示文でも選ばないよう伝えている）
-      const lowNow = nowDiff ? now.low : recOk ? atRec.low : null;
-      if ((b["券種"] === "複勝" || b["券種"] === "ワイド") && lowNow != null && lowNow <= 1.1) extra.push(el("span", "calc-far", "元返しに近い（当たっても増えない）"));
-      const ko = lowNow;
-      const ka = rec["結果"] ? null : kellyAmount(p, ko);
-      if (ka != null) { extra.push(el("span", "kelly", ka > 0 ? `ケリー${kellyLabel()} ${yen(ka)}` : `ケリー${kellyLabel()} 見送り`)); kellyTotal += ka; kellyN++; }
-      if (extra.length) { const d = el("div", "bet-extra"); extra.forEach((x, j) => { if (j) d.append(el("span", "sep", "・")); d.append(x); }); row.append(d); }
-      list.append(row);
-    });
-    c.append(list);
-    const sum = el("p", "bet-total");
-    sum.append(document.createTextNode(`合計 ${yen(total)}`));
-    if (kellyN) sum.append(el("span", "kelly-total", kellyTotal > 0 ? `ケリー${kellyLabel()}の目安 合計 ${yen(kellyTotal)}` : `ケリー${kellyLabel()}ではすべて見送り`));
-    // どれかが当たる確率（AI の見積もり）。同じ券種の別の組み合わせ（単勝どうし・三連複どうしなど）は同時に当たらないので足せる。
-    // 複勝・ワイドや券種が混ざると同時に当たることがあるので、幅（いちばん高い確率〜足した確率）で出す
-    const ps = bets.map((b) => betProbOf(b, pred));
-    if (ps.length && ps.every((x) => x != null)) {
-      const exclusive = new Set(bets.map((b) => b["券種"])).size === 1 && !["複勝", "ワイド"].includes(bets[0]["券種"]) &&
-        new Set(bets.map((b) => b["組み合わせ"])).size === bets.length;
-      const total1 = Math.min(1, ps.reduce((t, x) => t + x, 0)), max1 = Math.max(...ps);
-      const pct = (x) => `${(x * 100).toFixed(1)}%`;
-      const range = !(exclusive || total1 - max1 < 0.0005);
-      sum.append(el("span", "hit-any", range ? `どれかが当たる確率 ${pct(max1)}〜${pct(total1)}` : `どれかが当たる確率 ${pct(total1)}`));
-      if (range) sum.append(el("span", "hint-s", "同時に当たることがあるので幅で表示"));
-    }
-    if (bets.some((b) => betProbOf(b, pred) == null)) sum.append(el("span", "note", "推定的中率が分からない買い目は、期待値を出していません（記録用ブロックに推定的中率の列が無い古い回答など）"));
-    c.append(sum);
-    if (settled) {
-      const spent = settled.reduce((t, x) => t + x["金額"], 0), ret = settled.reduce((t, x) => t + x["払戻"], 0);
-      const v = el("p", "verdict"); v.append(document.createTextNode("収支 "), el("b", ret - spent >= 0 ? "up" : "down", `${ret - spent >= 0 ? "+" : ""}${yen(ret - spent)}`), document.createTextNode(`（購入 ${yen(spent)} → 払戻 ${yen(ret)}）`));
-      c.append(v);
-    }
-  }
-  return c;
-  }
-
+  if (!(hasHit && rec["買い方"] === "hit")) c.append(betSection(ctx, "買い目", "オッズ", hasHit ? "期待値重視" : "", `期待値 ${KS.fmtEv(evMin0)} 以上`, evMin0));
+  if (hasHit) c.append(betSection(ctx, "的中買い目", "的中オッズ", "的中重視", `的中率 ${hitMin0}%以上・期待値 ${KS.fmtEv(hitEv0)} 以上`, hitEv0));
   if (ai["総評"]) c.append(el("p", "ai-comment", `「${ai["総評"]}」`));
-
-  if (rec["結果"]) {
-    const top = Object.entries(rec["結果"]["着順"]).filter(([, r]) => /^[123]$/.test(r)).sort((a, b) => +a[1] - +b[1]).map(([n, r]) => `${r}着 ${n}番`).join("・");
-    c.append(el("p", "note", `結果：${top}`));
-  } else {
-    c.append(patListButton(venue, race));
-    const ss = sinceStart(rec);
-    if (ss != null && ss >= 15 && rec.race_id) {
-      c.append(el("p", "note", "上の「レース結果を取得」で答え合わせできます"));
-    } else {
-      let exact = true; try { exact = Native.exactAlarmAllowed(); } catch (e) {}
-      const at = resultTimeOf(rec);
-      c.append(el("p", "note", !at ? "発走の15分後から結果を取得できます"
-        : exact ? `結果は ${at} ごろ自動で取得して通知します`
-        : `結果は ${at} から取得できます（自動で取るには「アラームとリマインダー」の許可が要ります）`));
-    }
-  }
-
-  // 市場と AI の比較（AI の推定勝率の高い順に6頭。買った馬は必ず入れる）
-  const boughtNos = new Set();
-  for (const b of [...(ai["買い目"] || []), ...(ai["的中買い目"] || [])]) if (!b["券種"].startsWith("枠")) b["組み合わせ"].split("-").forEach((n) => boughtNos.add(n));
-  const horses = (info.horses || []).filter((x) => !x.cancel);
-  const all = horses.map((x) => ({ x, no: String(parseInt(x.no, 10)), ai: pred[String(parseInt(x.no, 10))] })).filter((r) => r.ai)
-    .sort((a, b) => b.ai["勝率"] - a.ai["勝率"]);
-  const rows = all.filter((r, i) => i < 6 || boughtNos.has(r.no));
-  if (rows.length) {
-    const tb = el("table", "rec-table"); tb.style.marginTop = "12px";
-    const hr = el("tr"); for (const [t, cls] of [["馬"], ["市場", "r"], ["AI勝率", "r"], ["差", "r"], ["AI複勝", "r"]]) hr.append(el("th", cls || null, t)); tb.append(hr);
-    for (const { x, no, ai: a } of rows) {
-      const d = a["勝率"] - (x.prob || 0);
-      const ratio = x.prob ? a["勝率"] / x.prob : null;
-      const tag = ratio != null && d >= 2 && ratio >= 1.3 ? ["pick", "狙い目"] : ratio != null && d <= -2 && ratio <= 0.9 ? ["over", "人気しすぎ"] : null;
-      const tr = el("tr");
-      if (boughtNos.has(no)) tr.className = "bought";
-      const res = rec["結果"] && rec["結果"]["着順"][no];
-      const name = el("td");
-      if (boughtNos.has(no)) name.append(el("span", "buy-mark", "買"));
-      name.append(document.createTextNode(`${x.no} ${x.name}${res && /^\d+$/.test(res) ? `（${res}着）` : ""}`));
-      if (tag) name.append(el("span", "h-tag " + tag[0], tag[1]));
-      tr.append(name, el("td", "r", x.prob != null ? `${x.prob.toFixed(1)}%` : "--"),
-        el("td", "r", `${a["勝率"].toFixed(1)}%`), el("td", "r", `${d >= 0 ? "+" : ""}${d.toFixed(1)}`), el("td", "r", `${a["複勝率"].toFixed(0)}%`));
-      tb.append(tr);
-    }
+  if (!rec["結果"]) c.append(patListButton(venue, race));
+  c.append(aiResultNote(rec));
+  const tb = aiCompareTable(rec, info, pred);
+  if (tb) {
     c.append(tb);
     aiHelp.push((updated ? `市場は最新の収集（${state.result.res.at.slice(11, 16)}）の値。` : "") + "下の表は AI の推定勝率の高い順に6頭（買った馬は必ず表示）。差は AI − 市場（ポイント）。AI が市場より2ポイント以上・3割以上高く見る馬に「狙い目」、2ポイント以上・1割以上低く見る馬に「人気しすぎ」");
   }
+  c.append(aiRecordButtons(key, race));
+  return addHelp(c, "ai", aiHelp);
+}
+
+// 「貼り直す」「記録を消す」
+function aiRecordButtons(key, race) {
   const row = el("div", "btn-row"); row.style.marginTop = "10px";
   const again = el("button", "btn quiet", "貼り直す"); again.onclick = pasteAiAnswer;
   const del = el("button", "btn quiet", "記録を消す");
@@ -550,8 +561,8 @@ function aiCard(venue, race) {
     } else { delete r[key]; writeRecords(r); try { Native.cancelResultCheck(key); } catch (e) {} }
     renderResult(); updateRecBadge(); toast("AI の予想の記録を消しました");
   };
-  row.append(again, del); c.append(row);
-  return addHelp(c, "ai", aiHelp);
+  row.append(again, del);
+  return row;
 }
 
 // ===== 買った馬券（自分で実際に買ったもの。AI の買い目とは別に記録して答え合わせする） =====
@@ -873,7 +884,7 @@ function clvCard(clv) {
     if (x.n) c.append(el("p", "note", `AI が市場より2ポイント以上${label}見た馬 ${x.n}頭：締切までに市場勝率が平均 ${x.move >= 0 ? "+" : ""}${x.move.toFixed(2)}ポイント`));
   }
   if (clv.n) {
-    const v = clv.n_races < 30 || !clv.ci ? "まだ判断できません（30レース未満）"
+    const v = clv.n_races < KS.CONFIG.VERDICT_MIN_RACES || !clv.ci ? `まだ判断できません（${KS.CONFIG.VERDICT_MIN_RACES}レース未満）`
       : clv.ci[0] > 1 ? "✓ AI の買った馬は記録のあとに人気を集めています（市場より先に評価できている可能性があります）"
       : clv.ci[1] < 1 ? "! AI の買った馬は記録のあとに人気を落としています（記録時のオッズで出した期待値は高めに出ています）"
       : "記録時と締切の差は、このレース数では区別できません";
@@ -912,29 +923,9 @@ function renderRecords() {
   const recs = readRecords();
   const all = Object.values(recs);
   body.append(el("p", "race-sub", `記録 ${all.filter((r) => !isDataOnly(r)).length}件・答え合わせ済み ${all.filter((r) => r["AI"] && r["結果"]).length}件`));
-
-  const pend = pendingResults();
-  // データだけの記録（AI の回答なし）で結果がまだのもの。ふだんは裏で取るが、取れなかった分はここでまとめて取る
-  const dataPend = Object.entries(recs).filter(([, r]) => isDataOnly(r) && !r["結果"] && r.race_id && (sinceStart(r) ?? 0) >= 15 && (sinceStart(r) ?? 0) < 3 * 24 * 60);
-  if (state.fetching) {
-    const c = el("div", "card"); c.append(el("h3", null, `結果を取得中… ${state.fetching.done} / ${state.fetching.total}`));
-    const bar = el("div", "bar"); const f = el("i"); f.style.width = `${state.fetching.done / state.fetching.total * 100}%`; bar.append(f); c.append(bar);
-    body.append(c);
-  } else if (pend.length || dataPend.length) {
-    const b = el("button", "update-bar");
-    b.append(el("span", null, "結果待ち "), el("b", "num", `${pend.length + dataPend.length}件`));
-    if (dataPend.length) b.append(el("span", null, `（データ ${dataPend.length}件）`));
-    b.append(el("span", "go", "結果を取得 ›"));
-    b.onclick = () => fetchResults(pend.concat(dataPend).map(([k]) => k));
-    body.append(b);
-    body.append(el("p", "note", "結果ページを1レースにつき1回、2秒おきに読みます"));
-  }
-
-  // 形の崩れた記録があっても画面は出す（集計できない記録を除いて集計し直す）
-  let sm;
-  try { sm = KS.computeSummary(all); } catch (e) {
-    sm = KS.computeSummary(all.filter((r) => { try { KS.computeSummary([r]); return true; } catch (e2) { return false; } }));
-  }
+  const bar = recordsFetchBar(recs);
+  if (bar) body.append(...bar);
+  const sm = safeSummary(all);
   // 回収率（自分の馬券・AI の期待値重視・AI の的中重視は別々に）
   if (!sm.own_bets && !sm.bets && !sm.hit_bets) {
     const c0 = el("div", "card"); c0.append(el("h3", null, "回収率"), el("p", "note", "結果まで記録したレースがまだありません")); body.append(c0);
@@ -942,10 +933,48 @@ function renderRecords() {
   // 収支の推移（発走の順に足し上げる）
   { const tc = trendCard(all); if (tc) body.append(tc); }
   for (const [bb, title, rowsAll] of [[sm.own_bets, "回収率：自分で買った馬券", sm.own_bet_rows], [sm.bets, sm.hit_bets ? "回収率：AI 期待値重視" : sm.own_bets ? "回収率：AI の買い目" : "回収率", sm.bet_rows], [sm.hit_bets, "回収率：AI 的中重視", sm.hit_bet_rows]]) {
-  if (!bb) continue;
+    if (bb) body.append(roiCard(bb, title, rowsAll, sm));
+  }
+  // 締切オッズとの比較（CLV）
+  if (sm.clv) body.append(clvCard(sm.clv));
+  body.append(recordsList(recs), recordsActions());
+  // 推定勝率の精度（判断は CLV と回収率で足りるので、いちばん下に置く）
+  body.append(brierCard(sm));
+}
+
+// 「結果待ち ○件」のボタン（取得中なら進み具合）。出すものがなければ null
+function recordsFetchBar(recs) {
+  const pend = pendingResults();
+  // データだけの記録（AI の回答なし）で結果がまだのもの。ふだんは裏で取るが、取れなかった分はここでまとめて取る
+  const dataPend = Object.entries(recs).filter(([, r]) => isDataOnly(r) && !r["結果"] && r.race_id && (sinceStart(r) ?? 0) >= KS.CONFIG.RESULT_DELAY_MINUTES && (sinceStart(r) ?? 0) < 3 * 24 * 60);
+  if (state.fetching) {
+    const c = el("div", "card"); c.append(el("h3", null, `結果を取得中… ${state.fetching.done} / ${state.fetching.total}`));
+    const bar = el("div", "bar"); const f = el("i"); f.style.width = `${state.fetching.done / state.fetching.total * 100}%`; bar.append(f); c.append(bar);
+    return [c];
+  } else if (pend.length || dataPend.length) {
+    const b = el("button", "update-bar");
+    b.append(el("span", null, "結果待ち "), el("b", "num", `${pend.length + dataPend.length}件`));
+    if (dataPend.length) b.append(el("span", null, `（データ ${dataPend.length}件）`));
+    b.append(el("span", "go", "結果を取得 ›"));
+    b.onclick = () => fetchResults(pend.concat(dataPend).map(([k]) => k));
+    return [b, el("p", "note", "結果ページを1レースにつき1回、2秒おきに読みます")];
+  }
+  return null;
+}
+
+// 集計。形の崩れた記録があっても画面は出す（集計できない記録を除いて集計し直す）
+function safeSummary(all) {
+  let sm;
+  try { sm = KS.computeSummary(all); } catch (e) {
+    sm = KS.computeSummary(all.filter((r) => { try { KS.computeSummary([r]); return true; } catch (e2) { logError(`集計から外した記録（${r.race_id}）`, e2); return false; } }));
+  }
+  return sm;
+}
+
+// 回収率のカード（券種別の表と、競馬場別・月別の内訳）
+function roiCard(b, title, rowsAll, sm) {
   const c1 = el("div", "card");
   c1.append(el("h3", null, title));
-  const b = bb;
   if (!b || !b.bought) c1.append(el("p", "note", sm.n_races ? `買ったレースがまだありません（見送り ${b ? b.skipped : 0}件）` : "結果まで記録したレースがまだありません"));
   else {
     const roi = b.ret / b.spent * 100;
@@ -966,13 +995,11 @@ function renderRecords() {
       if (det) c1.append(det);
     }
   }
-  body.append(c1);
-  }
+  return c1;
+}
 
-  // 締切オッズとの比較（CLV）
-  if (sm.clv) body.append(clvCard(sm.clv));
-
-  // AI と市場の精度
+// 推定勝率の精度（ブライアスコア）のカード
+function brierCard(sm) {
   const c2 = el("div", "card");
   c2.append(el("h3", null, "推定勝率の精度（ブライアスコア、小さいほど良い）"));
   if (!sm.brier) c2.append(el("p", "note", "市場勝率と AI の推定がそろったレースがまだありません"));
@@ -980,7 +1007,7 @@ function renderRecords() {
     const br = sm.brier;
     c2.append(el("p", null, `市場 ${br.market.toFixed(4)} ／ AI ${br.ai.toFixed(4)}（${br.n}レース）`));
     c2.append(el("p", "note", `AI − 市場 = ${br.diff >= 0 ? "+" : ""}${br.diff.toFixed(4)}（95%区間 ${br.ci[0] >= 0 ? "+" : ""}${br.ci[0].toFixed(4)}〜${br.ci[1] >= 0 ? "+" : ""}${br.ci[1].toFixed(4)}）`));
-    if (br.n < 30) c2.append(el("p", "verdict", "まだ判断できません（30レース未満）"));
+    if (br.n < KS.CONFIG.VERDICT_MIN_RACES) c2.append(el("p", "verdict", `まだ判断できません（${KS.CONFIG.VERDICT_MIN_RACES}レース未満）`));
     else c2.append(el("p", "verdict", br.ci[1] < 0 ? "✓ AI の推定勝率は、市場（単勝オッズ）より当たっています" : br.ci[0] > 0 ? "! AI の推定勝率は、市場（単勝オッズ）より外れています" : "AI と市場の差は、このレース数では区別できません"));
     // 推定○%の馬が実際に何%勝ったか（レース数が少ないうちは意味が薄いので畳んでおく）
     const det = el("details", "breakdown"); keepOpen(det, "calib");
@@ -994,60 +1021,68 @@ function renderRecords() {
     det.append(el("p", "note", `推定複勝率のブライアスコア ${sm.calib_place.brier.toFixed(4)}`));
     c2.append(det);
   }
-  if (sm.n_races && sm.n_races < 30) c2.append(el("p", "note", `※レース数が ${sm.n_races}件と少ないため、区間が広く結論は出せません。50レース以上たまってから判断してください`));
+  if (sm.n_races && sm.n_races < KS.CONFIG.VERDICT_MIN_RACES) c2.append(el("p", "note", `※レース数が ${sm.n_races}件と少ないため、区間が広く結論は出せません。50レース以上たまってから判断してください`));
+  return c2;
+}
 
-  // 一覧（新しい順）
+// 記録の一覧（新しい順に100件）
+function recordsList(recs) {
   const list = el("div", "rec-list"); list.style.marginTop = "12px";
   const cache = readCache();
   const entries = Object.entries(recs).filter(([, r]) => !isDataOnly(r)).sort((a, b) => recOrder(b[1]).localeCompare(recOrder(a[1])));
   const dataRecs = Object.values(recs).filter(isDataOnly);
   if (dataRecs.length) list.append(el("p", "note", `ほかに、データとして記録したレース ${dataRecs.length}件（結果あり ${dataRecs.filter((r) => r["結果"]).length}件）。AI の回答がないレースも結果まで残し、書き出しと自動バックアップに入ります（あとで分析に使うため）`));
-  for (const [key, r] of entries.slice(0, 100)) {
-    const it = el("button", "rec-item");
-    it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
-    const desc = (xs) => xs.length ? xs.map((x) => `${x["券種"]} ${x["組み合わせ"]}：${yen(x["金額"])}`).join("　") : "見送り";
-    const hasHit = r["AI"] && hasHitOf(r);
-    const own = ownBetsOf(r);
-    let keys = !r["AI"] ? [] : hasHit ? (r["買い方"] === "hit" ? [["的中買い目", "的中重視 "]] : [["買い目", "期待値重視 "], ["的中買い目", "的中重視 "]]) : [["買い目", own.length ? "AI " : ""]];
-    if (own.length) keys = [["購入", "自分 "]].concat(keys);
-    const betsOf = (k) => (k === "購入" ? own : (r["AI"] && r["AI"][k]) || []);
-    it.append(el("span", "s", !keys.length ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(betsOf(k))).join(" ／ ")));
-    let st;
-    if (!keys.length) st = el("span", "st wait", "—");
-    else if (!r["結果"]) st = el("span", "st wait", "結果待ち");
-    else {
-      const parts = keys.map(([k, lb]) => {
-        let rows = null;
-        try { rows = KS.settleBets(r, k); } catch (e) { /* 形の崩れた記録 */ }
-        if (!rows) return [lb + "払戻不明", "wait"];
-        if (!rows.length) return [lb + "見送り", "wait"];
-        const d = rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0);
-        return [`${lb}${d >= 0 ? "+" : ""}${d.toLocaleString("ja-JP")}`, d >= 0 ? "up" : "down"];
-      });
-      st = el("span", "st " + (parts.length === 1 ? parts[0][1] : "multi"));
-      parts.forEach(([t, cls], i) => { if (i) st.append(el("br")); st.append(el("span", cls, t)); });
-    }
-    it.append(st);
-    it.onclick = () => {
-      const c = cache[key];
-      if (!c) { toast("このレースの収集データは残っていません（記録だけ残っています）"); return; }
-      if (state.date !== r["日付"]) { if (!state.homeDate) state.homeDate = state.date; state.date = r["日付"]; }
-      state.fromRecords = true;
-      showResult(r["競馬場"], { no: r["レース番号"], title: r["レース名"], time: r["発走"] }, c);
-    };
-    list.append(it);
-  }
+  for (const [key, r] of entries.slice(0, 100)) list.append(recordItem(key, r, cache));
   if (!entries.length) list.append(el("p", "note", "結果画面の「AI の回答を貼り付けて記録」で記録すると、ここに並びます"));
-  body.append(list);
+  return list;
+}
 
-  // 書き出し
+// 一覧の1行（レース・買い目・収支）。押すとそのレースの結果画面を開く
+function recordItem(key, r, cache) {
+  const it = el("button", "rec-item");
+  it.append(el("span", "t", `${r["日付"].slice(4, 6)}/${r["日付"].slice(6)} ${r["競馬場"]} ${r["レース番号"]}R ${r["レース名"] || ""}`));
+  const desc = (xs) => xs.length ? xs.map((x) => `${x["券種"]} ${x["組み合わせ"]}：${yen(x["金額"])}`).join("　") : "見送り";
+  const hasHit = r["AI"] && hasHitOf(r);
+  const own = ownBetsOf(r);
+  let keys = !r["AI"] ? [] : hasHit ? (r["買い方"] === "hit" ? [["的中買い目", "的中重視 "]] : [["買い目", "期待値重視 "], ["的中買い目", "的中重視 "]]) : [["買い目", own.length ? "AI " : ""]];
+  if (own.length) keys = [["購入", "自分 "]].concat(keys);
+  const betsOf = (k) => (k === "購入" ? own : (r["AI"] && r["AI"][k]) || []);
+  it.append(el("span", "s", !keys.length ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(betsOf(k))).join(" ／ ")));
+  let st;
+  if (!keys.length) st = el("span", "st wait", "—");
+  else if (!r["結果"]) st = el("span", "st wait", "結果待ち");
+  else {
+    const parts = keys.map(([k, lb]) => {
+      let rows = null;
+      try { rows = KS.settleBets(r, k); } catch (e) { logError(`記録の一覧（${r.race_id}）`, e); }
+      if (!rows) return [lb + "払戻不明", "wait"];
+      if (!rows.length) return [lb + "見送り", "wait"];
+      const d = rows.reduce((t, x) => t + x["払戻"] - x["金額"], 0);
+      return [`${lb}${d >= 0 ? "+" : ""}${d.toLocaleString("ja-JP")}`, d >= 0 ? "up" : "down"];
+    });
+    st = el("span", "st " + (parts.length === 1 ? parts[0][1] : "multi"));
+    parts.forEach(([t, cls], i) => { if (i) st.append(el("br")); st.append(el("span", cls, t)); });
+  }
+  it.append(st);
+  it.onclick = () => {
+    const c = cache[key];
+    if (!c) { toast("このレースの収集データは残っていません（記録だけ残っています）"); return; }
+    if (state.date !== r["日付"]) { if (!state.homeDate) state.homeDate = state.date; state.date = r["日付"]; }
+    state.fromRecords = true;
+    showResult(r["競馬場"], { no: r["レース番号"], title: r["レース名"], time: r["発走"] }, c);
+  };
+  return it;
+}
+
+// 自動バックアップの状態と、書き出す・読み込む
+function recordsActions() {
   const act = el("div", "end-actions");
   // 自動バックアップの状態
   {
     const b = backupInfo();
     const t = b.at ? (() => { const d = jstOf(b.at); return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; })() : null;
     const box = el("div", "backup-line");
-    box.append(el("b", null, "自動バックアップ"), el("span", null, t ? `最終 ${t}（週1回・ダウンロード/keiba-backup に新しい3件）` : "まだありません（週1回・ダウンロード/keiba-backup に新しい3件）"));
+    box.append(el("b", null, "自動バックアップ"), el("span", null, t ? `最終 ${t}（${KS.CONFIG.BACKUP_DAYS}日ごと・ダウンロード/keiba-backup に新しい${KS.CONFIG.BACKUP_KEEP}件）` : `まだありません（${KS.CONFIG.BACKUP_DAYS}日ごと・ダウンロード/keiba-backup に新しい${KS.CONFIG.BACKUP_KEEP}件）`));
     if (b.ok === false) box.append(el("span", "warn", `前回は失敗：${b.err || ""}`));
     act.append(box);
     const now = el("button", "btn secondary", "今すぐバックアップ"); now.onclick = () => runBackup(true);
@@ -1063,7 +1098,5 @@ function renderRecords() {
   im.onclick = () => Native.importRecords();
   act.append(im);
   act.append(el("p", "note", "書き出したファイルは、機種変更や入れ直しのあとに「読み込む」で戻せます。PC へ移して run.bat import <ファイル> で取り込むと verify.bat でも集計できます"));
-  body.append(act);
-  // 推定勝率の精度（判断は CLV と回収率で足りるので、いちばん下に置く）
-  body.append(c2);
+  return act;
 }

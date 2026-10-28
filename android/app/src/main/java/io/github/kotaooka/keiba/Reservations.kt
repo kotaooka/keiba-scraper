@@ -219,8 +219,8 @@ object CollectLock {
 object ResultChecks {
     private const val PREFS = "result_checks"
     private const val KEY_LIST = "list"
-    const val FIRST_DELAY = 15 * 60_000L   // 発走から最初に読むまで
-    const val RETRY_DELAY = 15 * 60_000L   // 未確定のとき次に読むまで
+    const val FIRST_DELAY = Config.RESULT_DELAY_MINUTES * 60_000L   // 発走から最初に読むまで
+    const val RETRY_DELAY = Config.RESULT_DELAY_MINUTES * 60_000L   // 未確定のとき次に読むまで
     const val MAX_TRIES = 3
 
     fun list(ctx: Context): List<JSONObject> {
@@ -315,7 +315,7 @@ object ResultChecks {
 object PreChecks {
     private const val PREFS = "pre_checks"
     private const val KEY_LIST = "list"
-    const val BEFORE = 5 * 60_000L
+    const val BEFORE = Config.PRECHECK_MINUTES * 60_000L
 
     private fun list(ctx: Context): List<JSONObject> {
         val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_LIST, "[]") ?: "[]"

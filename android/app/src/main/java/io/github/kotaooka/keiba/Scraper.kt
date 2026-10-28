@@ -42,7 +42,6 @@ class Scraper(
         const val TIMEOUT_SELECTOR = 10_000L  // 要素出現待機 (ms)
         const val RETRY = 2                   // ページ取得の試行回数
         const val REQUEST_INTERVAL = 2_000L   // サイトへのアクセス間隔の下限 (ms)。サーバ負荷を避けるため短くしない
-        const val DAY_RESULTS_MAX = 6         // 当日の傾向に使う、このレースより前のレース数（PC版の DAY_RESULTS_MAX）
 
         // netkeiba の競馬場コード（scraper.js の KEIBA_CODES と同じ）
         val KEIBA_CODES = linkedMapOf(
@@ -194,7 +193,7 @@ class Scraper(
     // ========== 当日の結果 ==========
 
     /**
-     * 同じ日・同じ競馬場で、このレースより前の確定済みレースの結果を新しい順に最大 DAY_RESULTS_MAX レース読む（PC版の scrape_day_results）。
+     * 同じ日・同じ競馬場で、このレースより前の確定済みレースの結果を新しい順に最大 Config.DAY_RESULTS_MAX レース読む（PC版の scrape_day_results）。
      * prevStarted は、このレースの直前から数えて発走済みのレース数（画面の一覧の発走時刻から。-1 は分からない）。
      * 確定した結果は端末に置いて使い回す（3日で消す）。まだ確定していないレースが2つ続いたらやめる
      */
@@ -207,8 +206,8 @@ class Scraper(
         val today = Jst.format("yyyyMMdd")
         val limit = when {
             raceDate > today -> 0
-            prevStarted >= 0 -> minOf(prevStarted, DAY_RESULTS_MAX)
-            else -> DAY_RESULTS_MAX
+            prevStarted >= 0 -> minOf(prevStarted, Config.DAY_RESULTS_MAX)
+            else -> Config.DAY_RESULTS_MAX
         }
         val out = JSONArray()
         var misses = 0

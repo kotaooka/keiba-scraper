@@ -29,53 +29,59 @@
   const NETKEIBA = "https://nar.netkeiba.com";
   const COND_MAP = { "稍": "稍重", "不": "不良", "良": "良", "重": "重", "稍重": "稍重", "不良": "不良" };
 
+  // 判断の基準・件数の上限など（PC版の同名の定数・Kotlin の Config と同じ値。tests/test_config.py で確かめる）
+  const CONFIG = {
+    PAYBACK_MAX_ODDS: 1.1,     // 複勝・ワイドでオッズの下限がこれ以下の組は、当たってもほぼ元返し
+    CLV_VIEW_POINTS: 2,        // CLV：AI が市場より「高く（低く）見た」とみなす推定勝率の差（ポイント）
+    VERDICT_MIN_RACES: 30,     // 集計の判定を出す最少レース数
+    DAY_RESULTS_MAX: 6,        // 当日の傾向に使う、このレースより前のレース数
+    // 以下は Android版だけ
+    CALC_FAR_POINTS: 0.03,     // AI の見積もりと勝率から計算した的中率がこれ以上…
+    CALC_FAR_RATIO: 0.3,       // …かつ計算値のこの割合以上ずれたら知らせる
+    RECORDS_MAX: 500,          // 端末に残す記録（AI の回答か買った馬券のあるもの）
+    DATA_RECORDS_MAX: 300,     // 端末に残すデータだけの記録
+    PRECHECK_MINUTES: 5,       // 締切前のオッズの確認（発走の何分前）
+    RESULT_DELAY_MINUTES: 15,  // 結果の自動取得（発走の何分後）
+    BACKUP_DAYS: 7,            // 自動バックアップの間隔
+    BACKUP_KEEP: 3,            // 自動バックアップを残す件数
+    TEXT_ZOOM_MIN: 85,         // 文字の大きさ（端末の設定に合わせる範囲、%）
+    TEXT_ZOOM_MAX: 115,
+    SENT_HOURS: 3,             // AI へ送ってから、クリップボードの回答を探す時間
+  };
+
   // 買い目の条件の既定値（PC版の BUDGET・MAX_BETS・EV_MIN と同じ）。アプリでは設定画面で変えられる
   const EV_MIN = 1.2;
   // mode: "ev"=期待値重視 / "hit"=的中重視 / "both"=両方。hit_min（%）・hit_ev_min は的中重視の条件（PC版の BET_MODE・HIT_MIN・HIT_EV_MIN）
   const DEFAULT_SETTINGS = { budget: 1000, max_bets: 3, ev_min: EV_MIN, mode: "both", hit_min: 30, hit_ev_min: 0.9 };
 
-  // AI への指示文（PC版の PROMPT_TEXT と同じ文面にそろえる）
-  const PROMPT_TEXT = `
-【AIへの指示】
-上記データだけを使って、このレースの買い目を決めてください。
-
-■ 目的と制約
-{GOAL}
-・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。
-・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。
-・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。
-・オッズが「--」の馬の単勝・複勝と、オッズを取得できなかった券種は選ばないでください。
-・複勝・ワイドで、オッズの幅の下限が1.1倍以下の組は選ばないでください（当たっても払戻がほぼ元返しで、回収にならないため）。
-・単勝が発売前の予想オッズ（「データの欠損」に書いてあります）のときは、期待値は参考値として計算し、その旨を【前提】に書いてください。
-
-■ 手順
-1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。
-2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。「当日の傾向」があれば、逃げ・先行の残りやすさや内外の有利不利の参考にする（レース数が少ないときは強く頼らない）。
-3. 各馬の評価：次の観点で、市場評価より上か下かを判断する。
-   ・人気と着順：過去走で人気より上の着順に来ているか（人気以上に走る馬か、人気を裏切る馬か）
-   ・負け幅：着順より「差」を重視する。頭数が少ないレースの着順は割り引いて見る
-   ・条件適性：今回と同じ馬場種別・近い距離（±200m）での着順、「成績」の左・右・場・距
-   ・クラス：過去走のクラスと今回のクラスを比べ、昇級・降級を判断する。中央(J)のレースは別物として扱う
-   ・近走の推移：直近3走の着順・差・上がりが良化しているか悪化しているか
-   ・タイム：同じ競馬場・同じ距離・近い馬場状態のレース同士でだけ比べる（条件が違うタイムは比べない）
-   ・前走間隔：中1週以内や3か月以上は割り引いて考える
-   ・騎手：乗り替わりの有無と騎手コンビ成績
-   ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性
-4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。複勝・ワイド・三連複の推定的中率は、自分の推定勝率・推定複勝率と矛盾しないように付ける（表の「市場計算」は、市場勝率から同じ考え方で計算した目安）。
-{BET_STEP}
-
-■ 出力フォーマット（この順で出力）
-1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬
-2. 【展開予想】逃げ・先行候補とペースを2〜3行で
-3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）
-{BET_OUTPUT}
-5. 【総評】50字以内
-6. 【記録用】最後に次の形式のブロックを1つのコードブロックにまとめて出力する（ブロックを分けない）。#PRED は見送りのときも全頭分出す。{BLOCK_NOTE}買い目の列はこの4列だけ（使用オッズ・期待値は入れない）。金額は100円単位で、桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。
-#PRED
-馬番,推定勝率,推定複勝率
-1,12.5,35.0
-{BET_BLOCK}
-`;
+  // ===== 自動生成ここから：tools/sync_prompt.py が keiba_scraper.py の PROMPT_TEXT・MODE_TEXT から書く。直接直さない =====
+  // AI への指示文（{GOAL} などは買い方ごとの文、{BUDGET} などは予想の条件に置き換える）
+  const PROMPT_TEXT = "\n【AIへの指示】\n上記データだけを使って、このレースの買い目を決めてください。\n\n■ 目的と制約\n{GOAL}\n・データにない情報（騎手のコース実績、調教、血統、ニュースなど）は使わないでください。\n・「データの欠損」にある項目は推測で補わず、その分だけ評価を市場評価に寄せてください。\n・券種は単勝・複勝・ワイド・三連複だけを使ってください（オッズを渡しているのはこの4つだけです）。ワイド・三連複は、表にある人気上位10組の中からだけ選んでください（それ以外はオッズ不明のため）。\n・オッズが「--」の馬の単勝・複勝と、オッズを取得できなかった券種は選ばないでください。\n・複勝・ワイドで、オッズの幅の下限が{PAYBACK_MAX_ODDS}倍以下の組は選ばないでください（当たっても払戻がほぼ元返しで、回収にならないため）。\n・単勝が発売前の予想オッズ（「データの欠損」に書いてあります）のときは、期待値は参考値として計算し、その旨を【前提】に書いてください。\n\n■ 手順\n1. 市場評価：出馬表の「市場勝率」（単勝オッズからスクリプトで計算済み）をそのまま使い、再計算しない。「--」の馬は単勝オッズがないため計算から外れている。\n2. 展開：脚質と過去の通過順から、逃げ・先行になりそうな馬とペース（速い/普通/遅い）を判断する。「当日の傾向」があれば、逃げ・先行の残りやすさや内外の有利不利の参考にする（レース数が少ないときは強く頼らない）。\n3. 各馬の評価：次の観点で、市場評価より上か下かを判断する。\n   ・人気と着順：過去走で人気より上の着順に来ているか（人気以上に走る馬か、人気を裏切る馬か）\n   ・負け幅：着順より「差」を重視する。頭数が少ないレースの着順は割り引いて見る\n   ・条件適性：今回と同じ馬場種別・近い距離（±200m）での着順、「成績」の左・右・場・距\n   ・クラス：過去走のクラスと今回のクラスを比べ、昇級・降級を判断する。中央(J)のレースは別物として扱う\n   ・近走の推移：直近3走の着順・差・上がりが良化しているか悪化しているか\n   ・タイム：同じ競馬場・同じ距離・近い馬場状態のレース同士でだけ比べる（条件が違うタイムは比べない）\n   ・前走間隔：中1週以内や3か月以上は割り引いて考える\n   ・騎手：乗り替わりの有無と騎手コンビ成績\n   ・斤量差・馬体重の増減（好走時の体重と比べる）、展開との相性\n4. 推定確率：全頭に推定勝率と推定複勝率を付ける。推定勝率は合計100%、推定複勝率は合計300%（出走7頭以下は複勝が2着までなので200%）にそろえる。市場勝率から大きく動かす馬には、データ上の根拠を必ず示す。根拠が弱いときは市場勝率に近い値にする。複勝・ワイド・三連複の推定的中率は、自分の推定勝率・推定複勝率と矛盾しないように付ける（表の「市場計算」は、市場勝率から同じ考え方で計算した目安）。\n{BET_STEP}\n\n■ 出力フォーマット（この順で出力）\n1. 【前提】出走頭数、欠損データ、市場勝率が「--」の馬\n2. 【展開予想】逃げ・先行候補とペースを2〜3行で\n3. 【全頭評価】表形式：馬番｜馬名｜市場勝率｜推定勝率｜推定複勝率｜根拠（データを引用して1行）\n{BET_OUTPUT}\n5. 【総評】50字以内\n6. 【記録用】最後に次の形式のブロックを1つのコードブロックにまとめて出力する（ブロックを分けない）。#PRED は見送りのときも全頭分出す。{BLOCK_NOTE}買い目の列はこの4列だけ（使用オッズ・期待値は入れない）。金額は100円単位で、桁区切りのカンマを付けない。数値は%の数字だけ（%記号は付けない）。以下は書式の例。\n#PRED\n馬番,推定勝率,推定複勝率\n1,12.5,35.0\n{BET_BLOCK}\n";
+  // 買い方ごとの指示文の部品
+  const MODE_TEXT = {
+    "ev": {
+      "GOAL": "・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
+      "BET_OUTPUT": "4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+      "BLOCK_NOTE": "#BET は、見送りのときも「#BET」と列名の2行は必ず出す。#BET の推定的中率は【買い目】の表と同じ値。",
+      "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5"
+    },
+    "hit": {
+      "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選んでください。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。条件を満たす買い目がなければ「見送り」と答えてください。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
+      "BET_OUTPUT": "4. 【買い目（的中重視）】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+      "BLOCK_NOTE": "#HIT は、見送りのときも「#HIT」と列名の2行は必ず出す。#HIT の推定的中率は【買い目（的中重視）】の表と同じ値。",
+      "BET_BLOCK": "#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
+    },
+    "both": {
+      "GOAL": "・期待値重視と的中重視の2通りの買い目を、別々に出してください。予算はそれぞれ{BUDGET}円、最大{MAX_BETS}点、各100円単位。\n・期待値重視：目的は回収率（期待値）の最大化。期待値が{EV_MIN}以上の買い目がなければ「見送り」。\n・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選ぶ。なければ「見送り」。",
+      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。\n   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。\n   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
+      "BET_OUTPUT": "4. 【買い目（期待値重視）】と【買い目（的中重視）】：それぞれ表形式で 券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
+      "BLOCK_NOTE": "#BET（期待値重視）と #HIT（的中重視）は、見送りのときも「#BET」「#HIT」の行と列名の行は必ず出す。推定的中率はそれぞれの表と同じ値。",
+      "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5\n#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
+    }
+  };
+  // ===== 自動生成ここまで =====
 
   // ========== 文字列ユーティリティ ==========
 
@@ -858,30 +864,7 @@
   function fmtEv(v) { const s = pyFixed(Number(v), 2); return s.endsWith("0") ? s.slice(0, -1) : s; }
 
   // AI への指示文（PC版の prompt_text と同じ）
-  // 買い目の出し方ごとの指示文の部品（PC版の MODE_TEXT と同じ文面）
-  const MODE_TEXT = {
-    "ev": {
-      "GOAL": "・目的は回収率（期待値）の最大化です。的中率の高さは目的ではありません。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。期待値が{EV_MIN}以上の買い目がなければ「見送り」と答えてください。",
-      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
-      "BET_OUTPUT": "4. 【買い目】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-      "BLOCK_NOTE": "#BET は、見送りのときも「#BET」と列名の2行は必ず出す。#BET の推定的中率は【買い目】の表と同じ値。",
-      "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5"
-    },
-    "hit": {
-      "GOAL": "・目的は当たりやすさです。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選んでください。\n・予算は{BUDGET}円、最大{MAX_BETS}点、各100円単位。条件を満たす買い目がなければ「見送り」と答えてください。",
-      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
-      "BET_OUTPUT": "4. 【買い目（的中重視）】表形式：券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-      "BLOCK_NOTE": "#HIT は、見送りのときも「#HIT」と列名の2行は必ず出す。#HIT の推定的中率は【買い目（的中重視）】の表と同じ値。",
-      "BET_BLOCK": "#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
-    },
-    "both": {
-      "GOAL": "・期待値重視と的中重視の2通りの買い目を、別々に出してください。予算はそれぞれ{BUDGET}円、最大{MAX_BETS}点、各100円単位。\n・期待値重視：目的は回収率（期待値）の最大化。期待値が{EV_MIN}以上の買い目がなければ「見送り」。\n・的中重視：目的は当たりやすさ。推定的中率が{HIT_MIN}%以上かつ期待値が{HIT_EV_MIN}以上の買い目から、推定的中率の高い順に選ぶ。なければ「見送り」。",
-      "BET_STEP": "5. 買い目：期待値 = 推定的中率(%) ÷ 100 × オッズ で計算する。推定的中率は、単勝は推定勝率、複勝は推定複勝率、ワイド・三連複は各馬の推定確率から見積もった組の的中率。複勝・ワイドのオッズは幅の下限を使う。\n   ・期待値重視：期待値{EV_MIN}以上の候補から、期待値の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。\n   ・的中重視：推定的中率{HIT_MIN}%以上かつ期待値{HIT_EV_MIN}以上の候補から、推定的中率の高い順に最大{MAX_BETS}点を選び、資金を配分する（合計は予算以内）。",
-      "BET_OUTPUT": "4. 【買い目（期待値重視）】と【買い目（的中重視）】：それぞれ表形式で 券種｜組み合わせ｜金額｜使用オッズ｜推定的中率｜期待値　（見送りの場合はその理由）",
-      "BLOCK_NOTE": "#BET（期待値重視）と #HIT（的中重視）は、見送りのときも「#BET」「#HIT」の行と列名の行は必ず出す。推定的中率はそれぞれの表と同じ値。",
-      "BET_BLOCK": "#BET\n券種,組み合わせ,金額,推定的中率\nワイド,3-7,500,18.5\n#HIT\n券種,組み合わせ,金額,推定的中率\n複勝,3,500,62.0"
-    }
-  };
+
 
   // 的中率の下限の表示（PC版の fmt_pct）
   function fmtPct(v) { return Number.isInteger(+v) ? String(+v) : pyFixed(+v, 1); }
@@ -894,6 +877,7 @@
     for (const k of ["GOAL", "BET_STEP", "BET_OUTPUT", "BLOCK_NOTE", "BET_BLOCK"]) t = t.split("{" + k + "}").join(parts[k]);
     return t.split("{BUDGET}").join(String(st.budget)).split("{MAX_BETS}").join(String(st.max_bets))
       .split("{EV_MIN}").join(fmtEv(st.ev_min)).split("{HIT_MIN}").join(fmtPct(st.hit_min)).split("{HIT_EV_MIN}").join(fmtEv(st.hit_ev_min))
+      .split("{PAYBACK_MAX_ODDS}").join(String(CONFIG.PAYBACK_MAX_ODDS))
       .trim().split("\n").map((l) => l.replace(/\s+$/, "")).join("\n");
   }
 
@@ -1026,6 +1010,26 @@
   }
 
   // 収集の結果から記録を作る（PC版の new_record と同じ形。AI の回答と結果はあとで入る）
+  // 記録の形式の版（docs/record-format.md。上げたら migrateRecord に直し方を足す）
+  const RECORD_SCHEMA = 2;
+  // 古い形式の記録を今の形式に直す（PC版の migrate_record と同じ）。オブジェクトでなければ null。
+  // 版1（schema なし）→ 版2：AI・結果・馬の項目を必ず持たせ、レース番号を数にする
+  function migrateRecord(r) {
+    if (!r || typeof r !== "object" || Array.isArray(r)) return null;
+    const out = Object.assign({}, r);
+    let version = parseInt(out.schema || 1, 10);
+    if (!Number.isFinite(version)) version = 1;
+    if (version < 2) {
+      if (!("AI" in out)) out["AI"] = null;
+      if (!("結果" in out)) out["結果"] = null;
+      if (!out["馬"] || typeof out["馬"] !== "object" || Array.isArray(out["馬"])) out["馬"] = {};
+      const no = out["レース番号"];
+      if (typeof no === "string" && /^\d+$/.test(no.trim())) out["レース番号"] = parseInt(no.trim(), 10);
+      out.schema = 2;
+    }
+    return out;
+  }
+
   function newRecord(date, venue, no, res) {
     const info = res.info || {};
     const horses = {};
@@ -1033,7 +1037,7 @@
       horses[String(parseInt(h.no, 10))] = { "馬名": h.name, "単勝": h.odds, "市場勝率": h.prob == null ? null : h.prob, "取消": !!h.cancel };
     }
     return {
-      race_id: raceIdOf(date, venue, no), "日付": date, "競馬場": venue, "レース番号": +no,
+      schema: RECORD_SCHEMA, race_id: raceIdOf(date, venue, no), "日付": date, "競馬場": venue, "レース番号": +no,
       "レース名": info.race_name || "", "クラス": info.cls || "", "収集時刻": res.at || "",
       "払戻率": info.payout_rate == null ? null : info.payout_rate, "馬": horses, "AI": null, "結果": null,
     };
@@ -1353,8 +1357,8 @@
         const mp = (horses[n] || {})["市場勝率"];
         if (mp == null || !(n in closeMp) || !(n in pred)) continue;
         const d = pred[n]["勝率"] - mp;
-        if (d >= 2) hiMoves.push(closeMp[n] - mp);
-        else if (d <= -2) loMoves.push(closeMp[n] - mp);
+        if (d >= CONFIG.CLV_VIEW_POINTS) hiMoves.push(closeMp[n] - mp);
+        else if (d <= -CONFIG.CLV_VIEW_POINTS) loMoves.push(closeMp[n] - mp);
       }
     }
     if (!perRace.length && !hiMoves.length && !loMoves.length) return out;
@@ -1619,25 +1623,9 @@
     return lines;
   }
 
-  function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt, settings, dayResults) {
-    ri = ri || {};
-    const d = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6)}`;
-    let title = `${d} ${keibajo} ${raceNo}R`;
-    if (ri["レース名"]) title += ` ${ri["レース名"]}`;
-    const lines = [
-      `【${title} 出馬表 + オッズ + 過去成績】`,
-      `収集時刻: ${collectedAt}` + (ri["発走"] ? ` / 発走: ${ri["発走"]}` : ""),
-      "",
-      `レース条件: ${ri["馬場種別"] || "不明"} ${ri["距離"] || "不明"} ` +
-        `/ 馬場状態: ${ri["馬場状態"] || "不明"} / クラス: ${ri["クラス"] || "不明"}` +
-        (ri["頭数"] ? ` / ${ri["頭数"]}頭` : ""),
-      "",
-    ];
-    if (payoutRate) {
-      lines.push(`単勝の払戻率（オッズから逆算した目安）: ${pyFixed(payoutRate * 100, 1)}%` +
-        "　※市場勝率は控除分を除いて合計100%にそろえた値", "");
-    }
-
+  // AI へ送るテキストの出馬表（馬番・騎手・オッズ・市場勝率など）
+  function aiHorseTable(horses) {
+    const lines = [];
     const cols = [["馬番", 4, ">"], ["馬名", 20, "<"], ["性齢", 5, "<"], ["斤量", 5, ">"],
       ["騎手", 11, "<"], ["調教師", 11, "<"], ["馬体重", 9, ">"],
       ["単勝", 7, ">"], ["市場勝率", 9, ">"], ["人気", 5, ">"], ["複勝", 12, ">"], ["脚質", 5, "<"]];
@@ -1661,7 +1649,12 @@
       lines.push(vals.map((v, i) => pad(v, cols[i][1], cols[i][2])).join(" "));
     }
     lines.push(rule);
+    return lines;
+  }
 
+  // AI へ送るテキストの各馬の過去成績（直近5走と条件別成績）
+  function aiHistory(horses) {
+    const lines = [];
     const pcols = [["日付", 10, "<"], ["競馬場", 8, "<"], ["回", 2, "<"], ["距離", 7, "<"],
       ["馬場", 4, "<"], ["頭数", 4, ">"], ["馬番", 4, ">"], ["人気", 4, ">"],
       ["着順", 4, ">"], ["差", 5, ">"], ["タイム", 6, ">"], ["通過", 11, ">"],
@@ -1699,13 +1692,12 @@
       }
       lines.push("");
     }
+    return lines;
+  }
 
-    const st = speedTable(horses, keibajo, ri);
-    if (st) lines.push(...formatSpeed(st));
-
-    lines.push(...dayTrendLines(dayResults));
-
-    // 市場勝率から Harville 法で計算した複勝・ワイド・三連複の的中率（AI の推定的中率の目安）
+  // 市場勝率から Harville 法で計算した複勝・ワイド・三連複の的中率（AI の推定的中率の目安）
+  function aiMarketLines(horses, wideTop, sanrenTop) {
+    const lines = [];
     const hv = marketHarville(horses);
     const running = horses.filter((h) => !h["取消"]);
     const placeKey = running.length >= 8 ? "top3" : "top2";
@@ -1737,6 +1729,36 @@
       }
     }
     if (hv) lines.push("※市場計算は Harville 法（勝率どおりに1着が決まり、2・3着も残りの馬の勝率の比で決まるとみなす計算）の値。人気馬の2・3着をやや多めに、人気薄をやや少なめに見積もる傾向がある");
+    return lines;
+  }
+
+  function formatForAi(horses, keibajo, date, raceNo, ri, wideTop, sanrenTop, warnings, payoutRate, collectedAt, settings, dayResults) {
+    ri = ri || {};
+    const d = `${date.slice(0, 4)}/${date.slice(4, 6)}/${date.slice(6)}`;
+    let title = `${d} ${keibajo} ${raceNo}R`;
+    if (ri["レース名"]) title += ` ${ri["レース名"]}`;
+    const lines = [
+      `【${title} 出馬表 + オッズ + 過去成績】`,
+      `収集時刻: ${collectedAt}` + (ri["発走"] ? ` / 発走: ${ri["発走"]}` : ""),
+      "",
+      `レース条件: ${ri["馬場種別"] || "不明"} ${ri["距離"] || "不明"} ` +
+        `/ 馬場状態: ${ri["馬場状態"] || "不明"} / クラス: ${ri["クラス"] || "不明"}` +
+        (ri["頭数"] ? ` / ${ri["頭数"]}頭` : ""),
+      "",
+    ];
+    if (payoutRate) {
+      lines.push(`単勝の払戻率（オッズから逆算した目安）: ${pyFixed(payoutRate * 100, 1)}%` +
+        "　※市場勝率は控除分を除いて合計100%にそろえた値", "");
+    }
+
+    lines.push(...aiHorseTable(horses), ...aiHistory(horses));
+
+    const st = speedTable(horses, keibajo, ri);
+    if (st) lines.push(...formatSpeed(st));
+
+    lines.push(...dayTrendLines(dayResults));
+
+    lines.push(...aiMarketLines(horses, wideTop, sanrenTop));
 
     const notes = oddsNotes(horses);
     if (notes.length) lines.push("", "【オッズの注記】", ...notes.map((n) => `・${n}`));
@@ -1767,16 +1789,18 @@
   }
   // 記録した買い目を今のオッズで点検する。p は #BET の推定的中率（無ければ単勝は推定勝率・複勝は推定複勝率）。
   // 返り値: [{group: "期待値重視"|"的中重視", 券種, 組み合わせ, odds, ev, ok}]（オッズが分からない買い目は ev: null）
+  // AI が見積もった的中率（0〜1）。#BET の推定的中率の列があればそれ、無ければ単勝は推定勝率・複勝は推定複勝率（ほかは null）
+  function betProbOf(b, pred) {
+    if (typeof b["的中率"] === "number" && b["的中率"] > 0) return b["的中率"] / 100;
+    const a = (pred || {})[b["組み合わせ"]];
+    if (!a) return null;
+    if (b["券種"] === "単勝") return a["勝率"] / 100;
+    if (b["券種"] === "複勝") return a["複勝率"] / 100;
+    return null;
+  }
   function recheckBets(info, bets, hitBets, pred, evMin, hitEvMin) {
     const out = [];
-    const probOf = (b) => {
-      if (typeof b["的中率"] === "number" && b["的中率"] > 0) return b["的中率"] / 100;
-      const a = (pred || {})[b["組み合わせ"]];
-      if (!a) return null;
-      if (b["券種"] === "単勝") return a["勝率"] / 100;
-      if (b["券種"] === "複勝") return a["複勝率"] / 100;
-      return null;
-    };
+    const probOf = (b) => betProbOf(b, pred);
     for (const [group, list, min] of [["期待値重視", bets || [], evMin], ["的中重視", hitBets || [], hitEvMin]]) {
       for (const b of list) {
         const o = betOddsFromInfo(b, info), p = probOf(b);
@@ -1868,7 +1892,7 @@
     KEIBA_CODES, CODE_TO_NAME, KEIBAGO_CODES, EV_MIN, DEFAULT_SETTINGS, MODE_TEXT, PROMPT_TEXT, fmtEv, fmtPct, promptText, withSettings,
     parsePatCalendar, parsePatRange,
     oddsNotes, diffRaces, formatDiff, pyFixed, speedTable, formatSpeed, normJockey,
-    parseAiBlock, raceIdOf, newRecord, betOddsFromInfo, recheckBets, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
+    CONFIG, RECORD_SCHEMA, migrateRecord, parseAiBlock, raceIdOf, newRecord, betOddsFromInfo, betProbOf, recheckBets, resultReady, parseResult, parseCorner, harville, dayTrendLines, resultFinished, settleBets, horseRows, computeSummary, comboKey, BET_SPECS,
     gt, dispWidth, pad,
     parseRaceList,
     parseShutuba, parseRaceInfo, parseKyakuType,
