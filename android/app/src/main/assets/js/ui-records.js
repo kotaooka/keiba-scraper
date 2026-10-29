@@ -761,6 +761,7 @@ function trendSeries(records) {
     { id: "own", label: "自分", key: "購入", ok: (r) => Array.isArray(r["購入"]) && r["購入"].length },
     { id: "ev", label: "AI期待値", key: "買い目", ok: (r) => r["AI"] && r["買い方"] !== "hit" },
     { id: "hit", label: "AI的中", key: "的中買い目", ok: (r) => r["AI"] && (Array.isArray(r["AI"]["的中買い目"]) || ["hit", "both"].includes(r["買い方"])) },
+    { id: "mkt", label: "目安", key: "市場買い目", ok: (r) => marketBetsOf(r).length > 0 },
   ];
   const out = [];
   for (const d of defs) {
@@ -781,11 +782,12 @@ function trendSeries(records) {
 }
 function trendCard(records) {
   const series = trendSeries(records);
-  if (!series.length || !series.some((x) => x.pts.length >= 2)) return null;
+  if (!series.length) return null;
   const c = el("div", "card");
   c.append(el("h3", null, "収支の推移"));
   const W = 340, H = 190, L = 50, R = 10, T = 12, B = 26;
-  const n = Math.max(...series.map((x) => x.pts.length));
+  // 線は 0（買う前）から引く。そのため1レースでも線になる
+  const n = Math.max(...series.map((x) => x.pts.length)) + 1;
   const vals = series.flatMap((x) => x.pts.map((p) => p.cum)).concat([0]);
   let lo = Math.min(...vals), hi = Math.max(...vals);
   if (hi - lo < 1000) { const m = (hi + lo) / 2; lo = m - 500; hi = m + 500; }
@@ -804,13 +806,13 @@ function trendCard(records) {
     mk("line", { x1: L, x2: W - R, y1: y(v), y2: y(v), class: v === 0 ? "zero" : "grid" });
     mk("text", { x: L - 6, y: y(v) + 4, "text-anchor": "end", class: "tick" }, `${v > 0 ? "+" : ""}${Math.abs(v) >= 10000 ? `${(v / 10000).toLocaleString("ja-JP")}万` : v.toLocaleString("ja-JP")}`);
   }
-  mk("text", { x: L, y: H - 6, class: "tick" }, "1");
-  mk("text", { x: W - R, y: H - 6, "text-anchor": "end", class: "tick" }, `${n}レース目`);
+  mk("text", { x: L, y: H - 6, class: "tick" }, "0");
+  mk("text", { x: W - R, y: H - 6, "text-anchor": "end", class: "tick" }, `${n - 1}レース目`);
   for (const s1 of series) {
-    const d = s1.pts.map((p, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join(" ");
+    const d = [`M${x(0).toFixed(1)},${y(0).toFixed(1)}`].concat(s1.pts.map((p, i) => `L${x(i + 1).toFixed(1)},${y(p.cum).toFixed(1)}`)).join(" ");
     mk("path", { d, class: `ln ln-${s1.id}` });
     const last = s1.pts[s1.pts.length - 1];
-    mk("circle", { cx: x(s1.pts.length - 1), cy: y(last.cum), r: 3, class: `dot ln-${s1.id}` });
+    mk("circle", { cx: x(s1.pts.length), cy: y(last.cum), r: 3, class: `dot ln-${s1.id}` });
   }
   c.append(svg);
   // 凡例（線の種類と最後の値）
@@ -822,7 +824,7 @@ function trendCard(records) {
     lg.append(it);
   }
   c.append(lg);
-  return addHelp(c, "trend", ["買ったレース（AI は買い目のあったレース）だけを発走の順に並べ、収支を足し上げています。30レース未満は偶然の当たり外れで大きく動くので、傾向の判断には使えません"]);
+  return addHelp(c, "trend", ["買ったレース（AI と目安は買い目のあったレース）だけを発走の順に並べ、収支を足し上げています。「目安」は AI なしの目安です。30レース未満は偶然の当たり外れで大きく動くので、傾向の判断には使えません"]);
 }
 // 締切オッズとの比較（CLV）のカード（PC版の format_clv と同じ内容）
 function clvCard(clv) {

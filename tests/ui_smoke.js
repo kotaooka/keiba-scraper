@@ -160,10 +160,12 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
       const dt = JSON.parse(JSON.stringify(mk)); delete dt["市場買い目"]; dt["日付"] = "20261030"; dt.race_id = "202644103012"; o["20261030|大井|12"] = dt; writeRecords(o);
       showRecords();
       return { h: [...document.querySelectorAll(".card h3")].map((x) => x.textContent), items: document.querySelectorAll(".rec-list .rec-item").length, mkOnly: [...document.querySelectorAll(".rec-list .rec-item")].some((x) => x.textContent.includes("10/31 大井 12R") && x.textContent.includes("目安 ")),
+        trendMkt: [...document.querySelectorAll(".trend-legend .lg-mkt")].length === 1 && !!document.querySelector(".trend .ln-mkt"),
         collectedOnly: [...document.querySelectorAll(".rec-list .rec-item")].some((x) => x.textContent.includes("10/30 大井 12R") && x.textContent.includes("収集のみ")),
         filtered: (() => { state.recFilter = "bets"; renderRecords(); const n = [...document.querySelectorAll(".rec-list .rec-item")].filter((x) => x.textContent.includes("収集のみ")).length; const has = [...document.querySelectorAll(".rec-list .rec-item")].length > 0; state.recFilter = "all"; renderRecords(); return n === 0 && has; })(), brier: [...document.querySelectorAll(".card h3")].some((x) => x.textContent.startsWith("推定勝率の精度")), ex: document.querySelector(".backup-line").parentElement.querySelectorAll("button").length };
     }, records);
     check(scheme, "収支の推移", rec.h.some((t) => t.startsWith("収支の推移")), rec.h.join(","));
+    check(scheme, "収支の推移に AI なしの目安の線", rec.trendMkt);
     check(scheme, "CLV", rec.h.some((t) => t.startsWith("締切オッズとの比較")));
     check(scheme, "回収率：AI なしの目安", rec.h.some((t) => t === "回収率：AI なしの目安"), rec.h.join(","));
     check(scheme, "記録の一覧が並ぶ", rec.items > 0, String(rec.items));

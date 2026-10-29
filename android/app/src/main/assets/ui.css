@@ -313,13 +313,15 @@ table.past td.place { color: var(--accent); font-weight: 700; }
 .trend .ln-own { stroke: var(--accent); }
 .trend .ln-ev { stroke: var(--ok); stroke-dasharray: 6 4; }
 .trend .ln-hit { stroke: var(--ink2); stroke-dasharray: 2 4; }
-.trend .dot.ln-own { fill: var(--accent); } .trend .dot.ln-ev { fill: var(--ok); } .trend .dot.ln-hit { fill: var(--ink2); }
+.trend .ln-mkt { stroke: var(--ink); stroke-dasharray: 10 3 2 3; }
+.trend .dot.ln-own { fill: var(--accent); } .trend .dot.ln-ev { fill: var(--ok); } .trend .dot.ln-hit { fill: var(--ink2); } .trend .dot.ln-mkt { fill: var(--ink); }
 .trend .dot { stroke: none; }
 .trend-legend { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--ink2); }
 .trend-legend .lg { display: flex; align-items: center; gap: 6px; }
 .trend-legend .lg i { width: 22px; height: 0; border-top: 2.5px solid var(--accent); flex: none; }
 .trend-legend .lg-ev i { border-top: 2.5px dashed var(--ok); }
 .trend-legend .lg-hit i { border-top: 2.5px dotted var(--ink2); }
+.trend-legend .lg-mkt i { border-top: 2.5px dashed var(--ink); }
 .trend-legend b { color: var(--ink); }
 .breakdown { margin-top: 10px; }
 .breakdown summary { cursor: pointer; color: var(--accent); font-weight: 700; font-size: 13.5px; padding: 6px 0; }
