@@ -878,7 +878,7 @@ function renderRecords() {
   body.append(el("h2", "race-title", "予想の記録と答え合わせ"));
   const recs = readRecords();
   const all = Object.values(recs);
-  body.append(el("p", "race-sub", `記録 ${all.filter((r) => !isDataOnly(r)).length}件・答え合わせ済み ${all.filter((r) => r["AI"] && r["結果"]).length}件`));
+  body.append(el("p", "race-sub", `記録 ${all.length}件（買い目のあるレース ${all.filter((r) => !isDataOnly(r)).length}件）・答え合わせ済み ${all.filter((r) => !isDataOnly(r) && r["結果"]).length}件`));
   const bar = recordsFetchBar(recs);
   if (bar) body.append(...bar);
   const sm = safeSummary(all);
@@ -985,11 +985,21 @@ function brierCard(sm) {
 function recordsList(recs) {
   const list = el("div", "rec-list"); list.style.marginTop = "12px";
   const cache = readCache();
-  const entries = Object.entries(recs).filter(([, r]) => !isDataOnly(r)).sort((a, b) => recOrder(b[1]).localeCompare(recOrder(a[1])));
-  const dataRecs = Object.values(recs).filter(isDataOnly);
-  if (dataRecs.length) list.append(el("p", "note", `ほかに、データとして記録したレース ${dataRecs.length}件（結果あり ${dataRecs.filter((r) => r["結果"]).length}件）。AI の回答がないレースも結果まで残し、書き出しと自動バックアップに入ります（あとで分析に使うため）`));
+  // 収集しただけのレースも並べる。「買い目のあるレース」に絞ることもできる（AI の回答・買った馬券・目安の買い目）
+  const all = Object.entries(recs).sort((a, b) => recOrder(b[1]).localeCompare(recOrder(a[1])));
+  const withBets = all.filter(([, r]) => !isDataOnly(r));
+  const only = state.recFilter === "bets";
+  const tg = el("div", "chips-pick");
+  for (const [id, label] of [["all", `すべて ${all.length}`], ["bets", `買い目のあるレース ${withBets.length}`]]) {
+    const b = el("button", null, label); b.setAttribute("aria-pressed", String((id === "bets") === only));
+    b.onclick = () => { state.recFilter = id; renderRecords(); };
+    tg.append(b);
+  }
+  list.append(tg);
+  const entries = only ? withBets : all;
   for (const [key, r] of entries.slice(0, 100)) list.append(recordItem(key, r, cache));
-  if (!entries.length) list.append(el("p", "note", "結果画面の「AI の回答を貼り付けて記録」で記録すると、ここに並びます"));
+  if (entries.length > 100) list.append(el("p", "note", `新しい順に100件まで出しています（ほか ${entries.length - 100}件は書き出しに入ります）`));
+  if (!entries.length) list.append(el("p", "note", only ? "AI の回答を記録するか、買った馬券を入れるか、AI なしの目安が買い目を出すと、ここに並びます" : "レースを収集すると、ここに並びます"));
   return list;
 }
 
@@ -1004,9 +1014,13 @@ function recordItem(key, r, cache) {
   if (own.length) keys = [["購入", "自分 "]].concat(keys);
   if (marketBetsOf(r).length) keys = keys.concat([["市場買い目", "目安 "]]);
   const betsOf = (k) => (k === "購入" ? own : k === "市場買い目" ? marketBetsOf(r) : (r["AI"] && r["AI"][k]) || []);
-  it.append(el("span", "s", !keys.length ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(betsOf(k))).join(" ／ ")));
+  it.append(el("span", "s", !keys.length ? (Array.isArray(r["市場買い目"]) ? "収集のみ（目安は見送り）" : "収集のみ") : keys.map(([k, lb]) => lb + desc(betsOf(k))).join(" ／ ")));
   let st;
-  if (!keys.length) st = el("span", "st wait", "—");
+  if (!keys.length) {
+    // 収集しただけのレース：結果が出ていれば1着の馬番を出す
+    const win = r["結果"] ? Object.entries(r["結果"]["着順"] || {}).find(([, x]) => x === "1") : null;
+    st = el("span", "st wait", r["結果"] ? (win ? `1着 ${win[0]}番` : "結果あり") : "結果待ち");
+  }
   else if (!r["結果"]) st = el("span", "st wait", "結果待ち");
   else {
     const parts = keys.map(([k, lb]) => {

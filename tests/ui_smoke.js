@@ -144,8 +144,7 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
       App.onAutoBackup(true, "ダウンロード/keiba-backup/x.json");
       showRecords();
       const line = document.querySelector(".backup-line") ? document.querySelector(".backup-line").textContent : "";
-      const dataNote = [...document.querySelectorAll(".rec-list .note")].some((x) => x.textContent.includes("データとして記録"));
-      return { shared, backup, line, dataNote };
+      return { shared, backup, line };
     });
     check(scheme, "通知の「AI へ送る」で前回の送り先へ送る", !!misc.shared && misc.shared.choose === false && misc.shared.len > 100, JSON.stringify(misc.shared));
     check(scheme, "自動バックアップ（週1回）", !!misc.backup && misc.backup.n > 0 && /^keiba-backup-\d{8}-\d{4}\.json$/.test(misc.backup.name), JSON.stringify(misc.backup));
@@ -157,14 +156,20 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
       // AI の回答がなく、AI なしの目安だけ買い目を出したレース
       const mk = JSON.parse(JSON.stringify(records.find((r) => r["市場買い目"] && r["市場買い目"].length)));
       mk["AI"] = null; delete mk["購入"]; mk["日付"] = "20261031"; mk["レース番号"] = 12; mk.race_id = "202644103112"; o["20261031|大井|12"] = mk; writeRecords(o);
+      // 収集しただけのレース（AI の回答・買い目なし）
+      const dt = JSON.parse(JSON.stringify(mk)); delete dt["市場買い目"]; dt["日付"] = "20261030"; dt.race_id = "202644103012"; o["20261030|大井|12"] = dt; writeRecords(o);
       showRecords();
-      return { h: [...document.querySelectorAll(".card h3")].map((x) => x.textContent), items: document.querySelectorAll(".rec-list .rec-item").length, mkOnly: [...document.querySelectorAll(".rec-list .rec-item")].some((x) => x.textContent.includes("10/31 大井 12R") && x.textContent.includes("目安 ")), brier: [...document.querySelectorAll(".card h3")].some((x) => x.textContent.startsWith("推定勝率の精度")), ex: document.querySelector(".backup-line").parentElement.querySelectorAll("button").length };
+      return { h: [...document.querySelectorAll(".card h3")].map((x) => x.textContent), items: document.querySelectorAll(".rec-list .rec-item").length, mkOnly: [...document.querySelectorAll(".rec-list .rec-item")].some((x) => x.textContent.includes("10/31 大井 12R") && x.textContent.includes("目安 ")),
+        collectedOnly: [...document.querySelectorAll(".rec-list .rec-item")].some((x) => x.textContent.includes("10/30 大井 12R") && x.textContent.includes("収集のみ")),
+        filtered: (() => { state.recFilter = "bets"; renderRecords(); const n = [...document.querySelectorAll(".rec-list .rec-item")].filter((x) => x.textContent.includes("収集のみ")).length; const has = [...document.querySelectorAll(".rec-list .rec-item")].length > 0; state.recFilter = "all"; renderRecords(); return n === 0 && has; })(), brier: [...document.querySelectorAll(".card h3")].some((x) => x.textContent.startsWith("推定勝率の精度")), ex: document.querySelector(".backup-line").parentElement.querySelectorAll("button").length };
     }, records);
     check(scheme, "収支の推移", rec.h.some((t) => t.startsWith("収支の推移")), rec.h.join(","));
     check(scheme, "CLV", rec.h.some((t) => t.startsWith("締切オッズとの比較")));
     check(scheme, "回収率：AI なしの目安", rec.h.some((t) => t === "回収率：AI なしの目安"), rec.h.join(","));
     check(scheme, "記録の一覧が並ぶ", rec.items > 0, String(rec.items));
     check(scheme, "AI なしの目安だけのレースも一覧に出る", rec.mkOnly);
+    check(scheme, "収集しただけのレースも一覧に出る", rec.collectedOnly);
+    check(scheme, "「買い目のあるレース」に絞れる", rec.filtered);
     check(scheme, "精度のカードと書き出しのボタン", rec.brier && rec.ex === 3, String(rec.ex));
     check(scheme, "記録の画面が横にはみ出さない", (await overflow()) <= 0);
 
