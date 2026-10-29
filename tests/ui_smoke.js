@@ -154,13 +154,17 @@ const check = (scheme, name, ok, detail) => { if (!ok) failures.push(`[${scheme}
     // 記録の画面（収支の推移・CLV）
     const rec = await page.evaluate((records) => {
       const o = readRecords(); records.forEach((r, i) => { o[`${r["日付"]}|${r["競馬場"]}|${r["レース番号"]}|${i}`] = r; }); writeRecords(o);
+      // AI の回答がなく、AI なしの目安だけ買い目を出したレース
+      const mk = JSON.parse(JSON.stringify(records.find((r) => r["市場買い目"] && r["市場買い目"].length)));
+      mk["AI"] = null; delete mk["購入"]; mk["日付"] = "20261031"; mk["レース番号"] = 12; mk.race_id = "202644103112"; o["20261031|大井|12"] = mk; writeRecords(o);
       showRecords();
-      return { h: [...document.querySelectorAll(".card h3")].map((x) => x.textContent), items: document.querySelectorAll(".rec-list .rec-item").length, brier: [...document.querySelectorAll(".card h3")].some((x) => x.textContent.startsWith("推定勝率の精度")), ex: document.querySelector(".backup-line").parentElement.querySelectorAll("button").length };
+      return { h: [...document.querySelectorAll(".card h3")].map((x) => x.textContent), items: document.querySelectorAll(".rec-list .rec-item").length, mkOnly: [...document.querySelectorAll(".rec-list .rec-item")].some((x) => x.textContent.includes("10/31 大井 12R") && x.textContent.includes("目安 ")), brier: [...document.querySelectorAll(".card h3")].some((x) => x.textContent.startsWith("推定勝率の精度")), ex: document.querySelector(".backup-line").parentElement.querySelectorAll("button").length };
     }, records);
     check(scheme, "収支の推移", rec.h.some((t) => t.startsWith("収支の推移")), rec.h.join(","));
     check(scheme, "CLV", rec.h.some((t) => t.startsWith("締切オッズとの比較")));
     check(scheme, "回収率：AI なしの目安", rec.h.some((t) => t === "回収率：AI なしの目安"), rec.h.join(","));
     check(scheme, "記録の一覧が並ぶ", rec.items > 0, String(rec.items));
+    check(scheme, "AI なしの目安だけのレースも一覧に出る", rec.mkOnly);
     check(scheme, "精度のカードと書き出しのボタン", rec.brier && rec.ex === 3, String(rec.ex));
     check(scheme, "記録の画面が横にはみ出さない", (await overflow()) <= 0);
 

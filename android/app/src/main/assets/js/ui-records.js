@@ -89,7 +89,7 @@ function saveAiText(key, text) {
 function sinceStart(rec) { const u = untilMin(rec["日付"], rec["発走"]); return u == null ? null : -u; }
 // 結果を取りに行ってよい記録（AI の回答があり、結果がまだで、発走から15分たった）
 function pendingResults() {
-  return Object.entries(readRecords()).filter(([, r]) => (r["AI"] || ownBetsOf(r).length) && !r["結果"] && r.race_id && (sinceStart(r) ?? 0) >= 15);
+  return Object.entries(readRecords()).filter(([, r]) => !isDataOnly(r) && !r["結果"] && r.race_id && (sinceStart(r) ?? 0) >= KS.CONFIG.RESULT_DELAY_MINUTES);
 }
 
 // 結果画面の「AI の回答を貼り付けて記録」。given はクリップボードから先に読んでおいた回答
@@ -149,7 +149,9 @@ function ensureDataRecord(date, venue, no, res, title) {
   recs[key] = rec; writeRecords(recs);
   if (isNew) scheduleResultCheck(key, rec, { title: title || "" });
 }
-const isDataOnly = (r) => !!r && !r["AI"] && !ownBetsOf(r).length;
+// AI なしの目安で買い目を出したレース（見送りは含めない）も、AI の回答・買った馬券と同じく一覧に出して残す
+const marketBetsOf = (r) => (r && Array.isArray(r["市場買い目"]) ? r["市場買い目"] : []);
+const isDataOnly = (r) => !!r && !r["AI"] && !ownBetsOf(r).length && !marketBetsOf(r).length;
 
 // 発走の15分後に結果を自動で1回取り、的中・不的中を通知する（アプリを閉じていても。Kotlin の Reservations）
 function scheduleResultCheck(key, rec, race) {
@@ -1000,7 +1002,8 @@ function recordItem(key, r, cache) {
   const own = ownBetsOf(r);
   let keys = !r["AI"] ? [] : hasHit ? (r["買い方"] === "hit" ? [["的中買い目", "的中重視 "]] : [["買い目", "期待値重視 "], ["的中買い目", "的中重視 "]]) : [["買い目", own.length ? "AI " : ""]];
   if (own.length) keys = [["購入", "自分 "]].concat(keys);
-  const betsOf = (k) => (k === "購入" ? own : (r["AI"] && r["AI"][k]) || []);
+  if (marketBetsOf(r).length) keys = keys.concat([["市場買い目", "目安 "]]);
+  const betsOf = (k) => (k === "購入" ? own : k === "市場買い目" ? marketBetsOf(r) : (r["AI"] && r["AI"][k]) || []);
   it.append(el("span", "s", !keys.length ? "AI の回答なし" : keys.map(([k, lb]) => lb + desc(betsOf(k))).join(" ／ ")));
   let st;
   if (!keys.length) st = el("span", "st wait", "—");
